@@ -21,4 +21,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     else()
         message(STATUS "rayomd-gui-dbus skipped: dbus-run-session not found")
     endif()
+
+    # rayomd-gui --snapshot on headless compositors (tests/e2e/run_compositor.sh): weston has no
+    # xdg-decoration (the app draws its header), sway answers server-side decorations. Each leaves
+    # its PNG at e2e/<compositor>/out.png in the build directory.
+    find_program(RGUI_PYTHON3 python3)
+    foreach(compositor weston sway)
+        string(TOUPPER ${compositor} upper)
+        find_program(RGUI_${upper} ${compositor})
+        if(NOT RGUI_${upper})
+            message(STATUS "rayomd-gui-wayland-${compositor} skipped: ${compositor} not found")
+        elseif(NOT RGUI_PYTHON3)
+            message(STATUS "rayomd-gui-wayland-${compositor} skipped: python3 not found")
+        else()
+            add_test(NAME rayomd-gui-wayland-${compositor}
+                     COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_compositor.sh ${compositor}
+                             $<TARGET_FILE:rayomd-gui> ${CMAKE_BINARY_DIR}/e2e/${compositor})
+            set_tests_properties(rayomd-gui-wayland-${compositor} PROPERTIES TIMEOUT 120)
+        endif()
+    endforeach()
 endif()

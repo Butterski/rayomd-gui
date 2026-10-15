@@ -219,6 +219,7 @@ public:
     void RequestFrame() override;
     void Present(const gfx::Surface& frame, const std::vector<gfx::RectI>& damage) override;
     bool NeedsClientDecorations() const override { return !decoration_ || clientSideDecorations_; }
+    bool IsMaximized() const override { return maximized_; }
     void StartMove() override;
     void StartResize(Edge edge) override;
     void ToggleMaximize() override;

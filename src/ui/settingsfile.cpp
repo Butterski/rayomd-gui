@@ -5,6 +5,8 @@
 #include "core/rayomd_pdf_source.h"
 
 #include <charconv>
+#include <cstdio>
+#include <cstdlib>
 #include <system_error>
 
 namespace rgui::ui {
@@ -110,9 +112,18 @@ double SettingsFile::GetDouble(std::string_view key, double fallback) const {
     const auto it = values_.find(key);
     if (it == values_.end()) return fallback;
     const std::string& s = it->second;
-    double value = 0;
-    const auto [end, error] = std::from_chars(s.data(), s.data() + s.size(), value);
-    if (error != std::errc() || end != s.data() + s.size()) return fallback;
+    // strtod, not std::from_chars: libstdc++'s floating-point from_chars makes the linker mark
+    // libm.so.6 as NEEDED (fesetround), and the Linux executable needs libc only. The settings
+    // are written in the C locale, which is the one strtod uses here (setlocale is never called).
+    // Only plain decimal numbers are accepted, as from_chars would.
+    if (s.empty()) return fallback;
+    for (const char c : s) {
+        if (!((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '-' || c == '+')) return fallback;
+    }
+    if (s[0] == '+') return fallback;
+    char* end = nullptr;
+    const double value = std::strtod(s.c_str(), &end);
+    if (end != s.c_str() + s.size()) return fallback;
     // Infinities and NaN are never written; refuse them as hand edits.
     if (!(value == value) || value > 1.7976931348623157e308 || value < -1.7976931348623157e308) return fallback;
     return value;
@@ -140,10 +151,16 @@ bool SettingsFile::SetInt(std::string_view key, int value) {
 
 bool SettingsFile::SetDouble(std::string_view key, double value) {
     if (!(value == value) || value > 1.7976931348623157e308 || value < -1.7976931348623157e308) return false;
+    // The shortest %.*g that reads back as the same value, through snprintf / strtod: libstdc++'s
+    // floating-point to_chars would make libm.so.6 NEEDED (see GetDouble).
     char buffer[32];
-    const auto result = std::to_chars(buffer, buffer + sizeof buffer, value);
-    if (result.ec != std::errc()) return false;
-    return SetString(key, std::string_view(buffer, static_cast<size_t>(result.ptr - buffer)));
+    int length = 0;
+    for (int precision = 1; precision <= 17; ++precision) {
+        length = std::snprintf(buffer, sizeof buffer, "%.*g", precision, value);
+        if (length <= 0 || length >= static_cast<int>(sizeof buffer)) return false;
+        if (std::strtod(buffer, nullptr) == value) break;
+    }
+    return SetString(key, std::string_view(buffer, static_cast<size_t>(length)));
 }
 
 bool SettingsFile::SetBool(std::string_view key, bool value) { return SetString(key, value ? "true" : "false"); }
