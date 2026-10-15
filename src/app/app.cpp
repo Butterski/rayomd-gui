@@ -63,6 +63,13 @@ std::unique_ptr<App> App::Create(Platform& platform, Startup startup) {
     std::unique_ptr<App> app(new App(platform, std::move(startup)));
     App& a = *app;
     a.LoadFonts();
+    // Text shaped while the font index still scanned may lack fallback glyphs (FontSet::Resolve
+    // never waits for the scan): once it has ended, shape and draw it again.
+    a.fontIndex_->OnScanned([&platform, alive = a.alive_, &a] {
+        platform.PostToUi([alive, &a] {
+            if (*alive) a.OnFontIndexScanned();
+        });
+    });
     MainWindow::Hooks hooks;
     hooks.requestFrame = [&a] { a.platform_.RequestFrame(); };
     hooks.settingsChanged = [&a] { a.SettingsChanged(); };
@@ -109,6 +116,14 @@ void App::LoadFonts() {
     fonts_ = std::move(fonts);
     if (window_) window_->Editor().InvalidateLayout();
     UpdateNotice();
+}
+
+void App::OnFontIndexScanned() {
+    if (!fonts_ || !fonts_->WaitingForIndex()) return;
+    fonts_->ClearWaitingForIndex();
+    ctx_.SetFonts(fonts_.get());   // forgets the runs shaped without those fallbacks
+    compositor_.InvalidateAll();
+    platform_.RequestFrame();
 }
 
 void App::WearTheme() {

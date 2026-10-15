@@ -103,8 +103,14 @@ public:
     const FontFace& Face(bool bold) const;
 
     // The face and glyph that show `cp`: the main face when it has it, else the first fallback
-    // that does, else glyph 0 of the main face. Cached per code point and weight.
+    // that does, else glyph 0 of the main face. Cached per code point and weight. Never waits for
+    // the font index's scan: a fallback that needs the index while it still scans is passed over
+    // and the answer is not cached, so once the scan has ended Resolve gives the final one.
     Resolved Resolve(uint32_t cp, bool bold) const;
+    // Whether Resolve passed over a fallback for the scan since ClearWaitingForIndex: text shaped
+    // meanwhile may lack glyphs it will have once the scan has ended (FontIndex::OnScanned).
+    bool WaitingForIndex() const { return waitingForIndex_; }
+    void ClearWaitingForIndex() { waitingForIndex_ = false; }
 
 private:
     struct Loaded {
@@ -115,6 +121,7 @@ private:
         std::string family;
         std::unique_ptr<Loaded> faces[2];   // regular, bold
         bool tried[2] = {false, false};
+        bool knownTried[2] = {false, false};   // Windows: its known file was looked for
     };
 
     static std::unique_ptr<Loaded> OpenEntry(const FontEntry& entry);
@@ -123,7 +130,9 @@ private:
     static std::unique_ptr<Loaded> OpenKnown(const std::string& path, const std::string& family, bool bold);
     void Reset(const FontIndex& index);
     void AddFallbacks(const std::vector<std::string>& fallbacks);
-    const FontFace* FallbackFace(Fallback& fallback, bool bold) const;
+    // The fallback's face, opened the first time it is asked for; nullptr, with `pending` set,
+    // when that needs the index and the index still scans.
+    const FontFace* FallbackFace(Fallback& fallback, bool bold, bool& pending) const;
 
     const FontIndex* index_ = nullptr;
     std::string family_;
@@ -132,6 +141,7 @@ private:
     std::unique_ptr<Loaded> bold_;
     mutable std::vector<Fallback> fallbacks_;
     mutable std::unordered_map<uint32_t, Resolved> cache_;
+    mutable bool waitingForIndex_ = false;
 };
 
 } // namespace rgui::text

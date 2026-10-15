@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -49,6 +50,9 @@ public:
     void Wait() const;
     // Whether the scan has finished (never waits).
     bool Scanned() const;
+    // Runs `callback` once the scan has finished: on the scanning thread when it is still
+    // running, else at once on this one. One callback; a later call replaces a waiting one.
+    void OnScanned(std::function<void()> callback);
 
     // Every face found, in directory order, then by path within a directory (waits).
     const std::vector<FontEntry>& Entries() const;
@@ -73,6 +77,7 @@ private:
     std::vector<std::string> directories_;
     mutable std::vector<FontEntry> entries_;
     mutable double scanMs_ = 0;
+    mutable std::function<void()> onScanned_;
 };
 
 // ASCII case-insensitive equality, for family names.

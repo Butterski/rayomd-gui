@@ -133,6 +133,8 @@ private:
     App(Platform& platform, Startup startup);
 
     void LoadFonts();
+    // The font index's scan has ended: text shaped without fallbacks it needed is shaped again.
+    void OnFontIndexScanned();
     void WearTheme();
     void UpdateNotice();
     void SettingsChanged();

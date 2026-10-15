@@ -116,6 +116,16 @@ bool FontIndex::Scanned() const {
     return finished_;
 }
 
+void FontIndex::OnScanned(std::function<void()> callback) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!finished_) {
+        onScanned_ = std::move(callback);
+        return;
+    }
+    lock.unlock();
+    if (callback) callback();
+}
+
 void FontIndex::Scan() const {
     const auto begin = std::chrono::steady_clock::now();
     std::vector<std::string> files;
@@ -163,11 +173,16 @@ void FontIndex::Scan() const {
     }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    entries_ = std::move(entries);
-    scanMs_ = ms;
-    finished_ = true;
+    std::function<void()> callback;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_ = std::move(entries);
+        scanMs_ = ms;
+        finished_ = true;
+        callback = std::move(onScanned_);
+    }
     done_.notify_all();
+    if (callback) callback();
 }
 
 const std::vector<FontEntry>& FontIndex::Entries() const {

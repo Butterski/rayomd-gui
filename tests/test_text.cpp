@@ -13,12 +13,14 @@
 #include "text/sfnt.h"
 #include "text/textlayout.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -668,10 +670,26 @@ RGUI_TEST("text.font_set_known_files") {
     CHECK(fonts.Face(false).FixedPitch());
     CHECK(&fonts.Face(true) == &fonts.Face(false));
     CHECK(!index.Scanned());
-    // A code point the family lacks comes from a fallback, through the index.
-    const FontSet::Resolved resolved = fonts.Resolve(0x0D85, false);   // Sinhala: not in DejaVu Sans Mono
-    CHECK(index.Scanned());
-    (void)resolved;
+    // A code point DejaVu Sans has and the family lacks: its fallback needs the index, which has
+    // not scanned, so Resolve passes it over without waiting (and without caching the answer)...
+    MappedFile sansFile;
+    FontFace mono, sans;
+    CHECK(sansFile.Open(dir + "DejaVuSans.ttf") && sans.Open(sansFile.Data(), sansFile.Size(), 0));
+    CHECK(mono.Open(probe.Data(), probe.Size(), 0));
+    uint32_t cp = 0;
+    for (uint32_t c = 0x100; c < 0x3000 && cp == 0; c++) {
+        if (mono.GlyphForCodePoint(c) == 0 && sans.GlyphForCodePoint(c) != 0) cp = c;
+    }
+    CHECK(cp != 0);
+    FontSet::Resolved resolved = fonts.Resolve(cp, false);
+    CHECK_EQ(resolved.glyph, uint16_t(0));
+    CHECK(!index.Scanned());
+    CHECK(fonts.WaitingForIndex());
+    // ... and finds it once the scan has ended.
+    index.Wait();
+    resolved = fonts.Resolve(cp, false);
+    CHECK(resolved.glyph != 0);
+    CHECK(resolved.face != &fonts.Face(false));
 
     FontSet withBold;
     CHECK(withBold.LoadKnown(index, {{"DejaVu Sans Mono", dir + "DejaVuSansMono.ttf", dir + "DejaVuSansMono-Bold.ttf"}}, {}));
@@ -681,30 +699,6 @@ RGUI_TEST("text.font_set_known_files") {
     // Linux takes its family from fontconfig: no known files.
 #ifndef _WIN32
     CHECK(KnownInterfaceFontFiles().empty());
-#endif
-}
-
-RGUI_TEST("text.fallback_known_files") {
-#ifdef _WIN32
-    // The default fallbacks open from their known files: with an index of a folder of no fonts,
-    // a code point the interface font lacks still finds its face, without the index's scan.
-    if (!MappedFile().Open(FontIndex::DefaultDirectories().front() + "\\msyh.ttc")) {
-        std::printf("skip text.fallback_known_files: no msyh.ttc\n");
-        return;
-    }
-    const std::string empty = std::string(rgui::test::BuildDir()) + "\\test-no-fonts";
-    std::error_code error;
-    std::filesystem::create_directories(std::filesystem::u8path(empty), error);
-    FontIndex index;
-    index.SetDirectories({empty});
-    FontSet fonts;
-    CHECK(fonts.LoadKnown(index, KnownInterfaceFontFiles(), DefaultFallbackFamilies()));
-    const FontSet::Resolved cjk = fonts.Resolve(0x65E5, false);   // 日, from Microsoft YaHei UI
-    CHECK(cjk.glyph != 0);
-    CHECK(cjk.face != &fonts.Face(false));
-    CHECK(!index.Scanned());
-#else
-    std::printf("skip text.fallback_known_files: Windows only\n");
 #endif
 }
 
@@ -780,6 +774,48 @@ RGUI_TEST("text.shape_run") {
     std::printf("  ShapeRun: %zu glyphs in %.1f ms = %.0f glyphs/ms\n", glyphs, ms, glyphs / ms);
 }
 #endif
+
+RGUI_TEST("text.font_index_on_scanned") {
+    // The callback runs once the scan has ended (on its thread), or at once after it.
+    const std::string empty = std::string(rgui::test::BuildDir()) + "/test-no-fonts";
+    std::error_code error;
+    std::filesystem::create_directories(std::filesystem::u8path(empty), error);
+    FontIndex index;
+    index.SetDirectories({empty});
+    std::atomic<int> calls{0};
+    index.OnScanned([&calls] { calls++; });
+    CHECK_EQ(calls.load(), 0);
+    index.Start();
+    index.Wait();
+    for (int i = 0; i < 1000 && calls.load() == 0; i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK_EQ(calls.load(), 1);
+    index.OnScanned([&calls] { calls++; });
+    CHECK_EQ(calls.load(), 2);
+}
+
+RGUI_TEST("text.fallback_known_files") {
+#ifdef _WIN32
+    // The default fallbacks open from their known files: with an index of a folder of no fonts,
+    // a code point the interface font lacks still finds its face, without the index's scan.
+    if (!MappedFile().Open(FontIndex::DefaultDirectories().front() + "\\msyh.ttc")) {
+        std::printf("skip text.fallback_known_files: no msyh.ttc\n");
+        return;
+    }
+    const std::string empty = std::string(rgui::test::BuildDir()) + "\\test-no-fonts";
+    std::error_code error;
+    std::filesystem::create_directories(std::filesystem::u8path(empty), error);
+    FontIndex index;
+    index.SetDirectories({empty});
+    FontSet fonts;
+    CHECK(fonts.LoadKnown(index, KnownInterfaceFontFiles(), DefaultFallbackFamilies()));
+    const FontSet::Resolved cjk = fonts.Resolve(0x65E5, false);   // 日, from Microsoft YaHei UI
+    CHECK(cjk.glyph != 0);
+    CHECK(cjk.face != &fonts.Face(false));
+    CHECK(!index.Scanned());
+#else
+    std::printf("skip text.fallback_known_files: Windows only\n");
+#endif
+}
 
 RGUI_TEST("text.fuzz_glyf") {
     FuzzFont(kSans, "text.fuzz_glyf", 3000);

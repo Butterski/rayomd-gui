@@ -398,14 +398,12 @@ const FontFace& FontSet::Face(bool bold) const {
     return regular_ != nullptr ? regular_->face : kNone;
 }
 
-const FontFace* FontSet::FallbackFace(Fallback& fallback, bool bold) const {
+const FontFace* FontSet::FallbackFace(Fallback& fallback, bool bold, bool& pending) const {
     const int slot = bold ? 1 : 0;
     if (!fallback.tried[slot]) {
-        fallback.tried[slot] = true;
 #ifdef _WIN32
         // DefaultFallbackFamilies()' files by name (regular, bold; no bold file: the regular one
-        // serves), so a code point the interface font lacks never waits on the UI thread for the
-        // font index's scan, which a cold font folder makes take up to a second.
+        // serves), so these faces need no index at all.
         static const struct {
             const char* family;
             const char* regular;
@@ -418,20 +416,32 @@ const FontFace* FontSet::FallbackFace(Fallback& fallback, bool bold) const {
             {"Segoe UI Symbol", "seguisym.ttf", ""},
             {"Segoe UI Emoji", "seguiemj.ttf", ""},
         };
-        for (const auto& known : kKnown) {
-            if (!FamilyEquals(known.family, fallback.family)) continue;
-            const bool ownBold = bold && *known.bold != 0;
-            for (const std::string& dir : FontIndex::DefaultDirectories()) {
-                fallback.faces[slot] = OpenKnown(dir + "\\" + (ownBold ? known.bold : known.regular), fallback.family, ownBold);
-                if (fallback.faces[slot] != nullptr) break;
+        if (!fallback.knownTried[slot]) {
+            fallback.knownTried[slot] = true;
+            for (const auto& known : kKnown) {
+                if (!FamilyEquals(known.family, fallback.family)) continue;
+                const bool ownBold = bold && *known.bold != 0;
+                for (const std::string& dir : FontIndex::DefaultDirectories()) {
+                    fallback.faces[slot] =
+                        OpenKnown(dir + "\\" + (ownBold ? known.bold : known.regular), fallback.family, ownBold);
+                    if (fallback.faces[slot] != nullptr) break;
+                }
             }
         }
-        if (fallback.faces[slot] == nullptr)
-#endif
-        {
-            const FontEntry* const entry = index_ != nullptr ? index_->Find(fallback.family, bold ? 700 : 400, false) : nullptr;
-            if (entry != nullptr) fallback.faces[slot] = OpenEntry(*entry);
+        if (fallback.faces[slot] != nullptr) {
+            fallback.tried[slot] = true;
+            return &fallback.faces[slot]->face;
         }
+#endif
+        // The UI thread never waits for the index's scan, which a cold font folder makes take up
+        // to a second: until it has ended this fallback is passed over, and asked again after.
+        if (index_ != nullptr && !index_->Scanned()) {
+            pending = true;
+            return nullptr;
+        }
+        fallback.tried[slot] = true;
+        const FontEntry* const entry = index_ != nullptr ? index_->Find(fallback.family, bold ? 700 : 400, false) : nullptr;
+        if (entry != nullptr) fallback.faces[slot] = OpenEntry(*entry);
     }
     return fallback.faces[slot] != nullptr ? &fallback.faces[slot]->face : nullptr;
 }
@@ -443,9 +453,10 @@ FontSet::Resolved FontSet::Resolve(uint32_t cp, bool bold) const {
     if (found != cache_.end()) return found->second;
     const FontFace& main = Face(bold);
     Resolved result{&main, main.GlyphForCodePoint(cp)};
+    bool pending = false;
     if (result.glyph == 0) {
         for (Fallback& fallback : fallbacks_) {
-            const FontFace* const face = FallbackFace(fallback, bold);
+            const FontFace* const face = FallbackFace(fallback, bold, pending);
             if (face == nullptr) continue;
             const uint16_t glyph = face->GlyphForCodePoint(cp);
             if (glyph != 0) {
@@ -454,7 +465,12 @@ FontSet::Resolved FontSet::Resolve(uint32_t cp, bool bold) const {
             }
         }
     }
-    cache_.emplace(key, result);
+    // A fallback passed over for the scan might come before the one found: not final yet.
+    if (pending) {
+        waitingForIndex_ = true;
+    } else {
+        cache_.emplace(key, result);
+    }
     return result;
 }
 
