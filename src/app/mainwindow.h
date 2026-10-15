@@ -128,6 +128,8 @@ public:
     float PreviewScroll() const { return previewOffset_; }
     int RequestedGeneration() const { return requestedGeneration_; }
     int ShownGeneration() const { return shownGeneration_; }
+    // Build and parse time of the preview shown, ms (0 before the first).
+    double ShownBuildMs() const { return shownBuildMs_; }
     const DocumentStats& Stats() const { return stats_; }
 
     Document& Doc() { return doc_; }
@@ -248,6 +250,7 @@ private:
     uint64_t loadId_ = 0;           // the open whose result is wanted
     int requestedGeneration_ = 0;
     int shownGeneration_ = 0;
+    double shownBuildMs_ = 0;
     std::optional<Anchor> anchor_;
     std::vector<float> pageTops_;     // the last frame's layout, logical px from the content top
     std::vector<float> pageHeights_;

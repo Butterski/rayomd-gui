@@ -899,6 +899,7 @@ void MainWindow::OnPreview(PreviewReady ready) {
         return;
     }
     shownGeneration_ = ready.generation;
+    shownBuildMs_ = ready.ms;
     stats_ = ready.stats;
     if (ready.themeFile == export_.themeFile) export_.themeError = std::move(ready.themeError);
     if (ready.pdf) {
