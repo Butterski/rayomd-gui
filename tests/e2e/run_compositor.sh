@@ -61,12 +61,11 @@ weston)
     ;;
 sway)
     sway=$(command -v sway)
-    # Arch gives sway the file capability cap_sys_nice, which exec refuses to a non-root user in a
-    # container without that capability; a copy has none.
-    if [ "$(id -u)" -ne 0 ]; then
-        cp "$sway" "$work/sway"
-        sway="$work/sway"
-    fi
+    # Arch gives sway the file capability cap_sys_nice, and exec refuses a binary whose file
+    # capabilities exceed the bounding set (containers drop cap_sys_nice), root or not. A copy
+    # has no file capabilities.
+    cp "$sway" "$work/sway"
+    sway="$work/sway"
     WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
         "$sway" -c "$source_dir/tests/e2e/sway.conf" >"$out/compositor.log" 2>&1 &
     compositor_pid=$!
