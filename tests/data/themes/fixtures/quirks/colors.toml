@@ -1,0 +1,16 @@
+  # indented comment
+"accent" = "#AaBbCc" # quoted key, inline comment
+background = '#1E2030'   
+foreground =   #c8d3f5   
+red = #ff0000 # unquoted with comment
+bad:key = "#000000"
+green = "#00ff00;"
+blue="#0000ff" "#111111"
+cyan = "#00ffff
+lonely
+yellow = a=b
+mode=
+	tabbed = "#123456"
+magenta = "#abc"
+hyprland_active_border = "rgba(26a269ee) rgba(2ec27eee) 45deg"
+muted = "#999999"

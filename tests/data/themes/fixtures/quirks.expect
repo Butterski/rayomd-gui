@@ -1,0 +1,58 @@
+accent	#AaBbCc
+background	#1E2030
+bg	#1E2030
+blue	#0000ff
+bright_blue	#3333ff
+bright_cyan	#33ffff
+bright_fg	#c8d3f5
+bright_foreground	#c8d3f5
+bright_green	#333333
+bright_magenta	#bccd33
+bright_purple	#bccd33
+bright_red	#ff3333
+bright_yellow	#333333
+brown	#000000
+color0	#1E2030
+color1	#ff0000 # unquoted with comment
+color10	#333333
+color11	#333333
+color12	#3333ff
+color13	#bccd33
+color14	#33ffff
+color15	#c8d3f5
+color2	
+color3	
+color4	#0000ff
+color5	#abc
+color6	#00ffff
+color7	#c8d3f5
+color8	#c8d3f5
+color9	#ff3333
+cursor	#c8d3f5
+cyan	#00ffff
+dark_background	#171824
+dark_bg	#171824
+dark_fg	#c8d3f5
+dark_foreground	#c8d3f5
+darker_background	#0f1018
+darker_bg	#0f1018
+fg	#c8d3f5
+foreground	#c8d3f5
+green	
+hyprland_active_border	rgba(26a269ee) rgba(2ec27eee) 45deg
+light_fg	#c8d3f5
+light_foreground	#c8d3f5
+lighter_background	#1E2030
+lighter_bg	#1E2030
+lonely	
+magenta	#abc
+mode	dark
+muted	#c8d3f5
+orange	
+purple	#abc
+red	#ff0000 # unquoted with comment
+selection	#1E2030
+selection_background	#1E2030
+selection_foreground	#c8d3f5
+theme_type	dark
+yellow	
