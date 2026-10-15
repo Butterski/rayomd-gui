@@ -182,6 +182,26 @@ constexpr FontToken kFontTokens[] = {
 // max(1, space(2)); tooltips fall back to 1 (Bar.qml).
 constexpr double kSurfaceBorderPx = 2;
 
+// Bounds on the values a shell.toml (or Hyprland) hands us: the files are outside data, and a
+// base-size of 4096 or a spacing of 1e6 px would make every frame rasterize glyphs and rects of
+// absurd size. A value out of range is clamped to the nearest bound, not refused. Alphas are
+// clamped to [0, 1] where they are read (Clamp01).
+constexpr int kMinBaseSize = 6;
+constexpr int kMaxBaseSize = 48;
+constexpr int kMaxFontPx = 256;        // a per-token font size override
+constexpr double kMaxSpacingPx = 256;  // a spacing token, scaled or overridden
+constexpr double kMaxScale = 4;        // [spacing] scale
+// The width and height tokens default above 256 px at larger base sizes (dropdown-width 240 at
+// base-size 48 is 960): they get room for four times their default.
+constexpr double kMaxSpacingScale = 4;
+constexpr int kMaxBorderWidth = 16;
+constexpr int kMaxRadius = 64;
+
+// The bound of a spacing token whose base-size 12 value is `px`.
+double SpacingCap(double px) { return px * kMaxSpacingScale > kMaxSpacingPx ? px * kMaxSpacingScale : kMaxSpacingPx; }
+
+int ClampInt(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
 // sRGB to linear light for each 8-bit value, ((v / 255 + 0.055) / 1.055)^2.4 or v / 255 / 12.92
 // (WCAG 2 relative luminance), precomputed because the toolkit makes no libm calls.
 constexpr double kSrgbToLinear[256] = {
@@ -504,7 +524,7 @@ struct Shell {
         if (!v) return fallback;
         const auto n = ParseFloatJs(*v);
         if (!n) return fallback;
-        return *n > 0 ? RoundJs(*n) : 0;
+        return *n > 0 ? RoundJs(*n > kMaxBorderWidth ? kMaxBorderWidth : *n) : 0;
     }
 };
 
@@ -517,7 +537,7 @@ ControlState BuildControl(const Shell& shell, const std::string& prefix, Rgba co
     // Style.qml: Math.max(0, Math.round(styleNum(<prefix>-border-width, fallback))).
     widthOut = widthFallback;
     if (const std::string* w = shell.Raw("controls." + prefix + "-border-width")) {
-        if (const auto n = NumberJs(*w)) widthOut = *n > 0 ? RoundJs(*n) : 0;
+        if (const auto n = NumberJs(*w)) widthOut = *n > 0 ? RoundJs(*n > kMaxBorderWidth ? kMaxBorderWidth : *n) : 0;
     }
     state.borderWidth = widthOut;
     // Border.qml controlSpec: <prefix>-border (a colour, role or gradient), else the state colour;
@@ -563,14 +583,16 @@ Tokens BuildTokens(const Palette& palette, const TokenSources& sources) {
     // [font] (Style.qml applyShellValues, fontPx, fontToken).
     int base = 12;
     if (const std::string* v = shell.Raw("font.base-size")) {
-        if (const auto n = ParseIntJs(*v)) base = *n < 1 ? 1 : (*n > 4096 ? 4096 : static_cast<int>(*n));
+        if (const auto n = ParseIntJs(*v)) {
+            base = *n < kMinBaseSize ? kMinBaseSize : (*n > kMaxBaseSize ? kMaxBaseSize : static_cast<int>(*n));
+        }
     }
     t.font.baseSize = base;
     const auto fontOverride = [&](const char* key, int fallback) {
         const std::string* v = shell.Raw(std::string("font.") + key);
         if (!v) return fallback;
         const auto n = ParseIntJs(*v);
-        return n && *n > 0 ? static_cast<int>(*n > 4096 ? 4096 : *n) : fallback;
+        return n && *n > 0 ? static_cast<int>(*n > kMaxFontPx ? kMaxFontPx : *n) : fallback;
     };
     for (const FontToken& token : kFontTokens) {
         const int scaled = RoundJs(base * token.factor);
@@ -583,14 +605,15 @@ Tokens BuildTokens(const Palette& palette, const TokenSources& sources) {
     double scale = 1.0;
     if (const std::string* v = shell.Raw("spacing.scale")) {
         const auto n = ParseFloatJs(*v);
-        scale = n && *n >= 0 ? *n : 1.0;
+        scale = n && *n >= 0 ? (*n > kMaxScale ? kMaxScale : *n) : 1.0;
     }
     const bool scaleWithFont = BoolToken(shell.Raw("spacing.scale-with-font"), true);
-    const double fontScale = base / 12.0 < 1.0 / 12 ? 1.0 / 12 : base / 12.0;
+    const double fontScale = base / 12.0;
     const double effective = scale * (scaleWithFont ? fontScale : 1.0);
     const auto space = [effective](double px) {
-        const double n = px * effective;
+        double n = px * effective;
         if (!(n > 0)) return 0;
+        if (n > SpacingCap(px)) n = SpacingCap(px);
         const int r = RoundJs(n);
         return r < 1 ? 1 : r;
     };
@@ -599,7 +622,7 @@ Tokens BuildTokens(const Palette& palette, const TokenSources& sources) {
         int value = space(token.px);
         if (const std::string* v = shell.Raw(std::string("spacing.") + token.key)) {
             const auto n = ParseFloatJs(*v);
-            if (n && *n >= 0) value = RoundJs(*n > 1e6 ? 1e6 : *n);
+            if (n && *n >= 0) value = RoundJs(*n > SpacingCap(token.px) ? SpacingCap(token.px) : *n);
         }
         t.spacing.*token.field = value;
     }
@@ -638,7 +661,7 @@ Tokens BuildTokens(const Palette& palette, const TokenSources& sources) {
     // Surfaces (Color.qml popups, tooltip, menu; widths from Border.qml surfaceSpec callers).
     const Rgba bg = palette.Background();
     const Rgba accent = palette.Accent();
-    const int surfaceBorder = space(kSurfaceBorderPx) < 1 ? 1 : space(kSurfaceBorderPx);
+    const int surfaceBorder = ClampInt(space(kSurfaceBorderPx), 1, kMaxBorderWidth);
     t.popups.background = shell.Composed("popups.background", "popups.background-alpha", bg, 1.0);
     t.popups.text = shell.Text("popups.text", fg);
     t.popups.border = shell.Composed("popups.border", "popups.border-alpha", accent, 1.0);
@@ -658,7 +681,7 @@ Tokens BuildTokens(const Palette& palette, const TokenSources& sources) {
 
     // Radius: Hyprland's decoration:rounding, else the bundled theme's, else 0.
     t.radius = sources.hyprlandRounding ? *sources.hyprlandRounding : sources.themeRounding;
-    if (t.radius < 0) t.radius = 0;
+    t.radius = ClampInt(t.radius, 0, kMaxRadius);
     t.controlRadius = t.radius < 4 ? t.radius : 4;
 
     // Text scale: an Omarchy shell.toml's base-size already carries the user's text size

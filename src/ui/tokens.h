@@ -141,7 +141,10 @@ struct TokenSources {
     double systemTextScale = 1.0;
 };
 
-// The defaults of shell.toml.tpl rendered with `palette`, overridden by the sources.
+// The defaults of shell.toml.tpl rendered with `palette`, overridden by the sources. Values out of
+// range are clamped, not refused: base-size to [6, 48], [spacing] scale to [0, 4], a spacing
+// token to [0, 256] px (width tokens to four times their default when that is more), a font
+// size override to 256 px, border widths to [0, 16], alphas to [0, 1], the radius to [0, 64].
 Tokens BuildTokens(const Palette& palette, const TokenSources& sources);
 
 // The merged shell values ("section.key" -> value): the rendered template defaults, then the

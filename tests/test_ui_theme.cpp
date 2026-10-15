@@ -363,6 +363,43 @@ RGUI_TEST("ui.tokens_overrides") {
     CHECK(t.normal.Fill() == Hex(0xa9b1d6).WithAlpha(0.04));
 }
 
+RGUI_TEST("ui.tokens_clamps") {
+    // A shell.toml is outside data: absurd values are clamped to bounds the toolkit can draw.
+    const Palette palette = rgui::ui::BundledPalette(*rgui::ui::FindBundledTheme("tokyo-night"));
+    rgui::ui::TokenSources sources;
+    const Toml huge = ParseShell("[font]\nbase-size = 4096\nheading = 100000\n[spacing]\nscale = 99999\n"
+                                 "control-height = 999999999\nrow-gap = 300\n[controls]\n"
+                                 "normal-border-width = 5000\nnormal-fill-alpha = 7\n[popups]\n"
+                                 "border-width = 1000\n[tooltip]\nborder-width = 17\n");
+    sources.userShell = &huge;
+    sources.hyprlandRounding = 100000;
+    auto t = rgui::ui::BuildTokens(palette, sources);
+    CHECK_EQ(t.font.baseSize, 48);
+    CHECK_EQ(t.font.body, 48);
+    CHECK_EQ(t.font.display, 96);
+    CHECK_EQ(t.font.heading, 256);
+    CHECK_EQ(t.spacing.controlHeight, 256);  // overridden: [0, 256]
+    CHECK_EQ(t.spacing.rowGap, 256);
+    CHECK_EQ(t.spacing.panelPadding, 256);   // 18 x scale 4 x base-size 48 / 12 = 288
+    CHECK_EQ(t.spacing.dropdownWidth, 960);  // four times 240
+    CHECK_EQ(t.spacing.hairline, 16);
+    CHECK_EQ(t.normal.borderWidth, 16);
+    CHECK_EQ(t.popups.borderWidth, 16);
+    CHECK_EQ(t.tooltip.borderWidth, 16);
+    CHECK_NEAR(t.normal.fillAlpha, 1.0, 1e-12);
+    CHECK_EQ(t.radius, 64);
+    CHECK_EQ(t.controlRadius, 4);
+
+    const Toml tiny = ParseShell("[font]\nbase-size = 1\n[spacing]\ncontrol-height = -5\n");
+    sources.userShell = &tiny;
+    sources.hyprlandRounding = -3;
+    t = rgui::ui::BuildTokens(palette, sources);
+    CHECK_EQ(t.font.baseSize, 6);
+    CHECK_EQ(t.font.body, 6);
+    CHECK_EQ(t.spacing.controlHeight, 14);  // a negative override is ignored: 28 x 6 / 12
+    CHECK_EQ(t.radius, 0);
+}
+
 RGUI_TEST("ui.tokens_radius") {
     const Palette palette = rgui::ui::BundledPalette(*rgui::ui::FindBundledTheme("solitude"));
     rgui::ui::TokenSources sources;

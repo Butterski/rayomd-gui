@@ -72,7 +72,8 @@ public:
 
     // A preview of `utf8`; replaces a preview still pending, so only the newest is built.
     void RequestPreview(std::string utf8, std::string sourcePath, TinyPdf::PdfOptions options, int generation);
-    // An export to `outputPath` (UTF-8): written to `<outputPath>.tmp`, then renamed over it.
+    // An export to `outputPath` (UTF-8): written to a temporary file, then renamed over it
+    // (WriteFileAtomically, WriteMode::Output).
     // Exports run in request order, each before any pending preview. With `openAfter`, a
     // finished export is opened with Platform::OpenExternally before onExport runs.
     void RequestExport(std::string utf8, std::string sourcePath, TinyPdf::PdfOptions options,
