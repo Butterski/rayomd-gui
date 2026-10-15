@@ -33,6 +33,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(rayomd_gui_linux PUBLIC rayomd_gui_core)
         target_compile_definitions(rayomd_gui_linux PRIVATE _GNU_SOURCE)
         rgui_flags(rayomd_gui_linux)
+
+        # rayomd-gui: libc.so.6 is its only NEEDED entry (libstdc++ and libgcc linked in).
+        add_executable(rayomd-gui platform/linux/main_linux.cpp)
+        target_link_libraries(rayomd-gui PRIVATE rayomd_gui_linux)
+        target_compile_definitions(rayomd-gui PRIVATE _GNU_SOURCE)
+        target_link_options(rayomd-gui PRIVATE
+            "$<$<CONFIG:Release>:-s;-static-libstdc++;-static-libgcc;-Wl,--gc-sections;-Wl,--as-needed>")
+        rgui_flags(rayomd-gui)
     endif()
 endif()
 

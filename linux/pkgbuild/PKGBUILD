@@ -8,21 +8,29 @@ pkgdesc='RayoMD desktop app: write Markdown, see and export the PDF (Omarchy-nat
 arch=('x86_64')
 url='https://github.com/Butterski/rayomd-gui'
 license=('Apache-2.0')
-depends=('glibc')
+depends=('glibc' 'hicolor-icon-theme')
 optdepends=('xdg-desktop-portal-gtk: system file dialogs'
             'ttf-liberation: preview of the standard PDF fonts'
             'ttf-jetbrains-mono-nerd: the Omarchy interface font')
 makedepends=('cmake' 'git' 'python')
 source=()
+# The binary is stripped by its own link (-s): a debug package would be empty.
+options=('!debug')
+
+# The repository root, two levels above this file.
+_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 build() {
-  cd "$startdir/../.."
+  cd "$_root"
+  # The assembly kernels get makepkg's CFLAGS too: with -fcf-protection they carry the IBT and
+  # SHSTK property, and the executable keeps it.
+  export ASMFLAGS="${ASMFLAGS:-$CFLAGS}"
   cmake --preset linux-release -B build/pkg -DBUILD_TESTING=OFF
   cmake --build build/pkg
 }
 
 package() {
-  cd "$startdir/../.."
+  cd "$_root"
   install -Dm755 build/pkg/src/rayomd-gui "$pkgdir/usr/bin/rayomd-gui"
   install -Dm644 linux/rayomd-gui.desktop "$pkgdir/usr/share/applications/rayomd-gui.desktop"
   for size in 16 32 48 64 128 256; do
