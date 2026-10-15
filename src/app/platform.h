@@ -26,8 +26,10 @@ enum class Edge : uint8_t { Top, Bottom, Left, Right, TopLeft, TopRight, BottomL
 enum class FileDialog : uint8_t { OpenDocument, SaveMarkdown, ExportPdf, ChooseTheme };
 
 struct FileDialogResult {
-    // Unavailable: no portal, or the system dialog failed; the app then asks for the path itself.
-    enum Kind : uint8_t { Chosen, Cancelled, Unavailable } kind = Cancelled;
+    // Unavailable: no portal, or the system dialog could not be shown; the app then asks for the
+    // path itself. Failed: the system dialog reported a failure (the portal's Response code 2);
+    // the app shows the status `File dialog failed`.
+    enum Kind : uint8_t { Chosen, Cancelled, Unavailable, Failed } kind = Cancelled;
     std::string path;  // UTF-8, when Chosen
 };
 
