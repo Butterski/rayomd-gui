@@ -1,0 +1,3 @@
+[submodule "external/rayomd"]
+	path = external/rayomd
+	url = https://github.com/Butterski/rayomd.git

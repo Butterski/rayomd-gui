@@ -1,0 +1,31 @@
+RayoMD GUI
+Copyright 2026 RayoMD contributors
+
+This product includes third-party material:
+
+- The RayoMD engine (https://github.com/Butterski/rayomd, in external/rayomd), licensed
+  under the Apache License 2.0, and what its NOTICE lists:
+  - Math font metrics derived from the Adobe Core 14 AFM files, Copyright (c) 1985, 1987,
+    1989, 1990, 1993, 1997 Adobe Systems Incorporated. All Rights Reserved. See the notice
+    at the top of external/rayomd/src/core/math_font_metrics.inc.
+  - The embedded formula fonts (RayoMDMath-Roman, -Italic, -Bold, -BoldItalic and -Symbol),
+    which carry glyph outlines of TeX Gyre Termes 2.004, Copyright 2006--2009 for TeX Gyre
+    extensions by B. Jackowski and J.M. Nowacki (on behalf of TeX Users Groups), and of TeX
+    Gyre Termes Math 1.543, Copyright 2012--2014 for TeX Gyre math extensions by B.
+    Jackowski, P. Strzelczyk and P. Pianowski (on behalf of TeX Users Groups), licensed
+    under the GUST Font License. See
+    external/rayomd/third_party/tex-gyre/GUST-FONT-LICENSE.txt.
+  - libdeflate v1.26 (its decompressor), licensed under the MIT License, in the engine's
+    source only: its tests' reference, linked into no executable of RayoMD GUI.
+- Theme palettes, shell tokens, the theme colour rules, icon paths and derived-colour formulas
+  from Omarchy, Omawrite and Hype, licensed under the MIT License. See third_party/omarchy/
+  (README.md lists what came from where; LICENSE holds the three notices).
+- The keysym table in src/platform/linux/keysyms.inc, generated from libxkbcommon's
+  xkbcommon-keysyms.h, under the MIT/X11 notice reproduced at the top of that file.
+- The Unicode tables in src/text/unicode_tables.inc, generated from the Unicode Character
+  Database 16.0.0, under the Unicode License v3 reproduced at the top of that file.
+
+The release binaries also contain libraries linked into them:
+
+- The GCC runtime libraries (libstdc++, libgcc), licensed under the GNU GPL version 3 with
+  the GCC Runtime Library Exception, in the Windows and Linux executables.

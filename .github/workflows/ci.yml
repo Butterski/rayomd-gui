@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux (Arch)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install packages
+        run: pacman -Syu --noconfirm --needed base-devel git cmake python ttf-dejavu ttf-liberation adobe-source-sans-fonts poppler libjpeg-turbo dbus libxkbcommon weston sway strace
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build and test
+        run: cmake --preset linux-release && cmake --build --preset linux-release --parallel 4 && ctest --preset linux-release
+
+  windows:
+    name: Windows (MinGW-w64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+            mingw-w64-ucrt-x86_64-python
+      - name: Build and test
+        run: cmake --preset windows-mingw && cmake --build --preset windows-mingw --parallel 4 && build/windows/tests/rayomd-gui-tests.exe

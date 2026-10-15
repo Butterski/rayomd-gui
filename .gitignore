@@ -1,0 +1,4 @@
+build/
+*.pkg.tar.zst
+linux/pkgbuild/src/
+linux/pkgbuild/pkg/
