@@ -24,7 +24,7 @@ float Clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : 
 
 const Tokens& T(Context& ctx) { return ctx.GetTokens(); }
 
-float BodySize(Context& ctx) { return static_cast<float>(T(ctx).font.body); }
+float BodySize(Context& ctx) { return ctx.FontSize(T(ctx).font.body); }
 
 void DrawControl(Context& ctx, RectF rect, const ControlState& state, Rgba fill) {
     const float radius = static_cast<float>(T(ctx).controlRadius);
@@ -34,10 +34,20 @@ void DrawControl(Context& ctx, RectF rect, const ControlState& state, Rgba fill)
     }
 }
 
+// Offers each unconsumed KeyDown of the frame, in order, to `f`; consumes those it takes.
+template <typename F>
+void ForEachKey(Context& ctx, F&& f) {
+    const std::vector<InputEvent>& events = ctx.Events();
+    for (size_t i = 0; i < events.size(); i++) {
+        if (!ctx.IsConsumed(i) && events[i].type == InputEvent::Type::KeyDown && f(events[i])) ctx.ConsumeEvent(i);
+    }
+}
+
 // ---- UTF-8 ----
 
 size_t NextCp(std::string_view s, size_t at) {
     if (at >= s.size()) return s.size();
+    if (static_cast<unsigned char>(s[at]) < 0x80) return at + 1;
     uint32_t cp = 0;
     size_t length = 1;
     if (!RayoMd::Text::DecodeUtf8(s, at, cp, length) || length == 0) length = 1;
@@ -61,6 +71,7 @@ size_t PrevCp(std::string_view s, size_t at) {
 uint32_t CpAt(std::string_view s, size_t at) {
     uint32_t cp = 0;
     size_t length = 1;
+    if (at < s.size() && static_cast<unsigned char>(s[at]) < 0x80) return static_cast<unsigned char>(s[at]);
     if (at >= s.size() || !RayoMd::Text::DecodeUtf8(s, at, cp, length)) return 0xFFFD;
     return cp;
 }
@@ -129,8 +140,10 @@ public:
     Editor(Context& ctx, Id id, LineEdit& e, std::string& text, bool readOnly, CharFilter filter)
         : ctx_(ctx), id_(id), e_(e), text_(text), readOnly_(readOnly), filter_(filter) {}
 
-    // Handles the frame's keys, text and clipboard; true when the text changed.
-    bool Run() {
+    // Handles the frame's keys, text and clipboard in order; true when the text changed. Each
+    // key goes to `other` first (true: it took the key), then to the line.
+    template <typename F>
+    bool Run(F&& other) {
         ClampEdit(e_, text_);
         std::string pasted;
         if (ctx_.TakeClipboard(id_, pasted) && !readOnly_) Insert(pasted, false);
@@ -146,7 +159,7 @@ public:
                 e_.preedit = readOnly_ ? std::string() : ev.text;
                 ctx_.ConsumeEvent(i);
             } else if (ev.type == InputEvent::Type::KeyDown) {
-                if (Key(ev)) ctx_.ConsumeEvent(i);
+                if (other(ev) || Key(ev)) ctx_.ConsumeEvent(i);
             }
         }
         return changed_;
@@ -469,7 +482,7 @@ void Tooltip(Context& ctx, Id owner, RectF anchor, std::string_view textValue) {
         return;
     }
     const Tokens& t = T(ctx);
-    const float size = static_cast<float>(t.font.bodySmall);
+    const float size = ctx.FontSize(t.font.bodySmall);
     const FontMetrics fm = ctx.Metrics(size);
     const float padX = static_cast<float>(t.spacing.md), padY = static_cast<float>(t.spacing.sm);
     const float w = ctx.SnapToDevice(ctx.TextWidth(textValue, size) + 2 * padX + 2);
@@ -602,25 +615,34 @@ bool Dropdown(Context& ctx, std::string_view idLabel, int& selected, const std::
         st.keyboard = true;
     }
     if (focused && count > 0) {
-        if (st.open) {
-            if (ctx.ConsumeKey(Key::Up)) { st.highlight = std::max(0, st.highlight - 1); st.keyboard = true; }
-            if (ctx.ConsumeKey(Key::Down)) { st.highlight = std::min(count - 1, st.highlight + 1); st.keyboard = true; }
-            if (ctx.ConsumeKey(Key::Enter)) {
-                selected = std::min(std::max(st.highlight, 0), count - 1);
-                st.open = false;
+        ForEachKey(ctx, [&](const InputEvent& ev) {
+            if (ev.mods != 0) return false;
+            if (st.open) {
+                switch (ev.key) {
+                case Key::Up: st.highlight = std::max(0, st.highlight - 1); st.keyboard = true; return true;
+                case Key::Down: st.highlight = std::min(count - 1, st.highlight + 1); st.keyboard = true; return true;
+                case Key::Enter:
+                    selected = std::min(std::max(st.highlight, 0), count - 1);
+                    st.open = false;
+                    return true;
+                case Key::Escape: st.open = false; return true;
+                default: return false;
+                }
             }
-            if (ctx.ConsumeKey(Key::Escape)) st.open = false;
-        } else {
-            if (ctx.ConsumeKey(Key::Enter) || ctx.ConsumeKey(Key::Space)) {
+            switch (ev.key) {
+            case Key::Enter:
+            case Key::Space:
                 st.open = true;
                 st.highlight = selected;
                 st.keyboard = true;
+                return true;
+            case Key::Up: selected = std::max(0, selected - 1); return true;
+            case Key::Down: selected = std::min(count - 1, selected + 1); return true;
+            default: return false;
             }
-            if (ctx.ConsumeKey(Key::Up)) selected = std::max(0, selected - 1);
-            if (ctx.ConsumeKey(Key::Down)) selected = std::min(count - 1, selected + 1);
-        }
-    } else if (!focused && st.open && ctx.FocusedId() != id) {
-        st.open = false;   // focus went elsewhere (Tab)
+        });
+    } else if (st.open && ctx.FocusedId() != id) {
+        st.open = false;   // focus went elsewhere (Tab, a click)
     }
 
     // The button.
@@ -728,7 +750,7 @@ bool TextField(Context& ctx, std::string_view idLabel, std::string& text, RectF 
             e.anchor = 0;
             e.caret = text.size();
         }
-        changed = Editor(ctx, id, e, text, readOnly, nullptr).Run();
+        changed = Editor(ctx, id, e, text, readOnly, nullptr).Run([](const InputEvent&) { return false; });
     } else {
         e.preedit.clear();
         e.anchor = e.caret;
@@ -786,15 +808,21 @@ bool NumberField(Context& ctx, std::string_view idLabel, double& value, double m
     if (notches != 0) stepBy(-notches);   // rolling up (negative notches) increases
 
     if (focused) {
-        if (in.pressed || in.held) FieldMouse(ctx, in, e, st.text, inner, BodySize(ctx));
-        if (ctx.ConsumeKey(Key::Up)) stepBy(1);
-        if (ctx.ConsumeKey(Key::Down)) stepBy(-1);
-        if (ctx.ConsumeKey(Key::Enter)) {
-            commit();
-            e.anchor = 0;
-            e.caret = st.text.size();
-        }
-        Editor(ctx, id, e, st.text, false, &NumberChar).Run();
+        // Focus by a press selects the whole number, as Tab does; later presses place the caret.
+        if (!(in.pressed && !e.wasFocused)) FieldMouse(ctx, in, e, st.text, inner, BodySize(ctx));
+        Editor(ctx, id, e, st.text, false, &NumberChar).Run([&](const InputEvent& ev) {
+            if (ev.mods != 0) return false;
+            switch (ev.key) {
+            case Key::Up: stepBy(1); return true;
+            case Key::Down: stepBy(-1); return true;
+            case Key::Enter:
+                commit();
+                e.anchor = 0;
+                e.caret = st.text.size();
+                return true;
+            default: return false;
+            }
+        });
     }
     e.wasFocused = focused;
 
@@ -818,7 +846,7 @@ void Label(Context& ctx, std::string_view textValue, RectF rect, std::optional<R
 
 float SectionHeaderHeight(Context& ctx, bool first) {
     const Tokens& t = T(ctx);
-    const float row = static_cast<float>(Ceil(ctx.Metrics(static_cast<float>(t.font.subtitle)).lineHeight)) +
+    const float row = static_cast<float>(Ceil(ctx.Metrics(ctx.FontSize(t.font.subtitle)).lineHeight)) +
                       static_cast<float>(t.spacing.sm);
     return (first ? 0.0f : static_cast<float>(t.spacing.panelGap)) + row;
 }
@@ -827,7 +855,7 @@ void SectionHeader(Context& ctx, std::string_view textValue, RectF& column, bool
     const Tokens& t = T(ctx);
     if (!first) CutTop(column, static_cast<float>(t.spacing.panelGap));
     const RectF row = CutTop(column, SectionHeaderHeight(ctx, true));
-    ctx.DrawTextInRect(textValue, row, static_cast<float>(t.font.subtitle), t.colors.mutedText);
+    ctx.DrawTextInRect(textValue, row, ctx.FontSize(t.font.subtitle), t.colors.mutedText);
 }
 
 std::vector<std::string_view> WrapText(Context& ctx, std::string_view textValue, float size, float width) {
@@ -980,7 +1008,7 @@ RectF BeginModal(Context& ctx, std::string_view idLabel, std::string_view title,
     ctx.BlockAll();
     ctx.FillRect(ctx.WindowRect(), t.colors.scrim);
     const float pad = 20;
-    const float headingSize = static_cast<float>(t.font.heading);
+    const float headingSize = ctx.FontSize(t.font.heading);
     const float titleH = static_cast<float>(Ceil(ctx.Metrics(headingSize, true).lineHeight));
     const float gap = static_cast<float>(t.spacing.xxl);
     const float w = std::max(0.0f, std::min(420.0f, ctx.Width() - 48));

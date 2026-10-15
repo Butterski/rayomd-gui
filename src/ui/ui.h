@@ -297,6 +297,9 @@ public:
     void PopClip();
 
     // ---- Text ----
+    // A font-size token (Tokens::font) in logical px with the system text scale applied
+    // (Tokens::textScale); the sizes below are such px.
+    float FontSize(int token) const { return static_cast<float>(token * GetTokens().textScale); }
     FontMetrics Metrics(float size, bool bold = false) const;
     // The run of `text` at `size` logical px per em, shaped once and kept while it is used
     // (pen positions in logical px).
