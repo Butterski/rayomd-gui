@@ -28,6 +28,7 @@
 
 namespace {
 
+// The bus handshake runs on the loop; a file dialog asked for before it ended waits this long.
 constexpr int kPortalConnectTimeoutMs = 1000;
 constexpr int kHyprTimeoutMs = 250;
 // Omarchy's theme switch ends with `hyprctl reload`: ask for the rounding after it.
@@ -121,17 +122,44 @@ void WriteAll(FILE* stream, const std::string& text) {
     fflush(stream);
 }
 
-// Hyprland's window rounding, when we run under Hyprland.
-void QueryRounding(rgui::App& app) {
-    int rounding = 0;
-    if (rgui_hypr_query_rounding(kHyprTimeoutMs, &rounding)) app.OnRoundingChanged(rounding);
-}
+// Hyprland's window rounding, when we run under Hyprland: asked on the loop, never waited for.
+struct RoundingQuery {
+    rgui_hypr_query* query = nullptr;
+    std::unique_ptr<LoopSource> source;
 
+    ~RoundingQuery() { Reset(); }
+    void Reset() {
+        source.reset();  // stops watching the fd before it closes
+        rgui_hypr_query_free(query);
+        query = nullptr;
+    }
+    // Starts a new query (dropping one still running).
+    void Start() {
+        Reset();
+        char path[108];
+        if (!rgui_hypr_socket_path(path, sizeof path)) return;
+        query = rgui_hypr_query_start(path, kHyprTimeoutMs);
+        if (!query) return;
+        rgui_hypr_query* q = query;
+        source = std::make_unique<LoopSource>(
+            rgui_hypr_query_fd(q), [q] { return rgui_hypr_query_events(q); },
+            [q] { return rgui_hypr_query_timeout_ms(q); },
+            [q] {
+                int rounding = 0;
+                const int status = rgui_hypr_query_step(q, &rounding);
+                if (status == RGUI_HYPR_DONE && g_app) g_app->OnRoundingChanged(rounding);
+                return status == RGUI_HYPR_PENDING;  // done or failed: the source stops
+            });
+        if (!source->Start()) Reset();
+    }
+};
+
+RoundingQuery* g_rounding = nullptr;
 uint64_t g_roundingTimer = 0;
 
 void OnRoundingTimer(uint64_t, void*) {
     g_roundingTimer = 0;
-    if (g_app) QueryRounding(*g_app);
+    if (g_rounding) g_rounding->Start();
 }
 
 } // namespace
@@ -205,6 +233,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    RoundingQuery rounding;
+    g_rounding = &rounding;
+
     rgui::omarchy::Watcher watcher;
     std::unique_ptr<LoopSource> watcherSource;
     const bool watching = watcher.Start(
@@ -228,7 +259,7 @@ int main(int argc, char** argv) {
         watcherSource->Start();
     }
 
-    QueryRounding(*app);
+    rounding.Start();
 
     const int loopStatus = rgui_loop_run();
 
@@ -236,9 +267,13 @@ int main(int argc, char** argv) {
     portalSource.reset();
     if (g_roundingTimer) rgui_loop_cancel_timer(g_roundingTimer);
     g_roundingTimer = 0;
+    rounding.Reset();
+    g_rounding = nullptr;
 
     if (window->ConnectionLost() || loopStatus != 0) {
         if (loopStatus != 0) perror("rayomd-gui: event loop");
+        // The window is gone with the compositor; the text must not go with it.
+        app->SaveRecoveryCopy();
         app->SaveSettings();
         g_app = nullptr;
         app.reset();

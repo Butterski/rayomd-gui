@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -247,6 +248,20 @@ struct FakeHyprland {
     }
 };
 
+// The loop's use of the query, in one blocking call: poll, step, until done or the deadline.
+bool QueryRounding(const std::string& socketPath, int timeoutMs, int* rounding) {
+    rgui_hypr_query* q = rgui_hypr_query_start(socketPath.c_str(), timeoutMs);
+    if (!q) return false;
+    int status = RGUI_HYPR_PENDING;
+    while (status == RGUI_HYPR_PENDING) {
+        pollfd p{rgui_hypr_query_fd(q), rgui_hypr_query_events(q), 0};
+        poll(&p, 1, rgui_hypr_query_timeout_ms(q));
+        status = rgui_hypr_query_step(q, rounding);
+    }
+    rgui_hypr_query_free(q);
+    return status == RGUI_HYPR_DONE;
+}
+
 } // namespace
 
 RGUI_TEST("linux.hypr_ipc") {
@@ -256,7 +271,14 @@ RGUI_TEST("linux.hypr_ipc") {
     r = 5;
     CHECK(!rgui_hypr_parse_rounding("{\"int\": -1}", 11, &r));
     CHECK(!rgui_hypr_parse_rounding("{\"int\": 1.5}", 12, &r));
-    CHECK(!rgui_hypr_parse_rounding("{\"int\": 99999999999}", 20, &r));
+    // Clamped to 0..64: a theme's rounding is the radius of cards and popups.
+    CHECK(rgui_hypr_parse_rounding("{\"int\": 99999999999}", 20, &r));
+    CHECK_EQ(r, 64);
+    CHECK(rgui_hypr_parse_rounding("{\"int\": 65}", 11, &r));
+    CHECK_EQ(r, 64);
+    CHECK(rgui_hypr_parse_rounding("{\"int\": 64}", 11, &r));
+    CHECK_EQ(r, 64);
+    r = 5;
     CHECK(!rgui_hypr_parse_rounding("{\"float\": 2.0}", 14, &r));
     CHECK(!rgui_hypr_parse_rounding("{\"int\":", 7, &r));
     CHECK_EQ(r, 5);
@@ -270,7 +292,7 @@ RGUI_TEST("linux.hypr_ipc") {
         FakeHyprland server;
         CHECK(server.Start(socketPath, "{\n    \"option\": \"decoration:rounding\",\n    \"int\": 8,\n    \"set\": true\n}"));
         r = -1;
-        CHECK(rgui_hypr_query_rounding_at(socketPath.c_str(), 1000, &r));
+        CHECK(QueryRounding(socketPath, 1000, &r));
         CHECK_EQ(r, 8);
         server.thread.join();
         CHECK_EQ(server.request, std::string("j/getoption decoration:rounding"));
@@ -280,7 +302,7 @@ RGUI_TEST("linux.hypr_ipc") {
         FakeHyprland server;
         CHECK(server.Start(socketPath, "no such option"));
         r = 3;
-        CHECK(!rgui_hypr_query_rounding_at(socketPath.c_str(), 1000, &r));
+        CHECK(!QueryRounding(socketPath, 1000, &r));
         CHECK_EQ(r, 3);
     }
     {
@@ -288,20 +310,37 @@ RGUI_TEST("linux.hypr_ipc") {
         FakeHyprland server;
         CHECK(server.Start(socketPath, "", 800));
         int64_t start = Ms();
-        CHECK(!rgui_hypr_query_rounding_at(socketPath.c_str(), 150, &r));
+        CHECK(!QueryRounding(socketPath, 150, &r));
         int64_t waited = Ms() - start;
         CHECK(waited >= 100 && waited < 600);
         CHECK_EQ(r, 3);
     }
     {
+        // The UI thread never waits on Hyprland: a step returns at once while no answer came.
+        FakeHyprland server;
+        CHECK(server.Start(socketPath, "", 400));
+        rgui_hypr_query* q = rgui_hypr_query_start(socketPath.c_str(), 2000);
+        CHECK(q != nullptr);
+        if (q) {
+            int64_t start = Ms();
+            int status = RGUI_HYPR_PENDING;
+            for (int i = 0; i < 5 && status == RGUI_HYPR_PENDING; ++i) status = rgui_hypr_query_step(q, &r);
+            CHECK_EQ(status, int(RGUI_HYPR_PENDING));
+            CHECK(Ms() - start < 50);
+            CHECK_EQ(rgui_hypr_query_events(q), short(POLLIN));
+            CHECK(rgui_hypr_query_timeout_ms(q) > 1000);
+            rgui_hypr_query_free(q);
+        }
+    }
+    {
         // An answer over 64 KiB is refused, even with a rounding at its end.
         FakeHyprland server;
         CHECK(server.Start(socketPath, std::string(70000, ' ') + "\"int\": 4"));
-        CHECK(!rgui_hypr_query_rounding_at(socketPath.c_str(), 2000, &r));
+        CHECK(!QueryRounding(socketPath, 2000, &r));
         CHECK_EQ(r, 3);
     }
     // No socket at all.
-    CHECK(!rgui_hypr_query_rounding_at((dir + "/missing.sock").c_str(), 200, &r));
+    CHECK(!QueryRounding(dir + "/missing.sock", 200, &r));
     CHECK_EQ(r, 3);
 
     // From the environment: $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock, and
@@ -316,13 +355,17 @@ RGUI_TEST("linux.hypr_ipc") {
         CHECK(server.Start(dir + "/hypr/abc_123/.socket.sock", "{\"option\": \"decoration:rounding\", \"int\": 10}"));
         setenv("XDG_RUNTIME_DIR", dir.c_str(), 1);
         setenv("HYPRLAND_INSTANCE_SIGNATURE", "abc_123", 1);
-        CHECK(rgui_hypr_query_rounding(1000, &r));
+        char path[108];
+        CHECK(rgui_hypr_socket_path(path, sizeof path));
+        CHECK_EQ(std::string(path), dir + "/hypr/abc_123/.socket.sock");
+        CHECK(QueryRounding(path, 1000, &r));
         CHECK_EQ(r, 10);
     }
+    char path[108];
+    setenv("HYPRLAND_INSTANCE_SIGNATURE", "a/b", 1);
+    CHECK(!rgui_hypr_socket_path(path, sizeof path));
     unsetenv("HYPRLAND_INSTANCE_SIGNATURE");
-    r = 7;
-    CHECK(!rgui_hypr_query_rounding(1000, &r));
-    CHECK_EQ(r, 7);
+    CHECK(!rgui_hypr_socket_path(path, sizeof path));
     if (savedSig) setenv("HYPRLAND_INSTANCE_SIGNATURE", keepSig.c_str(), 1);
     if (savedRuntime) {
         setenv("XDG_RUNTIME_DIR", keepRuntime.c_str(), 1);
@@ -340,8 +383,15 @@ RGUI_TEST("linux.open_external") {
     if (dir.empty()) return;
     std::string out = dir + "/out.txt";
     std::string script = dir + "/xdg-open";
+    // A descriptor without close-on-exec, as the engine's fopen leaves them: it must not leak.
+    const int devNull = open("/dev/null", O_RDONLY);
+    const int leaky = fcntl(devNull, F_DUPFD, 200);
+    close(devNull);
+    CHECK(leaky >= 200);
+    const std::string leakyPath = "/proc/$$/fd/" + std::to_string(leaky);
     WriteFile(script, "#!/bin/sh\n"
-                      "{ printf '%s\\n' \"$1\"; while read -r k v; do\n"
+                      "{ printf '%s\\n' \"$1\"; if [ -e " + leakyPath + " ]; then echo leaked; else echo closed; fi\n"
+                      "while read -r k v; do\n"
                       "  case \"$k\" in SigBlk:|SigIgn:) printf '%s %s\\n' \"$k\" \"$v\";; esac\n"
                       "done < /proc/$$/status; } > \"" + out + ".tmp\" && mv \"" + out + ".tmp\" \"" + out + "\"\n");
     chmod(script.c_str(), 0755);
@@ -373,8 +423,11 @@ RGUI_TEST("linux.open_external") {
         waitpid(pid, &status, 0);
         CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
+    close(leaky);
     std::string text = ReadFile(out);
-    CHECK_EQ(text.substr(0, text.find('\n')), target);
+    // xdg-open gets a file:// URI: a name starting with '-' is no option, spaces are encoded.
+    CHECK_EQ(text.substr(0, text.find('\n')), std::string("file:///tmp/My%20Notes/-odd%20name.pdf"));
+    CHECK(text.find("\nclosed\n") != std::string::npos);
     CHECK(text.find("SigBlk: 0000000000000000") != std::string::npos);
     size_t ign = text.find("SigIgn: ");
     CHECK(ign != std::string::npos);
@@ -382,6 +435,24 @@ RGUI_TEST("linux.open_external") {
         unsigned long long mask = std::strtoull(text.c_str() + ign + 8, nullptr, 16);
         CHECK((mask & (1ull << (SIGPIPE - 1))) == 0);
     }
+
+    // The URI: absolute against the working directory, everything but unreserved bytes encoded.
+    auto uri = [](const char* path) {
+        char* u = rgui_file_uri(path);
+        std::string result = u ? u : "(null)";
+        std::free(u);
+        return result;
+    };
+    CHECK_EQ(uri("/a b/%#?:;@&=+$,\xc3\xa9.pdf"), std::string("file:///a%20b/%25%23%3F%3A%3B%40%26%3D%2B%24%2C%C3%A9.pdf"));
+    CHECK_EQ(uri("/x/A-z_0.9~"), std::string("file:///x/A-z_0.9~"));
+    char* cwd = getcwd(nullptr, 0);
+    CHECK(cwd != nullptr);
+    if (cwd) {
+        CHECK_EQ(uri("mailto:x.pdf"), std::string("file://") + (std::string(cwd) == "/" ? "" : cwd) + "/mailto%3Ax.pdf");
+        CHECK_EQ(uri("-x.pdf"), std::string("file://") + (std::string(cwd) == "/" ? "" : cwd) + "/-x.pdf");
+        std::free(cwd);
+    }
+    CHECK_EQ(uri(""), std::string("(null)"));
 
     // Without xdg-open on PATH: -1 at once.
     std::string empty = dir + "/empty";

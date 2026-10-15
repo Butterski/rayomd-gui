@@ -29,6 +29,10 @@ enum {
     RGUI_DBUS_MAX_TOTAL_NESTING = 64, /* containers of any kind, variants included, in a value */
 };
 
+/* The largest message the connection accepts. We only receive small replies and signals; a
+ * larger message is skipped as it arrives, never buffered or parsed. */
+enum { RGUI_DBUS_MAX_INCOMING = 1048576 };
+
 enum rgui_dbus_message_type {
     RGUI_DBUS_METHOD_CALL = 1,
     RGUI_DBUS_METHOD_RETURN = 2,
@@ -179,30 +183,53 @@ typedef void (*rgui_dbus_signal_fn)(void* user, const rgui_dbus_message* signal)
 typedef bool (*rgui_dbus_method_fn)(void* user, rgui_dbus_conn* conn, const rgui_dbus_message* call);
 
 /* What a signal match rule tests (type='signal' always); NULL fields match anything. Values
- * must not contain ' or \. */
+ * must not contain ' or \.
+ *
+ * `sender` goes into the rule, so the bus delivers only broadcasts from that sender. Signals
+ * sent to us by name (unicast) skip match rules, so routing compares the message's sender too
+ * when `sender` is a unique name (":1.42") or the bus itself ("org.freedesktop.DBus"); for a
+ * well-known name the callback must compare the sender with the name's current owner.
+ * `arg0` matches a signal whose first argument is that string. */
 typedef struct rgui_dbus_match {
     const char* interface;
     const char* member;
     const char* path;
+    const char* sender;
+    const char* arg0;
 } rgui_dbus_match;
 
-/* Connects, authenticates (EXTERNAL) and says Hello, waiting at most `timeout_ms` in total.
- * NULL on any failure. */
+/* Starts connecting without blocking: the socket's connect, the EXTERNAL authentication and
+ * Hello go on in rgui_dbus_dispatch, and must end within `timeout_ms`, else the connection
+ * closes (pending calls then get their NULL reply). Calls, sends and matches may be made at
+ * once; they are queued after Hello. NULL when the address is unusable or the socket cannot be
+ * created or connected (no such socket file). */
+rgui_dbus_conn* rgui_dbus_open_async(const char* address, int timeout_ms);
+rgui_dbus_conn* rgui_dbus_open_session_async(int timeout_ms);
+/* The same, waiting for the handshake: at most `timeout_ms` in total. NULL on any failure. */
 rgui_dbus_conn* rgui_dbus_open(const char* address, int timeout_ms);
 rgui_dbus_conn* rgui_dbus_open_session(int timeout_ms);
+/* True once the bus answered Hello: rgui_dbus_unique_name is known. */
+bool rgui_dbus_ready(const rgui_dbus_conn* conn);
+/* Waits (polling and dispatching) until the connection is ready or closed, or `timeout_ms`
+ * passed; never from a callback. True when ready. */
+bool rgui_dbus_wait_ready(rgui_dbus_conn* conn, int timeout_ms);
 /* Closes the socket and frees everything; no callback runs. */
 void rgui_dbus_close(rgui_dbus_conn* conn);
 
-/* The unique name the bus gave us (":1.42"). */
+/* The unique name the bus gave us (":1.42"); "" before the connection is ready. */
 const char* rgui_dbus_unique_name(const rgui_dbus_conn* conn);
 bool rgui_dbus_connected(const rgui_dbus_conn* conn);
 int rgui_dbus_fd(const rgui_dbus_conn* conn);
-/* POLLIN, plus POLLOUT while output waits for the socket. */
+/* POLLIN, plus POLLOUT while output waits for the socket (POLLOUT alone while connecting). */
 short rgui_dbus_poll_events(const rgui_dbus_conn* conn);
+/* The bytes the input buffer holds now (diagnostics and tests): it shrinks back to one read
+ * chunk once drained. */
+size_t rgui_dbus_input_capacity(const rgui_dbus_conn* conn);
 /* Milliseconds until the next call times out, -1 when none is pending. */
 int rgui_dbus_timeout_ms(const rgui_dbus_conn* conn);
 /* Reads what is available, routes every complete message, writes queued output and expires
- * calls whose time is up. False once the connection is closed (the peer hung up, a read or
+ * calls whose time is up. A message's header is checked first: only a reply to a pending call,
+ * a signal some match wants, or a method call has its body validated and routed. False once the connection is closed (the peer hung up, a read or
  * write failed, or the stream is not D-Bus); pending calls then got their NULL reply. */
 bool rgui_dbus_dispatch(rgui_dbus_conn* conn);
 /* Polls at most `timeout_ms` (-1: until the next call timeout), then dispatches. For start-up

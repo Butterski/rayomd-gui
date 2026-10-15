@@ -703,4 +703,65 @@ RGUI_TEST("app.snapshot") {
     CHECK(!fs::exists(late.dir / "late.png"));
 }
 
+RGUI_TEST("app.recovery_copy") {
+    if (!HaveFonts()) {
+        std::printf("skip app.recovery_copy: DejaVu Sans Mono not installed\n");
+        return;
+    }
+    // The compositor went away: the platform asks for a copy of the unsaved text before exiting.
+    Harness h("recovery_copy");
+    h.Start("ui.theme=tokyo-night\n");
+    h.Frame();
+    CHECK(!h.app->SaveRecoveryCopy());  // nothing typed: nothing to keep
+    CHECK(!fs::exists(h.dir / "recovery"));
+    h.Type("unsaved words");
+    CHECK(h.Window().Doc().modified);
+    CHECK(h.app->SaveRecoveryCopy());
+    CHECK(h.app->SaveRecoveryCopy());  // a second copy in the same second gets its own name
+    std::vector<fs::path> copies;
+    std::error_code error;
+    for (const auto& entry : fs::directory_iterator(h.dir / "recovery", error)) copies.push_back(entry.path());
+    CHECK_EQ(copies.size(), size_t(2));
+    for (const fs::path& copy : copies) {
+        CHECK(StartsWith(copy.filename().u8string(), "untitled-"));
+        CHECK_EQ(copy.extension().u8string(), std::string(".md"));
+        CHECK_EQ(ReadFile(copy), std::string("unsaved words"));
+    }
+}
+
+RGUI_TEST("app.no_settings_path") {
+    if (!HaveFonts()) {
+        std::printf("skip app.no_settings_path: DejaVu Sans Mono not installed\n");
+        return;
+    }
+    // No settings directory (Windows without APPDATA): nothing is read or written anywhere, the
+    // working directory included.
+    const fs::path dir = TempDir("no_settings_path");
+    std::error_code error;
+    const fs::path cwd = fs::current_path(error);
+    fs::current_path(dir, error);
+    RayoMd::File::WriteAll(dir / "settings.ini", "ui.theme=nord\n");
+    {
+        HeadlessPlatform platform;
+        rgui::Startup startup = rgui::BeginStartup(rgui::Args{}, fs::path(), std::chrono::steady_clock::now());
+        CHECK(!startup.settings.Has("ui.theme"));
+        startup.fontIndex = std::make_unique<rgui::text::FontIndex>();
+        startup.fontIndex->SetDirectories({"/usr/share/fonts"});
+        startup.fontIndex->Start();
+        std::unique_ptr<App> app = App::Create(platform, std::move(startup));
+        app->OnResize(kWidth, kHeight, 1.0);
+        app->SaveSettings();
+        CHECK(!app->SaveRecoveryCopy());
+        platform.Advance(1000);
+    }
+    fs::current_path(cwd, error);
+    size_t entries = 0;
+    for (const auto& entry : fs::directory_iterator(dir, error)) {
+        (void)entry;
+        ++entries;
+    }
+    CHECK_EQ(entries, size_t(1));  // the settings.ini written above, nothing else
+    CHECK_EQ(ReadFile(dir / "settings.ini"), std::string("ui.theme=nord\n"));
+}
+
 } // namespace

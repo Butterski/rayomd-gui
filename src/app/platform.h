@@ -155,6 +155,9 @@ public:
     virtual void OnResize(int width, int height, double scale) = 0;
     virtual void OnCloseRequest() = 0;
     virtual void OnDropFile(std::string path) = 0;
+    // Something the platform refused on the user's behalf (a dropped or chosen path it cannot
+    // represent); the app shows `message` as an error status.
+    virtual void OnPlatformError(std::string message) = 0;
     // Light or dark, and the system's text scale factor.
     virtual void OnSystemAppearance(bool dark, double textScale) = 0;
     virtual void OnOmarchyChanged() = 0;

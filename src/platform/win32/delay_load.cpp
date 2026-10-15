@@ -65,12 +65,11 @@ extern "C" void WINAPI __wrap_DragFinish(HDROP drop) {
     if (procedure) procedure(drop);
 }
 
-extern "C" HINSTANCE WINAPI __wrap_ShellExecuteW(HWND window, LPCWSTR operation, LPCWSTR file,
-                                                 LPCWSTR parameters, LPCWSTR directory, INT show) {
-    RAYOMD_DELAY_PROC(L"shell32.dll", ShellExecuteW);
-    // ShellExecute reports failure as a value of 32 or less; 2 is ERROR_FILE_NOT_FOUND.
-    return procedure ? procedure(window, operation, file, parameters, directory, show)
-                     : reinterpret_cast<HINSTANCE>(static_cast<INT_PTR>(SE_ERR_FNF));
+extern "C" BOOL WINAPI __wrap_ShellExecuteExW(SHELLEXECUTEINFOW* info) {
+    RAYOMD_DELAY_PROC(L"shell32.dll", ShellExecuteExW);
+    if (procedure) return procedure(info);
+    SetLastError(ERROR_MOD_NOT_FOUND);
+    return FALSE;
 }
 
 extern "C" HRESULT WINAPI __wrap_SHGetFolderPathW(HWND window, int folder, HANDLE token, DWORD flags,

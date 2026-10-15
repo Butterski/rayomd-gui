@@ -73,4 +73,18 @@ std::filesystem::path XdgDocumentsDir();
 // host; empty when there is none.
 std::string PathFromUriList(const std::string& list);
 
+// The framebuffer's limits: whatever size and scale the compositor asks for, the device size
+// stays within kMaxDeviceSide pixels per side and kMaxDevicePixels in all (1 GiB of pixels).
+constexpr int kMaxDeviceSide = 16384;
+constexpr int64_t kMaxDevicePixels = int64_t{1} << 28;
+// The scale (× 120) to draw a logical size at: `scale120` lowered, in whole steps of 120 when
+// `wholeScale`, until round(logical × scale120 / 120) fits those limits (never below 120, where
+// any logical size up to 16384 fits).
+uint32_t FitScale120(int logicalWidth, int logicalHeight, uint32_t scale120, bool wholeScale);
+
+// The text of a wl_keyboard.keymap: `size` bytes of `fd`, without trailing NULs. False when the
+// fd is not a regular file at least `size` bytes long (mapping past its end would raise
+// SIGBUS), or it cannot be mapped. The fd stays open.
+bool ReadKeymapFd(int fd, uint32_t size, std::string* text);
+
 } // namespace rgui::wl

@@ -5,6 +5,11 @@
 // Everything runs on the UI thread. The event loop polls Fd() for PollEvents() and calls
 // Dispatch() when it is ready and when TimeoutMs() has passed. Callbacks run from Dispatch(),
 // or before the request returns when there is no session bus.
+//
+// Signals are believed only from the portal: the current owner of org.freedesktop.portal.Desktop,
+// learned from the bus (GetNameOwner, then NameOwnerChanged) and from the senders of the portal's
+// own replies, which the bus sets. Another peer's Response or SettingChanged, broadcast or sent to
+// us directly, is ignored. Request tokens are random.
 #pragma once
 
 #include "app/platform.h"
@@ -42,9 +47,11 @@ public:
     Portal(const Portal&) = delete;
     Portal& operator=(const Portal&) = delete;
 
-    // Connects to the session bus ($DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus), or
-    // to `address`, waiting at most `timeoutMs`. False without a bus: requests then answer as
-    // if there were no portal.
+    // Starts connecting to the session bus ($DBUS_SESSION_BUS_ADDRESS, else
+    // $XDG_RUNTIME_DIR/bus), or to `address`, without waiting: the handshake goes on in
+    // Dispatch() and must end within `timeoutMs`. Requests may be made at once. False when there
+    // is no bus to connect to: requests then answer as if there were no portal. A file dialog
+    // asked for before the handshake ended waits for it (at most the rest of `timeoutMs`).
     bool Connect(int timeoutMs = 2000);
     bool ConnectTo(const char* address, int timeoutMs = 2000);
     bool Connected() const { return conn_ != nullptr; }
@@ -64,6 +71,8 @@ public:
     // changes either key.
     void WatchAppearance(std::function<void(Appearance)> changed);
     const Appearance& CurrentAppearance() const { return appearance_; }
+    // The portal's unique name as far as we know it; empty when it is not running.
+    const std::string& PortalOwner() const { return portalOwner_; }
 
     // The portal's OpenFile (OpenDocument, ChooseTheme) or SaveFile (SaveMarkdown, ExportPdf).
     // Unavailable without a bus or when the call fails; Cancelled for Response 1; Failed for
@@ -80,7 +89,14 @@ private:
     static void OnFileResponse(void* user, const rgui_dbus_message* signal);
     static void OnSettingReply(void* user, const rgui_dbus_message* reply);
     static void OnSettingChanged(void* user, const rgui_dbus_message* signal);
+    static void OnNameOwner(void* user, const rgui_dbus_message* reply);
+    static void OnNameOwnerChanged(void* user, const rgui_dbus_message* signal);
 
+    // After a connection started: follows the portal's owner.
+    bool Started(int timeoutMs);
+    // A method return of a call to the portal: its sender is the portal.
+    void LearnOwner(const rgui_dbus_message* reply);
+    bool FromPortal(const rgui_dbus_message* signal) const;
     void Finish(Request* request, FileDialogResult result);
     bool ReadKey(KeyRead* key);
     void KeyDone(KeyRead* key);
@@ -92,7 +108,9 @@ private:
     Appearance appearance_;
     std::function<void(Appearance)> changed_;
     uint32_t settingsMatch_ = 0;
-    uint32_t nextToken_ = 0;
+    uint32_t ownerMatch_ = 0;
+    int connectTimeoutMs_ = 0;
+    std::string portalOwner_;
     std::vector<std::unique_ptr<Request>> requests_;
     std::vector<std::unique_ptr<SettingsRead>> reads_;
 };

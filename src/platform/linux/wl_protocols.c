@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Signatures copied from wayland.xml (wayland 1.23) and wayland-protocols 1.41. Each entry is
- * { opcode, flags, name, signature, interface of the 'n' argument }. */
+ * { opcode, flags, name, signature, interface of the 'n' argument }.
+ *
+ * Rule: every event that carries a file descriptor ('h') of an interface listed here is listed,
+ * whether or not we use it: wl_wire skips unlisted events without taking fds off the queue. */
 #include "platform/linux/wl_protocols.h"
 
 #include <string.h>

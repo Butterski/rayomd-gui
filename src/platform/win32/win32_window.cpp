@@ -166,6 +166,8 @@ std::wstring CompositionString(HIMC context, DWORD index) {
     return text;
 }
 
+// An absolute directory from the environment, else empty: a relative one would put settings
+// or the cache in whatever folder the app was started from.
 std::filesystem::path EnvironmentPath(const wchar_t* name) {
     const DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
     if (size == 0) return {};
@@ -173,13 +175,15 @@ std::filesystem::path EnvironmentPath(const wchar_t* name) {
     const DWORD length = GetEnvironmentVariableW(name, value.data(), size);
     if (length == 0 || length >= size) return {};
     value.resize(length);
-    return std::filesystem::path(value);
+    std::filesystem::path path(value);
+    return path.is_absolute() ? path : std::filesystem::path();
 }
 
 std::filesystem::path KnownFolder(int csidl) {
     wchar_t buffer[MAX_PATH] = {};
     if (SUCCEEDED(SHGetFolderPathW(nullptr, csidl, nullptr, SHGFP_TYPE_CURRENT, buffer))) {
-        return std::filesystem::path(buffer);
+        std::filesystem::path path(buffer);
+        if (path.is_absolute()) return path;
     }
     return {};
 }
@@ -247,6 +251,22 @@ std::string Narrow(std::wstring_view wide) {
     std::string utf8(static_cast<size_t>(length), '\0');
     WideCharToMultiByte(CP_UTF8, 0, wide.data(), count, utf8.data(), length, nullptr, nullptr);
     return utf8;
+}
+
+bool NarrowPath(std::wstring_view wide, std::string* utf8) {
+    utf8->clear();
+    if (wide.empty()) return true;
+    if (wide.size() > 0x7FFFFFFF) return false;
+    const int count = static_cast<int>(wide.size());
+    const int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), count, nullptr, 0, nullptr, nullptr);
+    if (length <= 0) return false;
+    utf8->assign(static_cast<size_t>(length), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), count, utf8->data(), length, nullptr, nullptr) !=
+        length) {
+        utf8->clear();
+        return false;
+    }
+    return true;
 }
 
 void ReadSystemAppearance(bool& dark, double& textScale) {
@@ -620,8 +640,12 @@ void Win32Window::RunDialog(FileDialog kind, const std::string& suggestedPath,
     FileDialogResult result;
     if (chosen) {
         buffer.resize(std::wcslen(buffer.c_str()));
-        result.kind = FileDialogResult::Chosen;
-        result.path = Narrow(buffer);
+        if (NarrowPath(buffer, &result.path)) {
+            result.kind = FileDialogResult::Chosen;
+        } else {
+            result.kind = FileDialogResult::Cancelled;
+            if (client_) client_->OnPlatformError("The chosen file name is not valid Unicode; RayoMD cannot use it");
+        }
     } else {
         result.kind = failure == 0 ? FileDialogResult::Cancelled : FileDialogResult::Unavailable;
     }
@@ -629,8 +653,17 @@ void Win32Window::RunDialog(FileDialog kind, const std::string& suggestedPath,
 }
 
 void Win32Window::OpenExternally(const std::string& path) {
+    // Always the PDF handler, whatever the file is called: a target named .hta or .bat must not
+    // run its handler on our bytes. No error dialogs of the shell's own.
     const std::wstring wide = Widen(path);
-    ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof info;
+    info.fMask = SEE_MASK_CLASSNAME | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = L"open";
+    info.lpFile = wide.c_str();
+    info.lpClass = L".pdf";
+    info.nShow = SW_SHOWNORMAL;
+    ShellExecuteExW(&info);
 }
 
 // --- Process ----------------------------------------------------------------------------------
@@ -1171,7 +1204,12 @@ LRESULT Win32Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 std::wstring wide(static_cast<size_t>(length) + 1, L'\0');
                 const UINT got = DragQueryFileW(drop, 0, wide.data(), length + 1);
                 wide.resize(std::min<size_t>(got, length));
-                path = Narrow(wide);
+                if (!NarrowPath(wide, &path)) {
+                    path.clear();
+                    if (client_ && started_) {
+                        client_->OnPlatformError("The dropped file's name is not valid Unicode; RayoMD cannot open it");
+                    }
+                }
             }
         }
         DragFinish(drop);

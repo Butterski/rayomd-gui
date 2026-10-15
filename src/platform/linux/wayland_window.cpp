@@ -3,6 +3,7 @@
 
 #include "gfx/canvas.h"
 #include "platform/linux/compose.h"
+#include "platform/linux/data_transfer.h"
 #include "platform/linux/loop.h"
 #include "platform/linux/ui_tasks.h"
 #include "platform/linux/wl_protocols.h"
@@ -19,6 +20,7 @@
 #include <map>
 #include <poll.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <unordered_map>
 
@@ -30,7 +32,6 @@ constexpr int kMinWidth = 720;
 constexpr int kMinHeight = 520;
 constexpr int kMaxLogical = 16384;
 constexpr uint32_t kMaxKeymapBytes = 8u << 20;
-constexpr size_t kMaxClipboardBytes = size_t{128} << 20;
 constexpr size_t kMaxDamageRects = 32;
 constexpr int kCursorGrid = 24;  // logical pixels of a built-in cursor
 constexpr uint32_t kBtnLeft = 0x110;
@@ -306,10 +307,8 @@ private:
     // Clipboard and drops.
     void DestroyOffer(uint32_t id);
     void DropStaleOffers();
-    void Receive(uint32_t offer, const char* mime, std::function<void(std::string)> done);
-    static void OnTransferReadable(int fd, uint32_t revents, void* user);
-    static void OnTransferWritable(int fd, uint32_t revents, void* user);
-    void FinishTransfer(int fd, bool ok);
+    // Asks `offer` for `mime` through a pipe; a paste replaces the paste still in flight.
+    void Receive(uint32_t offer, const char* mime, bool paste, std::function<void(std::string)> done);
 
     static void OnUserTimer(uint64_t id, void* user);
 
@@ -445,14 +444,7 @@ private:
     uint32_t dndOffer_ = 0;
     uint32_t selectionSource_ = 0;
     std::shared_ptr<const std::string> selectionText_;
-    struct Transfer {
-        bool writing = false;
-        std::shared_ptr<const std::string> text;  // writing
-        size_t offset = 0;
-        std::string data;                         // reading
-        std::function<void(std::string)> done;
-    };
-    std::map<int, Transfer> transfers_;
+    Transfers transfers_;
 
     // Timers.
     std::unordered_map<uint64_t, std::function<void()>> timers_;
@@ -602,10 +594,6 @@ WaylandWindowImpl::~WaylandWindowImpl() {
     if (frameTimer_) rgui_loop_cancel_timer(frameTimer_);
     if (repeatTimer_) rgui_loop_cancel_timer(repeatTimer_);
     for (const auto& t : timers_) rgui_loop_cancel_timer(t.first);
-    for (const auto& t : transfers_) {
-        rgui_loop_remove_fd(t.first);
-        close(t.first);
-    }
     if (map_) munmap(map_, mapSize_);
     if (conn_) {
         rgui_wl_flush(conn_);
@@ -849,12 +837,15 @@ void WaylandWindowImpl::UpdateGeometry() {
     double scale;
     if (viewport_) {
         // Fractional: the buffer is round(logical * scale / 120) and the viewport maps it back.
-        const uint32_t scale120 = preferredScale120_ ? preferredScale120_ : static_cast<uint32_t>(integerScale) * 120;
+        const uint32_t scale120 = FitScale120(
+            logicalW_, logicalH_, preferredScale120_ ? preferredScale120_ : static_cast<uint32_t>(integerScale) * 120,
+            false);
         w = static_cast<int>((static_cast<uint64_t>(logicalW_) * scale120 + 60) / 120);
         h = static_cast<int>((static_cast<uint64_t>(logicalH_) * scale120 + 60) / 120);
         scale = scale120 / 120.0;
         bufferScale = 1;
     } else {
+        integerScale = static_cast<int>(FitScale120(logicalW_, logicalH_, static_cast<uint32_t>(integerScale) * 120, true) / 120);
         w = logicalW_ * integerScale;
         h = logicalH_ * integerScale;
         scale = integerScale;
@@ -1344,14 +1335,13 @@ void WaylandWindowImpl::OnKeyboard(uint32_t, uint16_t opcode, const rgui_wl_arg*
     case WL_KEYBOARD_E_KEYMAP: {
         const int fd = args[1].h;
         const uint32_t size = args[2].u;
+        std::string text;
         if (args[0].u == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 && size > 0 && size <= kMaxKeymapBytes) {
-            void* map = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-            if (map != MAP_FAILED) {
-                std::string_view text(static_cast<const char*>(map), size);
-                while (!text.empty() && text.back() == '\0') text.remove_suffix(1);
+            if (!ReadKeymapFd(fd, size, &text)) {
+                fprintf(stderr, "rayomd-gui: the compositor's keymap is not a file of %u bytes\n", size);
+            } else {
                 std::string error;
                 std::unique_ptr<xkb::Keymap> keymap = xkb::Keymap::Parse(text, &error);
-                munmap(map, size);
                 if (keymap) {
                     StopRepeat();
                     compose_.Reset();
@@ -1604,7 +1594,7 @@ void WaylandWindowImpl::OnDataDevice(uint32_t, uint16_t opcode, const rgui_wl_ar
             break;
         }
         it->second.transferring = true;
-        Receive(id, "text/uri-list", [this, id](std::string list) {
+        Receive(id, "text/uri-list", false, [this, id](std::string list) {
             auto offer = offers_.find(id);
             if (offer != offers_.end()) {
                 if (rgui_wl_object_version(conn_, id) >= 3 && offer->second.action == WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY) {
@@ -1635,7 +1625,8 @@ void WaylandWindowImpl::OnDataOffer(uint32_t id, uint16_t opcode, const rgui_wl_
     }
 }
 
-void WaylandWindowImpl::Receive(uint32_t offer, const char* mime, std::function<void(std::string)> done) {
+void WaylandWindowImpl::Receive(uint32_t offer, const char* mime, bool paste,
+                                std::function<void(std::string)> done) {
     int fds[2];
     if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) {
         tasks_.Post([done = std::move(done)] { done(std::string()); });
@@ -1644,68 +1635,11 @@ void WaylandWindowImpl::Receive(uint32_t offer, const char* mime, std::function<
     Send(offer, WL_DATA_OFFER_R_RECEIVE, {S(mime), H(fds[1])});
     close(fds[1]);  // the request carries a duplicate; the source closes the last write end
     Flush();
-    Transfer t;
-    t.done = std::move(done);
-    transfers_[fds[0]] = std::move(t);
-    if (rgui_loop_add_fd(fds[0], POLLIN, OnTransferReadable, this) != 0) FinishTransfer(fds[0], false);
-}
-
-void WaylandWindowImpl::OnTransferReadable(int fd, uint32_t revents, void* user) {
-    auto* self = static_cast<WaylandWindowImpl*>(user);
-    auto it = self->transfers_.find(fd);
-    if (it == self->transfers_.end()) return;
-    Transfer& t = it->second;
-    char buffer[65536];
-    for (;;) {
-        const ssize_t n = read(fd, buffer, sizeof buffer);
-        if (n > 0) {
-            if (t.data.size() + static_cast<size_t>(n) > kMaxClipboardBytes) {
-                self->FinishTransfer(fd, false);
-                return;
-            }
-            t.data.append(buffer, static_cast<size_t>(n));
-            continue;
-        }
-        if (n == 0) {
-            self->FinishTransfer(fd, true);
-            return;
-        }
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            if (revents & (POLLERR | POLLNVAL)) self->FinishTransfer(fd, false);
-            return;
-        }
-        self->FinishTransfer(fd, false);
-        return;
+    if (paste) {
+        transfers_.ReceivePaste(fds[0], std::move(done));
+    } else {
+        transfers_.Receive(fds[0], std::move(done));
     }
-}
-
-void WaylandWindowImpl::OnTransferWritable(int fd, uint32_t, void* user) {
-    auto* self = static_cast<WaylandWindowImpl*>(user);
-    auto it = self->transfers_.find(fd);
-    if (it == self->transfers_.end()) return;
-    Transfer& t = it->second;
-    while (t.offset < t.text->size()) {
-        const ssize_t n = write(fd, t.text->data() + t.offset, t.text->size() - t.offset);
-        if (n > 0) {
-            t.offset += static_cast<size_t>(n);
-            continue;
-        }
-        if (n < 0 && errno == EINTR) continue;
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;  // wait for the reader
-        break;  // EPIPE: the reader went away
-    }
-    self->FinishTransfer(fd, true);
-}
-
-void WaylandWindowImpl::FinishTransfer(int fd, bool ok) {
-    auto it = transfers_.find(fd);
-    if (it == transfers_.end()) return;
-    Transfer t = std::move(it->second);
-    transfers_.erase(it);
-    rgui_loop_remove_fd(fd);
-    close(fd);
-    if (!t.writing && t.done) t.done(ok ? std::move(t.data) : std::string());
 }
 
 void WaylandWindowImpl::OnDataSource(uint32_t id, uint16_t opcode, const rgui_wl_arg* args) {
@@ -1715,16 +1649,7 @@ void WaylandWindowImpl::OnDataSource(uint32_t id, uint16_t opcode, const rgui_wl
             close(fd);
             return;
         }
-        const int flags = fcntl(fd, F_GETFL);
-        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-            close(fd);
-            return;
-        }
-        Transfer t;
-        t.writing = true;
-        t.text = selectionText_;
-        transfers_[fd] = std::move(t);
-        if (rgui_loop_add_fd(fd, POLLOUT, OnTransferWritable, this) != 0) FinishTransfer(fd, false);
+        transfers_.Send(fd, selectionText_);  // closes it when over the limits
     } else if (opcode == WL_DATA_SOURCE_E_CANCELLED) {
         if (id == selectionSource_) {
             selectionSource_ = 0;
@@ -1755,7 +1680,7 @@ void WaylandWindowImpl::RequestClipboardText(std::function<void(std::string)> ca
     if (selectionOffer_ && it != offers_.end()) {
         for (const char* mime : {"text/plain;charset=utf-8", "UTF8_STRING", "text/plain"}) {
             if (std::find(it->second.mimes.begin(), it->second.mimes.end(), mime) != it->second.mimes.end()) {
-                Receive(selectionOffer_, mime, std::move(callback));
+                Receive(selectionOffer_, mime, true, std::move(callback));
                 return;
             }
         }
@@ -1802,6 +1727,35 @@ void WaylandWindowImpl::OnUserTimer(uint64_t id, void* user) {
 }
 
 } // namespace
+
+uint32_t FitScale120(int logicalWidth, int logicalHeight, uint32_t scale120, bool wholeScale) {
+    const uint64_t lw = static_cast<uint64_t>(std::max(logicalWidth, 1));
+    const uint64_t lh = static_cast<uint64_t>(std::max(logicalHeight, 1));
+    const uint32_t step = wholeScale ? 120 : 1;
+    auto fits = [&](uint32_t s) {
+        const uint64_t w = (lw * s + 60) / 120;
+        const uint64_t h = (lh * s + 60) / 120;
+        return w <= static_cast<uint64_t>(kMaxDeviceSide) && h <= static_cast<uint64_t>(kMaxDeviceSide) &&
+               w * h <= static_cast<uint64_t>(kMaxDevicePixels);
+    };
+    while (scale120 > 120 && !fits(scale120)) scale120 = scale120 - step < 120 ? 120 : scale120 - step;
+    return scale120;
+}
+
+bool ReadKeymapFd(int fd, uint32_t size, std::string* text) {
+    struct stat st;
+    if (size == 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        static_cast<uint64_t>(st.st_size) < size) {
+        return false;
+    }
+    void* map = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED) return false;
+    std::string_view view(static_cast<const char*>(map), size);
+    while (!view.empty() && view.back() == '\0') view.remove_suffix(1);
+    text->assign(view.data(), view.size());
+    munmap(map, size);
+    return true;
+}
 
 std::unique_ptr<WaylandWindow> WaylandWindow::Create(const WindowOptions& options) {
     auto window = std::make_unique<WaylandWindowImpl>();

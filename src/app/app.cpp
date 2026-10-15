@@ -3,10 +3,13 @@
 
 #include "app/themeselect.h"
 #include "common/exact_math.h"
+#include "common/file_io.h"
 #include "gfx/png_write.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
+#include <system_error>
 
 namespace rgui {
 
@@ -30,7 +33,7 @@ Startup BeginStartup(const Args& args, std::filesystem::path settingsPath,
     startup.fontIndex = std::make_unique<text::FontIndex>();
     startup.fontIndex->Start();
     startup.fontPaths = text::FontChoicePaths::Default();
-    startup.settings.Load(settingsPath);
+    if (!settingsPath.empty()) startup.settings.Load(settingsPath);  // empty: no settings at all
     startup.settingsPath = std::move(settingsPath);
     startup.windowWidth = std::max(App::kMinWidth, startup.settings.GetInt("ui.windowWidth", 1280));
     startup.windowHeight = std::max(App::kMinHeight, startup.settings.GetInt("ui.windowHeight", 820));
@@ -143,7 +146,7 @@ void App::SettingsChanged() {
 }
 
 void App::SaveSettings() {
-    if (snapshot_) return;
+    if (snapshot_ || settingsPath_.empty()) return;
     if (saveTimer_ != 0) {
         platform_.CancelTimer(saveTimer_);
         saveTimer_ = 0;
@@ -202,6 +205,33 @@ void App::OnCloseRequest() {
 }
 
 void App::OnDropFile(std::string path) { window_->DropFile(path); }
+
+void App::OnPlatformError(std::string message) {
+    window_->SetStatus(std::move(message), StatusKind::Error);
+    platform_.RequestFrame();
+}
+
+bool App::SaveRecoveryCopy() {
+    if (!window_ || !window_->Doc().modified || settingsPath_.empty()) return false;
+    const fs::path dir = settingsPath_.parent_path() / "recovery";
+    std::error_code error;
+    fs::create_directories(dir, error);
+    char stamp[32] = "";
+    const std::time_t now = std::time(nullptr);
+    if (const std::tm* local = std::localtime(&now)) std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", local);
+    std::string stem = fs::u8path(window_->Doc().displayName).stem().u8string();
+    if (stem.empty()) stem = "untitled";
+    fs::path path = dir / fs::u8path(stem + "-" + stamp + ".md");
+    for (int n = 2; fs::exists(path, error) && n < 100; ++n) {
+        path = dir / fs::u8path(stem + "-" + stamp + "-" + std::to_string(n) + ".md");
+    }
+    if (!RayoMd::File::WriteAll(path, window_->Editor().CopyText())) {
+        std::fprintf(stderr, "rayomd-gui: cannot save the unsaved text to %s\n", path.u8string().c_str());
+        return false;
+    }
+    std::fprintf(stderr, "rayomd-gui: unsaved text saved to %s\n", path.u8string().c_str());
+    return true;
+}
 
 void App::OnSystemAppearance(bool dark, double textScale) {
     systemDark_ = dark;

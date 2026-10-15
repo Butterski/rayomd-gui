@@ -10,7 +10,8 @@
 //     if (args.mode == rgui::Args::Mode::Usage) { print Args::kUsage to stderr; return Args::kUsageExitCode; }
 //     // Starts the font index scan and reads the settings. The path is ConfigDir() / the settings
 //     // file name: Linux rgui::wl::XdgConfigDir() / "settings.ini", Windows
-//     // window.ConfigDir() / L"rayomd-gui.ini" (the Win32Window object, before Create).
+//     // window.ConfigDir() / L"rayomd-gui.ini" (the Win32Window object, before Create); empty
+//     // when there is no config directory (no settings are read or written then).
 //     rgui::Startup startup = rgui::BeginStartup(args, settingsPath, processStart);
 //     // Windows only: startup.doubleClickMs = GetDoubleClickTime();
 //     create the window with startup.windowWidth x startup.windowHeight (logical px) and
@@ -19,7 +20,8 @@
 //         // waits for the font index, picks the interface font, wears the theme, opens the file
 //     window.SetClient(app.get());
 //     run the event loop until Platform::Quit;  (Linux SIGINT / SIGTERM: app->SaveSettings(),
-//         then leave the loop without prompting)
+//         then leave the loop without prompting; the compositor gone: app->SaveRecoveryCopy()
+//         and app->SaveSettings(), exit 1)
 //     write app->ExitStdout() to stdout and app->ExitStderr() to stderr;
 //     return app->ExitCode();
 //
@@ -93,14 +95,20 @@ public:
     void OnResize(int width, int height, double scale) override;
     void OnCloseRequest() override;
     void OnDropFile(std::string path) override;
+    void OnPlatformError(std::string message) override;
     void OnSystemAppearance(bool dark, double textScale) override;
     void OnOmarchyChanged() override;
     void OnFontsChanged() override;
     void OnRoundingChanged(int rounding) override;
     void OnFrame() override;
 
-    // Writes the settings now (not in snapshot mode).
+    // Writes the settings now (not in snapshot mode, nor without a settings path).
     void SaveSettings();
+    // When the document has unsaved changes, writes the editor's text to
+    // <settings dir>/recovery/<name>-<YYYYmmdd-HHMMSS>.md and says so on stderr; for a platform
+    // that lost its window (the compositor went away) and must exit. False when nothing was
+    // written.
+    bool SaveRecoveryCopy();
 
     // After the loop: the process's exit code and what to print.
     int ExitCode() const { return exitCode_; }

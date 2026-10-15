@@ -2,6 +2,7 @@
 # The Linux platform layer, except main_linux.cpp.
 list(APPEND RGUI_LINUX_SOURCES
     platform/linux/compose.cpp
+    platform/linux/data_transfer.cpp
     platform/linux/dbus_wire.c
     platform/linux/hypr_ipc.c
     platform/linux/omarchy.cpp

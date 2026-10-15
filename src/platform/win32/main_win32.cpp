@@ -8,12 +8,41 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace {
+
+// DLLs from System32 only, before anything loads one: the application directory (Downloads) and
+// the working directory (a document's folder) are never searched, for us or for the DLLs the
+// system loads on our behalf (themes, IMEs, shell extensions in the file dialogs, WIC codecs).
+// Images from remote shares are refused. Looked up at run time, so headers or systems that lack
+// a function only lose that part; failures are ignored.
+void RestrictDllSearch() {
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!kernel32) return;
+    auto lookup = [kernel32](const char* name) {
+        return reinterpret_cast<void (*)()>(GetProcAddress(kernel32, name));
+    };
+    using SetDefaultDllDirectoriesFn = BOOL(WINAPI*)(DWORD);
+    using SetDllDirectoryFn = BOOL(WINAPI*)(LPCWSTR);
+    using SetProcessMitigationPolicyFn = BOOL(WINAPI*)(int, PVOID, SIZE_T);
+    constexpr DWORD kSearchSystem32 = 0x00000800;  // LOAD_LIBRARY_SEARCH_SYSTEM32
+    constexpr int kProcessImageLoadPolicy = 10;     // PROCESS_MITIGATION_POLICY
+    constexpr DWORD kNoRemoteImages = 1u << 0;      // PROCESS_MITIGATION_IMAGE_LOAD_POLICY bits
+    constexpr DWORD kPreferSystem32Images = 1u << 2;
+    if (auto set = reinterpret_cast<SetDefaultDllDirectoriesFn>(lookup("SetDefaultDllDirectories"))) {
+        set(kSearchSystem32);
+    }
+    if (auto set = reinterpret_cast<SetDllDirectoryFn>(lookup("SetDllDirectoryW"))) set(L"");
+    if (auto set = reinterpret_cast<SetProcessMitigationPolicyFn>(lookup("SetProcessMitigationPolicy"))) {
+        DWORD flags = kNoRemoteImages | kPreferSystem32Images;
+        set(kProcessImageLoadPolicy, &flags, sizeof flags);
+    }
+}
 
 // A GUI-subsystem process has no console; attach to the parent's (a terminal) once, so
 // --version, --snapshot and usage errors print there. Redirected handles work without it.
@@ -45,10 +74,20 @@ std::string WithNewline(std::string text) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    RestrictDllSearch();
     const auto processStart = std::chrono::steady_clock::now();
 
     std::vector<std::string> arguments;
-    for (int i = 1; i < __argc; ++i) arguments.push_back(rgui::win32::Narrow(__wargv[i]));
+    for (int i = 1; i < __argc; ++i) {
+        std::string argument;
+        if (!rgui::win32::NarrowPath(__wargv[i], &argument)) {
+            // Replacing the unpaired surrogate would name another file.
+            AttachParentConsole();
+            Write(STD_ERROR_HANDLE, "rayomd-gui: argument " + std::to_string(i) + " is not valid Unicode\n");
+            return rgui::Args::kUsageExitCode;
+        }
+        arguments.push_back(std::move(argument));
+    }
     const rgui::Args args = rgui::ParseArgs(arguments);
 
     if (args.mode == rgui::Args::Mode::Version) {
@@ -65,7 +104,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (console) AttachParentConsole();
 
     rgui::win32::Win32Window window;
-    rgui::Startup startup = rgui::BeginStartup(args, window.ConfigDir() / L"rayomd-gui.ini", processStart);
+    // Without a settings directory there are no settings: never a relative rayomd-gui.ini in the
+    // working directory, which may be a downloaded folder.
+    const std::filesystem::path configDir = window.ConfigDir();
+    rgui::Startup startup = rgui::BeginStartup(
+        args, configDir.empty() ? std::filesystem::path() : configDir / L"rayomd-gui.ini", processStart);
     startup.doubleClickMs = static_cast<int>(GetDoubleClickTime());
 
     rgui::win32::WindowOptions options;
