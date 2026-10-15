@@ -55,6 +55,10 @@ memory, so it is the PDF, not an approximation of it.
   headless output. The ctest entries `rayomd-gui-wayland-weston` (client-side decorations) and
   `rayomd-gui-wayland-sway` (server-side) leave `e2e/<compositor>/out.png` in the build
   directory.
+- `tests/fuzz/` — libFuzzer harnesses, one per reader of outside data (PDF, JPEG, fonts, theme
+  TOML and tokens, fontconfig XML, settings, XKB keymaps, Compose, D-Bus, Wayland wire), the seed
+  generator `rgui-fuzz-seeds`, `run_fuzzers.sh`, and `regressions/<harness>/`: minimized inputs
+  that once crashed, replayed by the unit test `fuzz.regressions` in every build.
 - `linux/` — the desktop file, icons and the Arch PKGBUILD.
 - `third_party/omarchy/` — the MIT notices of the Omarchy, Omawrite and Hype material and what
   came from where.
@@ -104,6 +108,25 @@ memory, so it is the PDF, not an approximation of it.
   keymap form the reader misses is added to the reader and to the fixtures, never handed to
   libxkbcommon.
 
+## Hardening And Fuzzing
+
+- The top-level `CMakeLists.txt` sets the exploit mitigations before
+  `add_subdirectory(external/rayomd)`, so the engine compiled into the app gets them too. Linux
+  release: `_FORTIFY_SOURCE=3`, `-fstack-protector-strong`, `-fstack-clash-protection`,
+  `-fcf-protection` (C, C++ and the `.S` kernels, whose CET note `asm.h` emits), PIE (libraries
+  compiled `-fPIE`), `-z relro -z now -z noexecstack`. MinGW release: `-fstack-protector-strong`,
+  `_FORTIFY_SOURCE=2`, `--dynamicbase --nxcompat --high-entropy-va`. `_GLIBCXX_ASSERTIONS` is on
+  for the app's own code in every configuration (`rgui_flags`); not for the engine, where it
+  cost 7.5 % of `BuildPdf`.
+- `tests/check_hardening.sh linux|windows <executable>` checks them (CI runs it on both): BIND_NOW,
+  GNU_RELRO, a non-executable stack, PIE, `x86 feature: IBT, SHSTK` (one object built without
+  `-fcf-protection`, an assembly file included, drops it for the whole binary), `__stack_chk_fail`
+  and `__*_chk`, NEEDED; DllCharacteristics 0x0160 and no import of a delay-loaded DLL.
+- A new reader of outside data gets a harness in `tests/fuzz/` (listed in `harness.h`,
+  `tests/fuzz.cmake`, `tests/fuzz/CMakeLists.txt`, `run_fuzzers.sh` and `fuzz.regressions`) and
+  seeds in `make_seeds.cpp`. A crash a fuzzer finds is fixed with its minimized input committed
+  under `tests/fuzz/regressions/<harness>/`.
+
 ## Build And Test
 
 Linux (Arch, as CI):
@@ -125,3 +148,11 @@ cmake -S . -B build/mingw -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=x86_64-
 `gfx.`. Tests that need an outside tool (poppler's `pdftocairo`, `djpeg`, `xkbcli`,
 `dbus-run-session`, `weston`, `sway`) are separate ctest entries, added when CMake finds the
 tool.
+
+Fuzzing (Clang with compiler-rt; CI runs every harness 60 s):
+
+```sh
+cmake --preset linux-fuzz && cmake --build --preset linux-fuzz
+tests/fuzz/run_fuzzers.sh build/linux-fuzz 600 build/fuzz-work [harness...]
+build/linux-fuzz/tests/fuzz/rgui-fuzz-pdf <crash file>   # reproduce one input
+```

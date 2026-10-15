@@ -7,7 +7,7 @@ set(RGUI_TEST_SOURCES
     main.cpp
     runner.cpp
     test_build.cpp)
-foreach(module gfx text pdf ui app linux)
+foreach(module gfx text pdf ui app linux fuzz)
     include(${CMAKE_CURRENT_SOURCE_DIR}/${module}.cmake)
 endforeach()
 

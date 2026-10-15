@@ -30,6 +30,18 @@
       }
     },
     {
+      "name": "linux-fuzz",
+      "displayName": "Linux, libFuzzer harnesses (Clang, ASan and UBSan)",
+      "binaryDir": "${sourceDir}/build/linux-fuzz",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "RGUI_FUZZ": "ON",
+        "BUILD_TESTING": "OFF"
+      }
+    },
+    {
       "name": "windows-mingw",
       "displayName": "Windows, MinGW-w64",
       "generator": "MinGW Makefiles",
@@ -53,6 +65,10 @@
     {
       "name": "linux-asan",
       "configurePreset": "linux-asan"
+    },
+    {
+      "name": "linux-fuzz",
+      "configurePreset": "linux-fuzz"
     },
     {
       "name": "windows-mingw",
