@@ -33,5 +33,37 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(rayomd_gui_linux PUBLIC rayomd_gui_core)
         target_compile_definitions(rayomd_gui_linux PRIVATE _GNU_SOURCE)
         rgui_flags(rayomd_gui_linux)
+
+        # rayomd-gui: glibc only, libstdc++ and libgcc linked in. NEEDED holds libc.so.6 and
+        # ld-linux-x86-64.so.2, which libstdc++.a's TLS code references (see AGENTS.md).
+        add_executable(rayomd-gui platform/linux/main_linux.cpp)
+        target_link_libraries(rayomd-gui PRIVATE rayomd_gui_linux)
+        target_compile_definitions(rayomd-gui PRIVATE _GNU_SOURCE)
+        target_link_options(rayomd-gui PRIVATE
+            "$<$<CONFIG:Release>:-s;-static-libstdc++;-static-libgcc;-Wl,--gc-sections;-Wl,--as-needed>")
+        rgui_flags(rayomd-gui)
     endif()
+endif()
+
+# The Win32 platform layer (platform/win32/sources.cmake sets RGUI_WIN32_SOURCES): a library the
+# executable links. comdlg32, shell32, dwmapi and imm32 are loaded on first use, not imported:
+# the --wrap options travel to whatever links this library.
+if(WIN32)
+    set(RGUI_WIN32_SOURCES)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/sources.cmake)
+    add_library(rayomd_gui_win32 STATIC ${RGUI_WIN32_SOURCES})
+    target_link_libraries(rayomd_gui_win32 PUBLIC rayomd_gui_core user32 gdi32 advapi32)
+    target_compile_definitions(rayomd_gui_win32 PUBLIC UNICODE _UNICODE)
+    foreach(function ${RGUI_WIN32_DELAY_LOADED})
+        target_link_options(rayomd_gui_win32 INTERFACE "-Wl,--wrap=${function}")
+    endforeach()
+    rgui_flags(rayomd_gui_win32)
+
+    # rayomd-gui.exe: a GUI-subsystem program (wWinMain), static, its icon and manifest from the
+    # resource script.
+    enable_language(RC)
+    add_executable(rayomd-gui WIN32 platform/win32/main_win32.cpp platform/win32/rayomd-gui.rc)
+    target_link_libraries(rayomd-gui PRIVATE rayomd_gui_win32)
+    target_link_options(rayomd-gui PRIVATE -municode -s -static -Wl,--gc-sections)
+    rgui_flags(rayomd-gui)
 endif()

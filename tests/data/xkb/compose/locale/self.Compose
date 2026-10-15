@@ -1,0 +1,3 @@
+# The included file includes itself: the include depth ends it.
+include "%S/self.Compose"
+<Multi_key> <d> <d>	: "đ"	dstroke

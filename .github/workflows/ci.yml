@@ -25,6 +25,23 @@ jobs:
           submodules: recursive
       - name: Build and test
         run: cmake --preset linux-release && cmake --build --preset linux-release --parallel 4 && ctest --preset linux-release
+      - name: Sanitizers
+        run: cmake --preset linux-asan && cmake --build --preset linux-asan --parallel 4 && ctest --preset linux-asan -R "rayomd-gui-unit|rayomd-gui-wayland-weston"
+      - name: Dynamic section (libc only)
+        run: |
+          readelf -d build/linux-release/src/rayomd-gui
+          needed=$(readelf -d build/linux-release/src/rayomd-gui | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort | tr '\n' ' ')
+          test "$needed" = "ld-linux-x86-64.so.2 libc.so.6 " || { echo "unexpected NEEDED entries: $needed"; exit 1; }
+      - name: Upload snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-snapshots
+          path: |
+            build/linux-release/e2e/weston/out.png
+            build/linux-release/e2e/sway/out.png
+            build/linux-asan/e2e/weston/out.png
+          if-no-files-found: warn
 
   windows:
     name: Windows (MinGW-w64)
@@ -48,3 +65,17 @@ jobs:
             mingw-w64-ucrt-x86_64-python
       - name: Build and test
         run: cmake --preset windows-mingw && cmake --build --preset windows-mingw --parallel 4 && build/windows/tests/rayomd-gui-tests.exe
+      - name: Snapshot
+        run: |
+          appdata="$(mktemp -d)"
+          mkdir -p "$appdata/RayoMD"
+          printf 'ui.theme=tokyo-night\n' > "$appdata/RayoMD/rayomd-gui.ini"
+          # Redirected output: the GUI-subsystem exe writes to the pipes, and the shell waits for it.
+          APPDATA="$(cygpath -w "$appdata")" build/windows/src/rayomd-gui.exe --snapshot snapshot.png external/rayomd/tester.md 2>&1 | cat
+          test "${PIPESTATUS[0]}" -eq 0
+          python tests/e2e/check_snapshot.py snapshot.png 1a1b26 7aa2f7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snapshot-windows
+          path: snapshot.png

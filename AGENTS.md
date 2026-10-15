@@ -40,11 +40,21 @@ memory, so it is the PDF, not an approximation of it.
 - `src/app/` — the app, independent of the platform: the `Platform` interface, export settings,
   the document, the build worker, preview pages, the main window, arguments and snapshot mode.
 - `src/platform/linux/` — Wayland, keyboard (XKB keymap, keysyms, Compose), D-Bus and the
-  desktop portal, Omarchy and Hyprland integration, the event loop, `main_linux.cpp`.
+  desktop portal, Omarchy and Hyprland integration, the event loop; all of it is the library
+  `rayomd_gui_linux`, which the tests link too. `main_linux.cpp` is the executable
+  `rayomd-gui`: the startup sequence of `src/app/app.h`, with the portal, the Omarchy watcher
+  and Hyprland's rounding wired into the event loop.
 - `src/platform/win32/` — the Win32 window, input, shell integration, delay-loaded system DLLs,
   resources, `main_win32.cpp`.
 - `tests/` — `rayomd-gui-tests` (one executable, `RGUI_TEST("module.name")`; arguments select
-  tests by name prefix), its data and corpus, `tests/e2e/` for the compositor runs.
+  tests by name prefix), its data and corpus.
+- `tests/e2e/` — the end-to-end runs: `run_compositor.sh weston|sway <rayomd-gui> <out dir>`
+  starts a headless compositor in a temporary HOME and private `XDG_RUNTIME_DIR`, with an
+  Omarchy theme made from `test-theme.toml`, takes `rayomd-gui --snapshot` of
+  `external/rayomd/tester.md` and checks it with `check_snapshot.py`; `sway.conf` sizes sway's
+  headless output. The ctest entries `rayomd-gui-wayland-weston` (client-side decorations) and
+  `rayomd-gui-wayland-sway` (server-side) leave `e2e/<compositor>/out.png` in the build
+  directory.
 - `linux/` — the desktop file, icons and the Arch PKGBUILD.
 - `third_party/omarchy/` — the MIT notices of the Omarchy, Omawrite and Hype material and what
   came from where.
@@ -73,6 +83,26 @@ memory, so it is the PDF, not an approximation of it.
   `RayoMd::Text::WinAnsiToUtf8` and `DecodeUtf8`, `RayoMd::Flate::ZlibCompress`,
   `RayoMd::File::ReadAll`.
 - Generated `.inc` files are never edited by hand; change and rerun their script.
+
+## Linux Rules
+
+- libc only. `readelf -d rayomd-gui` lists `libc.so.6` and `ld-linux-x86-64.so.2` as NEEDED and
+  nothing else; CI fails on any other entry. `ld-linux-x86-64.so.2` is glibc's program
+  interpreter, which the kernel maps for every dynamic executable: it is NEEDED because the
+  statically linked `libstdc++.a` objects with thread-local data (`eh_globals.o`, `mutex.o`)
+  reference `__tls_get_addr`, and it opens no file. Add no library and no `dlopen` of our own.
+  The one library loaded at run time is the engine's `dlopen` of `libm.so.6` when an SVG needs a
+  transcendental function, inherited from `rayomd`.
+- `--as-needed` cannot drop a library a discarded section referenced: libstdc++'s
+  floating-point `std::from_chars` / `std::to_chars` reference `fesetround` and make
+  `libm.so.6` NEEDED even after `--gc-sections`. Parse and format floating point with `strtod`
+  and `snprintf` (the C locale; `setlocale` is never called).
+- Every Wayland or D-Bus message added goes into the protocol tables (`wl_protocols.c`, the
+  D-Bus calls in `portal.cpp`) with its signature from the protocol XML or interface
+  definition.
+- Keymap changes keep the xkb fixtures (`tests/data/xkb`, ctest `rayomd-gui-xkb`) passing; a
+  keymap form the reader misses is added to the reader and to the fixtures, never handed to
+  libxkbcommon.
 
 ## Build And Test
 

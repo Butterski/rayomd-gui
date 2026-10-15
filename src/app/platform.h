@@ -8,6 +8,7 @@
 #include "gfx/geometry.h"
 #include "gfx/surface.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -26,8 +27,10 @@ enum class Edge : uint8_t { Top, Bottom, Left, Right, TopLeft, TopRight, BottomL
 enum class FileDialog : uint8_t { OpenDocument, SaveMarkdown, ExportPdf, ChooseTheme };
 
 struct FileDialogResult {
-    // Unavailable: no portal, or the system dialog failed; the app then asks for the path itself.
-    enum Kind : uint8_t { Chosen, Cancelled, Unavailable } kind = Cancelled;
+    // Unavailable: no portal, or the system dialog could not be shown; the app then asks for the
+    // path itself. Failed: the system dialog reported a failure (the portal's Response code 2);
+    // the app shows the status `File dialog failed`.
+    enum Kind : uint8_t { Chosen, Cancelled, Unavailable, Failed } kind = Cancelled;
     std::string path;  // UTF-8, when Chosen
 };
 
@@ -102,6 +105,14 @@ public:
     virtual void StartResize(Edge edge) = 0;
     virtual void ToggleMaximize() = 0;
     virtual void Minimize() = 0;
+    // Whether the window is maximized now (the app then keeps the restored size it saves, and
+    // draws no client-side resize edges). Platforms that cannot tell answer false.
+    virtual bool IsMaximized() const { return false; }
+    // Matches the system's window frame to the theme where the system draws one in colour
+    // (Windows: dark title bar, and on Windows 11 caption, caption text and border colours).
+    // Colours are 0xAARRGGBB, alpha ignored. Platforms without such a frame do nothing.
+    virtual void SetWindowColors(bool /*dark*/, uint32_t /*background*/, uint32_t /*foreground*/,
+                                 uint32_t /*accent*/) {}
 
     // Clipboard.
     virtual void SetClipboardText(std::string text) = 0;
@@ -119,6 +130,11 @@ public:
     virtual uint64_t StartTimer(int ms, std::function<void()> callback) = 0;
     virtual void CancelTimer(uint64_t id) = 0;
     virtual void Quit() = 0;
+    // The clock of StartTimer and of the app's frames, monotonic milliseconds (a steady clock;
+    // the tests' platform answers its fake time).
+    virtual double NowMs() const {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
 
     // Directories (created by their users when missing).
     virtual std::filesystem::path ConfigDir() const = 0;

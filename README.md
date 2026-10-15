@@ -11,6 +11,27 @@ the app's own PDF rasterizer from the bytes the engine just made in memory.
 
 This repository is private while the app is prepared for its first release.
 
+## Using it
+
+```sh
+rayomd-gui [file.md | file.pdf]
+```
+
+- The editor is on the left, the PDF on the right, rebuilt 80 ms after you stop typing. A
+  reversible RayoMD PDF opens as its embedded Markdown source.
+- The footer holds Open (`Ctrl+O`), Save (`Ctrl+S`, `Ctrl+Shift+S` to save as), Export PDF
+  (`Ctrl+E`, `Ctrl+Shift+E` to choose the file) and Options (`Ctrl+,`): style, margins, page
+  size, PDF theme file, table of contents, page numbers, code highlighting, PDF/A-3b, PDF/UA-1,
+  compression, embedded source, and the interface theme. `Ctrl+=`, `Ctrl+-` and `Ctrl+0` change
+  the editor's text size, `Ctrl+wheel` over the preview its zoom.
+- On Omarchy the interface follows the current theme and font as they change. Elsewhere it
+  follows the system's light or dark mode with Omarchy's bundled themes, or the one you pick.
+- File dialogs are the system's (the desktop portal on Linux, the common dialogs on Windows).
+- `rayomd-gui --snapshot out.png file.md` writes the first complete frame to a PNG and exits;
+  the end-to-end tests use it.
+
+URL images are not fetched on Linux (the build links no libcurl); they show their alt text.
+
 ## Building
 
 The engine is the `external/rayomd` submodule; clone with `--recursive`, or run
@@ -29,6 +50,10 @@ On Windows, in an MSYS2 UCRT64 shell:
 cmake --preset windows-mingw && cmake --build --preset windows-mingw
 build/windows/tests/rayomd-gui-tests.exe
 ```
+
+`tests/e2e/run_compositor.sh weston|sway` runs the app on a headless compositor and checks its
+snapshot; ctest runs both when weston and sway are installed. On Arch, `linux/pkgbuild` builds
+a package of the working tree: `cd linux/pkgbuild && makepkg -f`.
 
 ## License
 

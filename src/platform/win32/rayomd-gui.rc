@@ -1,0 +1,4 @@
+#include <windows.h>
+
+1 RT_MANIFEST "rayomd-gui.manifest"
+1 ICON "../../../assets/rayomd.ico"
