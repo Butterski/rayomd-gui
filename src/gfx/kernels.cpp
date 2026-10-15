@@ -208,11 +208,20 @@ const Kernels& ScalarKernels() {
 }
 
 const Kernels& ActiveKernels() {
-    return ScalarKernels();
+    static const Kernels sse2{rgui_accumulate_row_sse2, rgui_blend_solid_sse2, rgui_blend_span_sse2,
+                              rgui_ycc_to_bgra_sse2, "sse2"};
+    static const Kernels avx2{rgui_accumulate_row_avx2, rgui_blend_solid_avx2, rgui_blend_span_avx2,
+                              rgui_ycc_to_bgra_avx2, "avx2"};
+    // libgcc's check includes the OS saving the ymm state (OSXSAVE and XCR0).
+    static const Kernels* const active = [] {
+        __builtin_cpu_init();
+        return __builtin_cpu_supports("avx2") ? &avx2 : &sse2;
+    }();
+    return *active;
 }
 
 void IdctBlock(const int16_t* coefficients, uint8_t* out, size_t stride) {
-    rgui_idct_islow_scalar(coefficients, out, stride);
+    rgui_idct_islow_sse2(coefficients, out, stride);
 }
 
 } // namespace rgui::gfx

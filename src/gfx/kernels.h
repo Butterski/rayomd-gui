@@ -31,6 +31,18 @@ void rgui_blend_span_scalar(uint32_t* dst, const uint32_t* src, const uint8_t* c
 void rgui_idct_islow_scalar(const int16_t* coefficients, uint8_t* out, size_t stride);
 void rgui_ycc_to_bgra_scalar(const uint8_t* const* planes, uint32_t* dst, size_t n);
 
+// The x86-64 assembly (gfx/x86_64/*.S): same signatures and results, any n including 0, any
+// pointer alignment. The avx2 variants need a CPU with AVX2.
+uint32_t rgui_accumulate_row_sse2(int32_t* cells, uint8_t* alpha, size_t width, uint32_t evenOdd);
+uint32_t rgui_accumulate_row_avx2(int32_t* cells, uint8_t* alpha, size_t width, uint32_t evenOdd);
+void rgui_blend_solid_sse2(uint32_t* dst, const uint8_t* coverage, size_t n, uint32_t color);
+void rgui_blend_solid_avx2(uint32_t* dst, const uint8_t* coverage, size_t n, uint32_t color);
+void rgui_blend_span_sse2(uint32_t* dst, const uint32_t* src, const uint8_t* coverage, size_t n);
+void rgui_blend_span_avx2(uint32_t* dst, const uint32_t* src, const uint8_t* coverage, size_t n);
+void rgui_idct_islow_sse2(const int16_t* coefficients, uint8_t* out, size_t stride);
+void rgui_ycc_to_bgra_sse2(const uint8_t* const* planes, uint32_t* dst, size_t n);
+void rgui_ycc_to_bgra_avx2(const uint8_t* const* planes, uint32_t* dst, size_t n);
+
 } // extern "C"
 
 namespace rgui::gfx {
@@ -43,12 +55,13 @@ struct Kernels {
     const char* isa;  // "scalar", "sse2" or "avx2"
 };
 
-// The fastest kernels this CPU runs, chosen once.
+// The fastest kernels this CPU runs, chosen once: avx2 when the CPU (and OS) support AVX2,
+// otherwise sse2.
 const Kernels& ActiveKernels();
 // The C++ references.
 const Kernels& ScalarKernels();
 
-// One 8x8 block through the IDCT kernel.
+// One 8x8 block through the IDCT kernel (sse2).
 void IdctBlock(const int16_t* coefficients, uint8_t* out, size_t stride);
 
 } // namespace rgui::gfx
