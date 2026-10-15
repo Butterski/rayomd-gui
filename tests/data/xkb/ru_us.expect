@@ -1,0 +1,4 @@
+# xkbcli how-to-type --rules evdev --model pc105 --layout ru,us --options grp:alts_toggle (libxkbcommon 1.13.2)
+11 2 2 0x1 0x40 0x40 0x40 # at @
+443 1 1 0x0 0x20ac 0x20ac 0x20ac # EuroSign €
+92 1 1 0x0 0xfe03 0xfe03 0x0 # ISO_Level3_Shift -

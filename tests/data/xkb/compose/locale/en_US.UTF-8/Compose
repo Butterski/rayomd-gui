@@ -1,0 +1,4 @@
+<dead_acute> <e>		: "é"	eacute
+<Multi_key> <a> <e>		: "X"	# replaced by the including file
+<Multi_key> <o> <c>		: "©"	copyright
+<dead_circumflex> <dead_acute> <e>	: "ế"
