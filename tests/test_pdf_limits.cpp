@@ -41,6 +41,13 @@ using rgui::pdftest::Stream;
 using rgui::pdftest::TestEnvironment;
 using Clock = std::chrono::steady_clock;
 
+// Time bounds are for optimized builds; sanitizers run about ten times slower.
+#if defined(__SANITIZE_ADDRESS__)
+constexpr double kSlow = 10;
+#else
+constexpr double kSlow = 1;
+#endif
+
 double MsSince(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
@@ -247,7 +254,7 @@ RGUI_TEST("pdf.limits_glyph_sizes") {
     CHECK(Has(stats, "budget"));
     CHECK(stats.glyphCacheBytes <= 2 * rgui::text::GlyphCache::kDefaultBudget);
     CHECK(stats.pixels <= RenderLimits::kPixelsPerPagePixel * 1200 * 1200 + RenderLimits::kPixelsBase);
-    CHECK(ms < 10000);
+    CHECK(ms < 2000 * kSlow);
 
     RenderStats off;
     Render(page("10 -5000"), 1200, off, ms);
@@ -255,7 +262,7 @@ RGUI_TEST("pdf.limits_glyph_sizes") {
     CHECK_EQ(off.glyphsCulled, uint32_t(20000));
     CHECK(off.unknown.empty());
     CHECK(off.pixels < 1000);
-    CHECK(ms < 3000);
+    CHECK(ms < 1000 * kSlow);
 
     // Above 256 px per em a glyph is filled as an outline, not cached.
     RenderStats big;
@@ -315,14 +322,14 @@ RGUI_TEST("pdf.limits_geometry") {
     Print("off-clip curves", stats, ms);
     CHECK(stats.unknown.empty());
     CHECK(stats.geometry < 50000);  // 256 pieces each before: 5.1 M segments
-    CHECK(ms < 3000);
+    CHECK(ms < 500 * kSlow);
 
     // The same curves stroked, then across the page: the stroke's reach keeps them coarse.
     RenderStats stroked;
     Render(PagePdf("2 w " + offClip.substr(0, offClip.size() - 2) + "S\n"), 1200, stroked, ms);
     Print("off-clip strokes", stroked, ms);
     CHECK(stroked.geometry < 100000);
-    CHECK(ms < 3000);
+    CHECK(ms < 500 * kSlow);
 
     std::string crossing;
     crossing.reserve(20000 * 48);
@@ -332,7 +339,7 @@ RGUI_TEST("pdf.limits_geometry") {
     Print("crossing curves", visible, ms);
     CHECK(Has(visible, "geometry"));
     CHECK(visible.geometry <= RenderLimits::kGeometry);
-    CHECK(ms < 5000);
+    CHECK(ms < 2000 * kSlow);
 }
 
 // Dense dashes stop at the dash limit; dashed lines off the page make none.
@@ -350,14 +357,14 @@ RGUI_TEST("pdf.limits_dashes") {
     Print("dense dashes", stats, ms);
     CHECK(Has(stats, "budget"));
     CHECK(stats.dashes <= RenderLimits::kDashes);
-    CHECK(ms < 10000);
+    CHECK(ms < 1000 * kSlow);  // ~1.7 s before the dash limit (100 lines: 173 ms)
 
     RenderStats offPage;
     Render(PagePdf(off), 1200, offPage, ms);
     Print("dashes off the page", offPage, ms);
     CHECK(offPage.unknown.empty());
     CHECK_EQ(offPage.dashes, uint64_t(0));
-    CHECK(ms < 2000);
+    CHECK(ms < 200 * kSlow);
 }
 
 // ---- clips -------------------------------------------------------------------------------
@@ -376,7 +383,7 @@ RGUI_TEST("pdf.limits_clip_stack") {
     Render(PagePdf(flat), 1200, stats, ms);
     Print("300 clips at one level", stats, ms);
     CHECK(stats.maskBytes <= page);
-    CHECK(ms < 3000);
+    CHECK(ms < 1000 * kSlow);
     std::string few;
     for (int i = 0; i < 30; i++) few += "0.37 0.41 99.1 98.3 re W n\n";
     few += "0 0 1 rg 0 0 100 100 re f\n";
@@ -396,7 +403,7 @@ RGUI_TEST("pdf.limits_clip_stack") {
     Print("100 nested clips at 1200 px", nested, ms);
     CHECK(Has(nested, "clip-depth"));  // the mask bytes
     CHECK(nested.maskBytes <= RenderLimits::kMaskPerPagePixel * page + RenderLimits::kMaskBase + page);
-    CHECK(ms < 3000);
+    CHECK(ms < 1000 * kSlow);
     RenderStats shallow;
     const Image after = Render(PagePdf(deep), 300, shallow, ms);
     Print("100 nested clips at 300 px", shallow, ms);
@@ -458,7 +465,7 @@ RGUI_TEST("pdf.limits_images") {
     CHECK(Has(many, "budget"));
     CHECK(many.imageBytes <= RenderLimits::kImageBytes);
     CHECK_EQ(many.images, uint32_t(8));
-    CHECK(ms < 20000);
+    CHECK(ms < 10000 * kSlow);
 
     // DecodeImage itself: over its budget it spends nothing.
     const auto file = PdfFile::Parse(PagePdf("", "<< >>", 100, 100, {GrayImage(64, 1)}), nullptr);
@@ -534,7 +541,7 @@ RGUI_TEST("jpeg.too_much_work") {
     const double ms = MsSince(start);
     std::printf("bomb: %s in %.1f ms\n", reason.c_str(), ms);
     CHECK_EQ(reason, std::string("jpeg-too-much-work"));
-    CHECK(ms < 2000);
+    CHECK(ms < 1000 * kSlow);
     // Thirty refinements are within the bound and decode.
     const std::vector<uint8_t> fine = ProgressiveBomb(256, 30);
     CHECK(rgui::pdf::DecodeJpeg(fine.data(), fine.size(), image, &reason));
@@ -567,7 +574,7 @@ RGUI_TEST("pdf.render_cancel") {
     CHECK(!ok);
     CHECK(stats.cancelled);
     CHECK(image.pixels.empty());
-    CHECK(after < 100);
+    CHECK(after < 100 * kSlow);
     // Uncancelled, the same page completes.
     cancel = false;
     RenderStats whole;
@@ -597,7 +604,7 @@ RGUI_TEST("pdf.preview_cancel") {
         const double ms = MsSince(start);
         std::printf("the new build's page shown %.1f ms after it arrived\n", ms);
         CHECK_EQ(pages.CancelledCount(), uint64_t(1));
-        CHECK(ms < 1000);
+        CHECK(ms < 1000 * kSlow);
     }
     const auto start = Clock::now();
     {
@@ -608,6 +615,6 @@ RGUI_TEST("pdf.preview_cancel") {
     }
     const double quit = MsSince(start) - 100;
     std::printf("destroyed %.1f ms after the request's 100 ms\n", quit);
-    CHECK(quit < 100);
+    CHECK(quit < 100 * kSlow);
     platform.Pump();
 }
