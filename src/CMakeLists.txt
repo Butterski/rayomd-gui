@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Warnings and release flags for RayoMD GUI's own C, C++ and assembly.
+# Warnings and release flags for RayoMD GUI's own C, C++ and assembly. _GLIBCXX_ASSERTIONS
+# bounds-checks the standard containers (operator[], front, back, ...) in every configuration,
+# for the app's code only: in the engine it cost 7.5 % of BuildPdf on tester.md x70 (13.73 ->
+# 14.76 ms), against 2 % of RenderPage here.
 function(rgui_flags target)
     target_compile_options(${target} PRIVATE
         "$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra;-Wshadow>"
@@ -8,6 +11,7 @@ function(rgui_flags target)
         -ffunction-sections
         -fdata-sections
         "$<$<CONFIG:Release>:-O2>")
+    target_compile_definitions(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:_GLIBCXX_ASSERTIONS>")
 endfunction()
 
 # Every platform-independent source. Each module lists its own in <module>/sources.cmake,

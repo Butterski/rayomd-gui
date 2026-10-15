@@ -1,0 +1,80 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: c-cpp
+            build-mode: manual
+          - language: python
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+      # The app's code and the engine compiled into it: the core library, the Linux platform layer
+      # and the executable (the tests and fuzz harnesses are left out of the analysis).
+      - name: Build
+        if: matrix.language == 'c-cpp'
+        run: |
+          cmake -S . -B build/codeql -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build build/codeql --parallel 4 --target rayomd-gui
+      # Private repositories without GitHub Advanced Security cannot upload to code scanning:
+      # the SARIF is kept as an artifact and its results printed. A result in the app's code fails
+      # the job; the engine's (external/rayomd) are printed for its repository to fix.
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+          upload: ${{ github.event.repository.private && 'never' || 'always' }}
+          output: sarif
+      - name: Results
+        run: |
+          python3 - <<'EOF'
+          import glob, json, sys
+          app = engine = 0
+          for path in glob.glob("sarif/*.sarif"):
+              for run in json.load(open(path))["runs"]:
+                  for result in run.get("results", []):
+                      location = result["locations"][0]["physicalLocation"]
+                      uri = location["artifactLocation"]["uri"]
+                      print(f'{result["ruleId"]}: {uri}:{location.get("region", {}).get("startLine", "?")}: '
+                            f'{result["message"]["text"]}')
+                      if uri.startswith("external/"):
+                          engine += 1
+                      else:
+                          app += 1
+          print(f"{app} result(s) in the app, {engine} in the engine")
+          sys.exit(1 if app else 0)
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codeql-${{ matrix.language }}
+          path: sarif
+          if-no-files-found: ignore
