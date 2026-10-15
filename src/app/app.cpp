@@ -44,7 +44,7 @@ App::App(Platform& platform, Startup startup)
       fontPaths_(std::move(startup.fontPaths)), settings_(std::move(startup.settings)),
       snapshot_(args_.mode == Args::Mode::Snapshot), windowWidth_(std::max(kMinWidth, startup.windowWidth)),
       windowHeight_(std::max(kMinHeight, startup.windowHeight)), maximized_(startup.maximized),
-      alive_(std::make_shared<bool>(true)) {
+      build_(std::move(startup.build)), alive_(std::make_shared<bool>(true)) {
     if (!fontIndex_) {
         fontIndex_ = std::make_unique<text::FontIndex>();
         fontIndex_->Start();
@@ -65,10 +65,14 @@ std::unique_ptr<App> App::Create(Platform& platform, Startup startup) {
     hooks.settingsChanged = [&a] { a.SettingsChanged(); };
     hooks.themeChanged = [&a] { a.WearTheme(); };
     hooks.quit = [&a] { a.Quit(); };
-    a.window_ = std::make_unique<MainWindow>(platform, a.fontIndex_.get(), std::move(hooks));
+    a.window_ = std::make_unique<MainWindow>(platform, a.fontIndex_.get(), std::move(hooks), std::move(a.build_));
     a.window_->LoadSettings(a.settings_);
     a.WearTheme();
-    if (a.args_.file.empty() || !a.window_->Open(a.args_.file)) a.window_->PreviewNow();
+    if (a.args_.file.empty()) {
+        a.window_->PreviewNow();
+    } else {
+        a.window_->Open(a.args_.file);
+    }
     if (a.snapshot_) {
         a.snapshotTimer_ = platform.StartTimer(kSnapshotTimeoutMs, [alive = a.alive_, &a] {
             if (!*alive) return;

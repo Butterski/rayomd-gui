@@ -16,7 +16,7 @@
 //     create the window with startup.windowWidth x startup.windowHeight (logical px) and
 //         startup.maximized;
 //     std::unique_ptr<rgui::App> app = rgui::App::Create(window, std::move(startup));
-//         // waits for the font index, picks the interface font, wears the theme, opens the file
+//         // picks the interface font, wears the theme, starts opening the file
 //     window.SetClient(app.get());
 //     run the event loop until Platform::Quit;  (Linux SIGINT / SIGTERM: app->SaveSettings(),
 //         then leave the loop without prompting)
@@ -55,7 +55,8 @@ struct Startup {
     Args args;
     std::filesystem::path settingsPath;
     std::chrono::steady_clock::time_point processStart = std::chrono::steady_clock::now();
-    // Started (scanning on its thread); App::Create waits for it.
+    // Started (scanning on its thread); App::Create waits for it unless the interface font
+    // comes from its known files (Windows).
     std::unique_ptr<text::FontIndex> fontIndex;
     // The fontconfig files that choose the interface family (FontChoicePaths::Default()).
     text::FontChoicePaths fontPaths;
@@ -66,6 +67,8 @@ struct Startup {
     bool maximized = false;
     // The double-click time in ms (Windows: GetDoubleClickTime()).
     int doubleClickMs = 300;
+    // Replaces TinyPdf::BuildPdf in the build worker (tests); nullptr: the engine.
+    BuildWorker::BuildFunction build;
 };
 
 // Starts the font index on the default font directories and loads the settings at
@@ -80,9 +83,10 @@ public:
     static constexpr int kSettingsDelayMs = 500;
     static constexpr int kSnapshotTimeoutMs = 10000;
 
-    // Waits for the font index and loads the interface font, wears the theme, opens
-    // startup.args.file (or starts an empty document) and requests the first frame. `platform`
-    // must outlive the App.
+    // Loads the interface font (FontSet::Load: from its known files where it can, else after
+    // waiting for the font index), wears the theme, starts opening startup.args.file on the
+    // loader's thread (or builds the empty document's preview) and requests the first frame.
+    // `platform` must outlive the App.
     static std::unique_ptr<App> Create(Platform& platform, Startup startup);
     ~App() override;
     App(const App&) = delete;
@@ -169,6 +173,8 @@ private:
     Cursor cursor_ = Cursor::Arrow;
     bool textInputEnabled_ = false;
     gfx::RectI textInputRect_{};
+
+    BuildWorker::BuildFunction build_;   // until the window takes it
 
     uint64_t saveTimer_ = 0;
     uint64_t deadlineTimer_ = 0;

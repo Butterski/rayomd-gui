@@ -9,11 +9,13 @@
 #include "app/app.h"
 #include "common/file_io.h"
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 
 namespace rgui::test {
 
@@ -39,6 +41,53 @@ inline bool HaveFonts() {
     return have;
 }
 
+// The engine with builds that hang until cancelled: each of the next `shots` builds blocks
+// until its PdfOptions::cancel is set, then returns BuildError::Cancelled (as the engine does);
+// the others are real, after waiting while `hold` is set (a cancel ends that wait too).
+struct CancellableBuild {
+    std::atomic<int> shots{0};
+    std::atomic<bool> hold{false};
+    std::atomic<int> calls{0};
+    std::atomic<int> blocked{0};    // builds blocking now
+    std::atomic<int> cancelled{0};
+
+    BuildWorker::BuildFunction Function() {
+        return [this](const std::string& md, const TinyPdf::PdfOptions& options, std::string& out) {
+            calls++;
+            int left = shots.load();
+            while (left > 0 && !shots.compare_exchange_weak(left, left - 1)) {
+            }
+            const auto isCancelled = [&] { return options.cancel != nullptr && options.cancel->load(); };
+            // At most a minute, so a missing cancel fails the test instead of hanging it.
+            const auto giveUp = std::chrono::steady_clock::now() + std::chrono::minutes(1);
+            if (left <= 0) {
+                while (hold.load() && !isCancelled() && std::chrono::steady_clock::now() < giveUp) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (!isCancelled()) return TinyPdf::BuildPdf(md, options, out);
+            }
+            blocked++;
+            while (!isCancelled() && std::chrono::steady_clock::now() < giveUp) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            blocked--;
+            cancelled++;
+            TinyPdf::BuildResult result;
+            result.error = TinyPdf::BuildError::Cancelled;
+            return result;
+        };
+    }
+    // Waits (real time) until a build blocks.
+    bool WaitBlocked(int timeoutMs = 10000) const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        while (blocked.load() == 0) {
+            if (std::chrono::steady_clock::now() > deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    }
+};
+
 struct AppHarness {
     static constexpr int kWidth = 1280;
     static constexpr int kHeight = 820;
@@ -47,6 +96,8 @@ struct AppHarness {
     std::unique_ptr<App> app;
     std::filesystem::path dir;
     int framesSeen = 0;
+    // Replaces the engine (set before Start).
+    BuildWorker::BuildFunction build;
 
     explicit AppHarness(const char* name, const char* group = "test-app-window") : dir(FreshDir(group, name)) {}
 
@@ -65,6 +116,7 @@ struct AppHarness {
         startup.fontIndex->SetDirectories({"/usr/share/fonts"});
         startup.fontIndex->Start();
         startup.fontPaths = {};
+        startup.build = build;
         app = App::Create(platform, std::move(startup));
         app->OnResize(kWidth, kHeight, 1.0);
     }
@@ -96,6 +148,10 @@ struct AppHarness {
                 platform.PumpUntil([&] { return platform.frameRequests != framesSeen || done(); }, 20);
             }
         }
+    }
+    // Until the file being opened is shown.
+    bool WaitLoaded(int timeoutMs = 30000) {
+        return RunUntil([&] { return !Window().Loading(); }, timeoutMs);
     }
     // Until the preview shows the newest text and every visible page its current image.
     bool Settle(int timeoutMs = 30000) {

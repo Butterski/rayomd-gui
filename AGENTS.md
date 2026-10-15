@@ -75,8 +75,11 @@ memory, so it is the PDF, not an approximation of it.
   Compose files, TOML, XML, D-Bus, Wayland.
 - Threads: the UI thread (platform event loop, UI, presenting); a tile pool of
   `clamp(hardware_concurrency - 1, 1, 4)` threads; one build worker for the engine; a preview
-  pool of `clamp(hardware_concurrency / 2, 1, 3)` threads. Workers hand results to the UI
-  thread only through `Platform::PostToUi`.
+  pool of `clamp(hardware_concurrency / 2, 1, 3)` threads; one document loader that opens
+  files. Workers hand results to the UI thread only through `Platform::PostToUi`. The UI
+  thread does no file I/O and no O(document) work per keystroke beyond the one copy of the text
+  a preview build takes (`mainwindow.h` states the preview policy); `bench.preview_latency`
+  (ctest `rayomd-gui-bench-latency`) measures keystroke-to-preview latency.
 - Reuse the engine's APIs instead of duplicating them: `TinyPdf::BuildPdf`,
   `TinyPdf::Internal::ParseTheme`, `RayoMd::PdfSource::Inspect`, `RayoMd::Inflate::ZlibReader`,
   `TinyPdf::Internal::UnfilterPngRow`, `TinyPdf::Internal::Cff`, `StandardTextWidth`,

@@ -17,6 +17,12 @@
 #include <string>
 #include <vector>
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define RGUI_HAS_ASAN 1
+#endif
+#endif
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -52,6 +58,9 @@ constexpr Before kBefore[] = {
     {70, 103.1, 105.6, 3.91, 7.70},
     {700, 272.1, 289.4, 11.00, 14.62},
 };
+// Quitting with the 700 copies' preview build in flight, on the base commit (ms; 238 and 292 in
+// two runs: the destructor waited for the build to end).
+constexpr double kQuitBefore = 265;
 
 RGUI_TEST("bench.preview_latency") {
     if (!rgui::test::HaveFonts()) {
@@ -60,7 +69,12 @@ RGUI_TEST("bench.preview_latency") {
     }
     std::string tester;
     CHECK(RayoMd::File::ReadAll(fs::u8path(rgui::test::TesterPath()), 1u << 20, tester));
+#if defined(__SANITIZE_ADDRESS__) || defined(RGUI_HAS_ASAN)
+    // Sanitized builds check the path, not the time (and run it in rayomd-gui-unit).
+    const Row rows[] = {{1, 5}, {8, 5}};
+#else
     const Row rows[] = {{1, 40}, {8, 40}, {70, 20}, {700, 10}};
+#endif
     std::printf("bench.preview_latency: keystroke -> edited page's preview current (real clock, real threads)\n");
     std::printf("  %7s %10s %6s %4s | %21s | %21s | %25s\n", "copies", "bytes", "pages", "n", "before p50 / p99 ms",
                 "after p50 / p99 ms", "UI ms/key before / after");
@@ -117,6 +131,21 @@ RGUI_TEST("bench.preview_latency") {
                     before ? before->p99 : 0.0, Percentile(latency, 0.5), Percentile(latency, 0.99),
                     before ? before->uiP50 : 0.0, before ? before->uiP99 : 0.0, Percentile(uiTime, 0.5),
                     Percentile(uiTime, 0.99));
+
+        if (row.copies == 700) {
+            // Quitting while the preview of a keystroke builds: the app goes away at once.
+            const int requested = w.RequestedGeneration();
+            rgui::InputEvent key;
+            key.type = rgui::InputEvent::Type::Text;
+            key.text = "x";
+            h.app->OnInput(key);
+            h.Frame();
+            CHECK(h.RunUntil([&] { return w.RequestedGeneration() > requested; }, 10000));
+            const auto start = Clock::now();
+            h.app.reset();
+            std::printf("  quit with the preview build of the %d copies in flight: before %.1f ms, after %.1f ms\n",
+                        row.copies, kQuitBefore, MsBetween(start, Clock::now()));
+        }
     }
 }
 

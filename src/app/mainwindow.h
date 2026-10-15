@@ -3,12 +3,29 @@
 // client-side header when the platform needs one, the footer (Omawrite's: icon buttons, status,
 // counts), the options panel, and the editor | splitter | preview content area. It owns the
 // document and everything done to it: opening, saving, exporting, the unsaved-changes prompt,
-// the live preview (80 ms after the last change), the shortcuts, and the `ui.` and `export.`
-// settings except the window's size.
+// the live preview, the shortcuts, and the `ui.` and `export.` settings except the window's
+// size.
+//
+// The live preview is pulled, not debounced. A change of the text or of an export option marks
+// the preview dirty. A build starts at the end of the frame that saw the change (after all of
+// that frame's input), when no preview build is in flight; the text is copied then, once per
+// build. When the build's result comes back and the preview is dirty again, the next build
+// starts at once. So at most one preview build is in flight and none waits behind it, at most
+// one starts per frame, an idle engine gets a keystroke within its frame, and the keystrokes
+// typed during a build all go into the one after it. The word and line counts come back with
+// the build's result (the worker counts them), and the worker reads the PDF theme file: the UI
+// thread does no O(n) or file work per keystroke beyond the one copy of the text.
+//
+// The build in flight is cancelled (PdfOptions::cancel) when the document changes (open, new),
+// when an export is requested (the worker builds it again after the export), when it runs over
+// kPreviewBudgetMs (status `Preview stopped: the document takes too long to build`; no retry
+// before the next change), and when the window goes. Cancelled results are dropped silently.
+// Files open on the document loader's thread, the status saying `Opening <name>…` meanwhile.
 #pragma once
 
 #include "app/buildworker.h"
 #include "app/document.h"
+#include "app/documentloader.h"
 #include "app/exportsettings.h"
 #include "app/platform.h"
 #include "app/previewpages.h"
@@ -41,7 +58,8 @@ enum class StatusKind : uint8_t { Info, Warning, Error };
 
 class MainWindow {
 public:
-    static constexpr int kPreviewDelayMs = 80;
+    // A preview build running longer is cancelled.
+    static constexpr int kPreviewBudgetMs = 10000;
     static constexpr float kHeaderHeight = 36;
     static constexpr float kFooterHeight = 32;
     static constexpr float kOptionsWidth = 300;
@@ -54,8 +72,10 @@ public:
         std::function<void()> quit;             // closing was confirmed
     };
 
-    // `fontIndex` (outliving the window) serves the preview's standard PDF fonts.
-    MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hooks hooks);
+    // `fontIndex` (outliving the window) serves the preview's standard PDF fonts. `build`
+    // replaces TinyPdf::BuildPdf (tests).
+    MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hooks hooks,
+               BuildWorker::BuildFunction build = nullptr);
     ~MainWindow();
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
@@ -69,10 +89,10 @@ public:
     void Frame(ui::Context& ctx);
 
     // ---- Actions ----
-    // Opens `path` at once, without the unsaved prompt, and builds its preview now. False (the
-    // status says why) when it cannot be opened.
-    bool Open(const std::string& path);
-    // Builds the preview of the current text now (startup of an empty document).
+    // Opens `path` without the unsaved prompt: on the loader's thread, then shows it and builds
+    // its preview. When it cannot be opened the status says why and the document stays.
+    void Open(const std::string& path);
+    // Builds the preview of the current text: now, or when the build in flight ends.
     void PreviewNow();
     // The window's close button, Ctrl+Q, the platform's close request: through the unsaved
     // prompt, then Hooks::quit.
@@ -93,9 +113,13 @@ public:
     // The status line as shown, and its kind.
     std::string ShownStatus(StatusKind* kind = nullptr) const;
     std::string Title() const;
-    // The preview shows pages of the newest build, no build is pending, and every visible page
-    // shows its current image (snapshot mode's condition).
+    // The preview shows pages of the newest build, no build is pending, no file is opening, and
+    // every visible page shows its current image (snapshot mode's condition).
     bool PreviewSettled() const { return settled_; }
+    // A file is being opened.
+    bool Loading() const { return loading_; }
+    // A preview build is in flight.
+    bool PreviewBuilding() const { return previewInFlight_; }
     bool UnsavedPromptOpen() const { return prompt_.open; }
     bool PathPromptOpen() const { return pathPrompt_.open; }
     bool OptionsVisible() const { return optionsVisible_; }
@@ -159,7 +183,13 @@ private:
     // Asks for a path with the system dialog (or the fallback prompt when it is unavailable).
     void AskPath(FileDialog kind, std::string suggested, std::function<void(std::string)> onChosen);
     void OptionsChanged();
-    void SchedulePreview();
+    // The text or an option changed: build the preview again (see the policy above).
+    void MarkPreviewDirty();
+    // Starts the preview build when it is dirty and none is in flight (nor a file opening).
+    void MaybeStartPreview();
+    // The document is about to change: the preview build in flight is no longer wanted.
+    void DropPreviewBuild();
+    // Copies the editor's text into doc_.text when it changed.
     void SyncText();
     void Remember(const std::string& path);
     void Dirty() { dirty_ = true; }
@@ -170,6 +200,7 @@ private:
 
     void OnPreview(PreviewReady ready);
     void OnExport(ExportFinished finished);
+    void OnLoaded(DocumentLoaded loaded);
 
     // The page at the top of the preview and how far into it the view is, by the last frame.
     std::optional<Anchor> ViewAnchor() const;
@@ -207,7 +238,14 @@ private:
     // Preview.
     std::unique_ptr<BuildWorker> worker_;
     std::unique_ptr<PreviewPages> preview_;
-    uint64_t previewTimer_ = 0;
+    std::unique_ptr<DocumentLoader> loader_;
+    bool previewDirty_ = false;     // changed since the last build started
+    bool previewInFlight_ = false;  // a build was started and its result has not come back
+    int discardThrough_ = 0;        // results of these generations and older are dropped
+    uint64_t budgetTimer_ = 0;      // the build in flight's kPreviewBudgetMs
+    bool inFrame_ = false;
+    bool loading_ = false;
+    uint64_t loadId_ = 0;           // the open whose result is wanted
     int requestedGeneration_ = 0;
     int shownGeneration_ = 0;
     std::optional<Anchor> anchor_;

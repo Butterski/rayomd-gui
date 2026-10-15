@@ -70,29 +70,38 @@ std::string LowerExtension(const std::string& path) {
     return ext;
 }
 
+// `path` with the extension `.pdf` (any case) it has, else with `.pdf` appended.
+std::string WithPdfExtension(std::string path) {
+    if (LowerExtension(path) != ".pdf") path += ".pdf";
+    return path;
+}
+
 } // namespace
 
-MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hooks hooks)
+MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hooks hooks,
+                       BuildWorker::BuildFunction build)
     : platform_(platform), hooks_(std::move(hooks)), link_(std::make_shared<Link>()) {
     link_->owner = this;
     editor_.SetOnChanged([this] {
         doc_.modified = true;
-        SchedulePreview();
+        MarkPreviewDirty();
     });
     export_.imageCacheDirectory = platform_.ImageCacheDir().u8string();
     worker_ = std::make_unique<BuildWorker>(
         platform_, [this](PreviewReady ready) { OnPreview(std::move(ready)); },
-        [this](ExportFinished finished) { OnExport(std::move(finished)); });
+        [this](ExportFinished finished) { OnExport(std::move(finished)); }, std::move(build));
     preview_ = std::make_unique<PreviewPages>(platform_, fontIndex, [this] {
         if (hooks_.requestFrame) hooks_.requestFrame();
     });
+    loader_ = std::make_unique<DocumentLoader>(platform_, [this](DocumentLoaded loaded) { OnLoaded(std::move(loaded)); });
     SetOmarchyAvailable(platform_.OmarchyThemeDir().has_value());
 }
 
 MainWindow::~MainWindow() {
     link_->alive = false;
-    if (previewTimer_ != 0) platform_.CancelTimer(previewTimer_);
-    // The workers stop before the window they call back goes.
+    if (budgetTimer_ != 0) platform_.CancelTimer(budgetTimer_);
+    // The workers stop before the window they call back goes; the build in flight is cancelled.
+    loader_.reset();
     preview_.reset();
     worker_.reset();
 }
@@ -166,6 +175,7 @@ std::string MainWindow::Title() const {
 
 void MainWindow::Frame(ui::Context& ctx) {
     dirty_ = false;
+    inFrame_ = true;
     RectF win = ctx.WindowRect();
     const bool csd = platform_.NeedsClientDecorations();
     if (csd && !platform_.IsMaximized()) ResizeEdges(ctx);
@@ -196,6 +206,9 @@ void MainWindow::Frame(ui::Context& ctx) {
     Prompts(ctx);
     Shortcuts(ctx);
     ctx.SetTitle(Title());
+    inFrame_ = false;
+    // This frame's edits are all in: build them.
+    MaybeStartPreview();
     if (dirty_) ctx.RequestAnimation();
 }
 
@@ -361,7 +374,8 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
         if (!export_.themeFile.empty() &&
             ui::IconButton(ctx, "##clearTheme", ui::Icon::Close, ui::CutLeft(r, kIconHit), "Clear the PDF theme")) {
             export_.themeFile.clear();
-            export_.ReloadTheme();
+            export_.themeError.clear();
+            export_.theme = TinyPdf::PdfTheme();
             changed = true;
         }
         if (!export_.themeError.empty()) {
@@ -504,8 +518,8 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
     }
     preview_->Request(wanted_, widthPx);
 
-    bool current = count > 0 && !visible.empty() && previewTimer_ == 0 && shownGeneration_ == requestedGeneration_ &&
-                   preview_->Generation() == shownGeneration_;
+    bool current = count > 0 && !visible.empty() && !previewDirty_ && !previewInFlight_ && !loading_ &&
+                   shownGeneration_ == requestedGeneration_ && preview_->Generation() == shownGeneration_;
     for (const int i : visible) current = current && preview_->Current(i, widthPx);
     settled_ = current;
 }
@@ -640,10 +654,14 @@ void MainWindow::Proceed(Action action, const std::string& path) {
 }
 
 void MainWindow::NewDocument() {
+    // A file still opening is not wanted any more.
+    loadId_ = 0;
+    loading_ = false;
+    DropPreviewBuild();
     doc_.New();
     editor_.SetText({});
     syncedRevision_ = editor_.Revision();
-    stats_ = doc_.Stats();
+    stats_ = DocumentStats();
     exportTargets_.erase(std::string());
     SetStatus({}, StatusKind::Info);
     focusEditor_ = true;
@@ -651,23 +669,34 @@ void MainWindow::NewDocument() {
     if (hooks_.requestFrame) hooks_.requestFrame();
 }
 
-bool MainWindow::Open(const std::string& path) {
-    std::string status;
-    if (!doc_.Open(path, status)) {
-        SetStatus(status, StatusKind::Error);
+void MainWindow::Open(const std::string& path) {
+    DropPreviewBuild();
+    loading_ = true;
+    loadId_ = loader_->Load(path);
+    SetStatus("Opening " + fs::u8path(path).filename().u8string() + "\xE2\x80\xA6", StatusKind::Info);
+    if (hooks_.requestFrame) hooks_.requestFrame();
+}
+
+void MainWindow::OnLoaded(DocumentLoaded loaded) {
+    if (loaded.id != loadId_) return;  // a later open or a new document replaced it
+    loading_ = false;
+    if (!loaded.ok) {
+        SetStatus(loaded.status, StatusKind::Error);
+        // The document stays; its preview build was dropped for the open.
+        PreviewNow();
         if (hooks_.requestFrame) hooks_.requestFrame();
-        return false;
+        return;
     }
+    doc_ = std::move(loaded.document);
     editor_.SetText(doc_.text);
     syncedRevision_ = editor_.Revision();
-    stats_ = doc_.Stats();
+    stats_ = loaded.stats;
     exportTargets_.erase(std::string());
-    Remember(path);
-    SetStatus(status, StatusKind::Info);
+    Remember(loaded.path);
+    SetStatus(loaded.status, StatusKind::Info);
     focusEditor_ = true;
     PreviewNow();
     if (hooks_.requestFrame) hooks_.requestFrame();
-    return true;
 }
 
 void MainWindow::ShowOpenDialog() {
@@ -693,7 +722,7 @@ bool MainWindow::SaveTo(const std::string& path) {
     if (ok) {
         Remember(path);
         // Relative images now resolve from the new place.
-        if (before != doc_.filePath) SchedulePreview();
+        if (before != doc_.filePath) MarkPreviewDirty();
     }
     if (hooks_.requestFrame) hooks_.requestFrame();
     return ok;
@@ -708,6 +737,7 @@ void MainWindow::ExportPdf(bool ask) {
     }
     AskPath(FileDialog::ExportPdf, found != exportTargets_.end() ? found->second : SuggestedExportPath(),
             [this, key](std::string path) {
+                path = WithPdfExtension(std::move(path));
                 exportTargets_[key] = path;
                 StartExport(path);
             });
@@ -715,16 +745,18 @@ void MainWindow::ExportPdf(bool ask) {
 
 void MainWindow::StartExport(const std::string& path) {
     SyncText();
-    export_.ReloadTheme();
-    worker_->RequestExport(doc_.text, doc_.filePath, export_.ToPdfOptions(doc_.filePath, false), path,
-                           export_.openAfterExport);
+    TinyPdf::PdfOptions options = export_.ToPdfOptions(doc_.filePath, false);
+    if (export_.themeFile.empty()) options.theme = TinyPdf::PdfTheme();
+    // The worker reads the theme file; the preview build in flight, if any, waits for this.
+    worker_->RequestExport(doc_.text, doc_.filePath, std::move(options), WithPdfExtension(path),
+                           export_.openAfterExport, export_.themeFile);
 }
 
 void MainWindow::ChooseThemeFile() {
     AskPath(FileDialog::ChooseTheme, export_.themeFile.empty() ? SuggestedFolder() : export_.themeFile,
             [this](std::string path) {
                 export_.themeFile = std::move(path);
-                export_.ReloadTheme();
+                export_.themeError.clear();  // the next build reads the file and says
                 OptionsChanged();
             });
 }
@@ -759,34 +791,56 @@ void MainWindow::AskPath(FileDialog kind, std::string suggested, std::function<v
 
 void MainWindow::OptionsChanged() {
     hooks_.settingsChanged();
-    SchedulePreview();
+    MarkPreviewDirty();
     Dirty();
 }
 
-void MainWindow::SchedulePreview() {
-    if (previewTimer_ != 0) platform_.CancelTimer(previewTimer_);
-    previewTimer_ = platform_.StartTimer(kPreviewDelayMs, [link = link_] {
-        if (!link->alive) return;
-        link->owner->previewTimer_ = 0;
-        link->owner->PreviewNow();
-    });
+void MainWindow::MarkPreviewDirty() {
+    previewDirty_ = true;
+    // Within a frame the build starts at its end; else a frame comes for it.
+    if (!inFrame_ && hooks_.requestFrame) hooks_.requestFrame();
 }
 
 void MainWindow::PreviewNow() {
-    if (previewTimer_ != 0) {
-        platform_.CancelTimer(previewTimer_);
-        previewTimer_ = 0;
-    }
-    SyncText();
-    export_.ReloadTheme();
-    worker_->RequestPreview(doc_.text, doc_.filePath, export_.ToPdfOptions(doc_.filePath, true), ++requestedGeneration_);
+    previewDirty_ = true;
+    MaybeStartPreview();
+}
+
+void MainWindow::MaybeStartPreview() {
+    if (!previewDirty_ || previewInFlight_ || loading_) return;
+    previewDirty_ = false;
+    previewInFlight_ = true;
+    // The one copy of the text this build makes; doc_.text is synced only where it is needed
+    // (saving, exporting).
+    std::string text = editor_.Revision() == syncedRevision_ ? doc_.text : editor_.CopyText();
+    TinyPdf::PdfOptions options = export_.ToPdfOptions(doc_.filePath, true);
+    if (export_.themeFile.empty()) options.theme = TinyPdf::PdfTheme();
+    const int generation = ++requestedGeneration_;
+    worker_->RequestPreview(std::move(text), doc_.filePath, std::move(options), generation, export_.themeFile);
+    if (budgetTimer_ != 0) platform_.CancelTimer(budgetTimer_);
+    budgetTimer_ = platform_.StartTimer(kPreviewBudgetMs, [link = link_, generation] {
+        if (!link->alive) return;
+        MainWindow& window = *link->owner;
+        window.budgetTimer_ = 0;
+        if (!window.previewInFlight_ || window.requestedGeneration_ != generation) return;
+        // Not built again before the next change.
+        window.worker_->CancelPreview();
+        window.SetStatus("Preview stopped: the document takes too long to build", StatusKind::Warning);
+        if (window.hooks_.requestFrame) window.hooks_.requestFrame();
+    });
+}
+
+void MainWindow::DropPreviewBuild() {
+    if (!previewInFlight_) return;
+    worker_->CancelPreview();
+    // Its result, cancelled or not (it may have finished first), is not shown.
+    discardThrough_ = requestedGeneration_;
 }
 
 void MainWindow::SyncText() {
     if (editor_.Revision() == syncedRevision_) return;
     doc_.text = editor_.CopyText();
     syncedRevision_ = editor_.Revision();
-    stats_ = doc_.Stats();
 }
 
 void MainWindow::Remember(const std::string& path) {
@@ -830,9 +884,23 @@ std::optional<MainWindow::Anchor> MainWindow::ViewAnchor() const {
 }
 
 void MainWindow::OnPreview(PreviewReady ready) {
-    // An older build than the one shown (a newer one finished first) changes nothing.
-    if (ready.generation <= shownGeneration_) return;
+    if (ready.generation == requestedGeneration_) {
+        previewInFlight_ = false;
+        if (budgetTimer_ != 0) {
+            platform_.CancelTimer(budgetTimer_);
+            budgetTimer_ = 0;
+        }
+    }
+    // Cancelled, dropped, or older than the one shown: changes nothing but lets the next build
+    // start.
+    if (ready.buildError == TinyPdf::BuildError::Cancelled || ready.generation <= discardThrough_ ||
+        ready.generation <= shownGeneration_) {
+        MaybeStartPreview();
+        return;
+    }
     shownGeneration_ = ready.generation;
+    stats_ = ready.stats;
+    if (ready.themeFile == export_.themeFile) export_.themeError = std::move(ready.themeError);
     if (ready.pdf) {
         // Keep the view on the page at its top, at the same place within it.
         if (!anchor_) anchor_ = ViewAnchor();
@@ -847,10 +915,13 @@ void MainWindow::OnPreview(PreviewReady ready) {
     } else {
         SetStatus("Export failed: " + ready.error, StatusKind::Error, true);
     }
+    // Typed while it built: the next build starts now.
+    MaybeStartPreview();
     if (hooks_.requestFrame) hooks_.requestFrame();
 }
 
 void MainWindow::OnExport(ExportFinished finished) {
+    if (finished.themeFile == export_.themeFile) export_.themeError = std::move(finished.themeError);
     SetStatus(std::move(finished.message), finished.ok ? StatusKind::Info : StatusKind::Error);
     if (hooks_.requestFrame) hooks_.requestFrame();
 }

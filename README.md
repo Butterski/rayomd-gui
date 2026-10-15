@@ -17,8 +17,9 @@ This repository is private while the app is prepared for its first release.
 rayomd-gui [file.md | file.pdf]
 ```
 
-- The editor is on the left, the PDF on the right, rebuilt 80 ms after you stop typing. A
-  reversible RayoMD PDF opens as its embedded Markdown source.
+- The editor is on the left, the PDF on the right, rebuilt as you type: a keystroke goes to the
+  engine in its own frame, with no waiting timer, and what you type while a build runs goes
+  into the next one. A reversible RayoMD PDF opens as its embedded Markdown source.
 - The footer holds Open (`Ctrl+O`), Save (`Ctrl+S`, `Ctrl+Shift+S` to save as), Export PDF
   (`Ctrl+E`, `Ctrl+Shift+E` to choose the file) and Options (`Ctrl+,`): style, margins, page
   size, PDF theme file, table of contents, page numbers, code highlighting, PDF/A-3b, PDF/UA-1,
