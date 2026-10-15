@@ -601,9 +601,9 @@ bool TextEditor::AutoScroll() {
 
 // ---- The widget -----------------------------------------------------------------------------
 
-float TextEditor::FontSize(const Tokens& tokens, int zoomIndex) {
+float TextEditor::FontSize(const Context& ctx, int zoomIndex) {
     zoomIndex = std::min(std::max(zoomIndex, 0), kEditorZoomCount - 1);
-    return static_cast<float>(tokens.font.title * tokens.textScale) * kEditorZoomLadder[zoomIndex];
+    return ctx.FontSize(ctx.GetTokens().font.title) * kEditorZoomLadder[zoomIndex];
 }
 
 void TextEditor::SetZoomIndex(int index) {
@@ -641,7 +641,7 @@ void TextEditor::Frame(Context& ctx, RectF rect) {
     SetNow(ctx.NowMs());
     float column, line;
     auto layout = [&] {
-        fontSize_ = FontSize(ctx.GetTokens(), zoom_);
+        fontSize_ = FontSize(ctx, zoom_);
         GridMetrics(ctx, fontSize_, column, line, ascent_, descent_);
         SetLayout(rect.w, rect.h, column, line);
     };
@@ -667,7 +667,8 @@ void TextEditor::Frame(Context& ctx, RectF rect) {
         PointerDown(pointer.pressX - rect.x, pointer.pressY - rect.y, in.clickCount, (ctx.Mods() & kModShift) != 0);
         lastAutoScroll_ = now_;
     }
-    if (in.held && !in.pressed) PointerDrag(ctx.Pointer().x - rect.x, ctx.Pointer().y - rect.y);
+    // The release frame counts too: the selection ends where the button came up.
+    if ((in.held || in.released) && !in.pressed) PointerDrag(ctx.Pointer().x - rect.x, ctx.Pointer().y - rect.y);
     if (in.released || (!in.held && dragging_)) PointerUp();
     if (dragging_ && (dragY_ < 0 || dragY_ > rect.h)) {
         if (now_ - lastAutoScroll_ >= 16) {

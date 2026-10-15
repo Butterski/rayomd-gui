@@ -52,8 +52,8 @@ public:
     // The text size: an index into kEditorZoomLadder.
     int ZoomIndex() const { return zoom_; }
     void SetZoomIndex(int index);
-    // The font size of the grid at the current zoom, logical px.
-    static float FontSize(const Tokens& tokens, int zoomIndex);
+    // The font size of the grid at a zoom, logical px: Context::FontSize(title) x the ladder.
+    static float FontSize(const Context& ctx, int zoomIndex);
     // Rewraps every line (the interface font changed).
     void InvalidateLayout();
 

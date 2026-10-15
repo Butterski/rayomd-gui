@@ -706,4 +706,19 @@ RGUI_TEST("ui.editor_widget_frame") {
     frame(now);
     CHECK_EQ(editor.ZoomIndex(), rgui::ui::kEditorZoomDefault + 1);
     CHECK_EQ(editor.LineHeight(), 22.0f);   // round(1.4 x 15.4)
+
+    // A drag whose move and release arrive in one frame selects up to the release point.
+    editor.SetText("alpha beta gamma");
+    frame(now += 10);
+    ctx.AddEvent(ButtonEvent(24 + 1, 16 + 5, true), now += 400);
+    frame(now);
+    rgui::InputEvent move;
+    move.type = rgui::InputEvent::Type::PointerMove;
+    move.x = 24 + 5.2f * editor.ColumnWidth();
+    move.y = 16 + 5;
+    ctx.AddEvent(move, now += 10);
+    ctx.AddEvent(ButtonEvent(move.x, move.y, false), now);
+    frame(now);
+    CHECK(editor.SelectedText() == "alpha");
+    CHECK(!editor.Dragging());
 }
