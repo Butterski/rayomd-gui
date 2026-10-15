@@ -799,8 +799,8 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
     const size_t selStart = SelectionStart();
     const size_t selEnd = SelectionEnd();
     const float scale = static_cast<float>(ctx.Scale());
-    const float baseline = static_cast<float>(
-        RayoMd::ExactMath::LlRound((y + (lineHeight_ - ascent_ - descent_) / 2 + ascent_) * scale));
+    const float baseline = static_cast<float>(RayoMd::ExactMath::LlRound(
+        (static_cast<double>(y) + (lineHeight_ - ascent_ - descent_) / 2.0 + ascent_) * ctx.Scale()));
     const text::FontFace* main = fonts && fonts->IsLoaded() ? &fonts->Face(false) : nullptr;
     glyphs_[0].clear();
     glyphs_[1].clear();

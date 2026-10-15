@@ -1190,16 +1190,26 @@ static bool send_line(rgui_dbus_conn* conn, const char* data, size_t size) {
     return true;
 }
 
-/* AUTH EXTERNAL with our uid's decimal digits in hex. */
+/* AUTH EXTERNAL with our uid's decimal digits in hex: "\0AUTH EXTERNAL 313030\r\n" for uid 100.
+ * Built byte by byte into a buffer sized for the longest uid, so no length can run past it. */
 static bool send_auth(rgui_dbus_conn* conn) {
+    static const char prefix[] = "AUTH EXTERNAL ";
+    static const char hex[] = "0123456789abcdef";
     char uid[24];
-    snprintf(uid, sizeof uid, "%u", (unsigned)getuid());
-    char auth[96];
+    const int digits = snprintf(uid, sizeof uid, "%u", (unsigned)getuid());
+    if (digits <= 0 || (size_t)digits >= sizeof uid) return false;
+    char auth[1 + (sizeof prefix - 1) + 2 * sizeof uid + 2];
     size_t n = 0;
     auth[n++] = 0;
-    n += (size_t)snprintf(auth + n, sizeof auth - n, "AUTH EXTERNAL ");
-    for (const char* p = uid; *p; ++p) n += (size_t)snprintf(auth + n, sizeof auth - n, "%02x", (unsigned char)*p);
-    n += (size_t)snprintf(auth + n, sizeof auth - n, "\r\n");
+    memcpy(auth + n, prefix, sizeof prefix - 1);
+    n += sizeof prefix - 1;
+    for (int i = 0; i < digits; ++i) {
+        const unsigned char c = (unsigned char)uid[i];
+        auth[n++] = hex[c >> 4];
+        auth[n++] = hex[c & 15];
+    }
+    auth[n++] = '\r';
+    auth[n++] = '\n';
     return send_line(conn, auth, n);
 }
 
