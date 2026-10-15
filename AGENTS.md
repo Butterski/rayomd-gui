@@ -98,6 +98,13 @@ memory, so it is the PDF, not an approximation of it.
   thread does no file I/O and no O(document) work per keystroke beyond the one copy of the text
   a preview build takes (`mainwindow.h` states the preview policy); `bench.preview_latency`
   (ctest `rayomd-gui-bench-latency`) measures keystroke-to-preview latency.
+- Nothing in startup or the UI thread waits for the font index's scan, which a cold font folder
+  makes take up to a second. On Windows the interface font, the standard-font substitutes and
+  the default fallbacks open from their known files, and the scan runs at background priority;
+  `FontSet::Resolve` passes over a fallback that needs the index until it has scanned, and
+  `FontIndex::OnScanned` makes the app shape and draw again. On Linux the interface font comes
+  from the index before the first frame. Snapshot mode (`--snapshot`) prints where startup's
+  time went.
 - Reuse the engine's APIs instead of duplicating them: `TinyPdf::BuildPdf`,
   `TinyPdf::Internal::ParseTheme`, `RayoMd::PdfSource::Inspect`, `RayoMd::Inflate::ZlibReader`,
   `TinyPdf::Internal::UnfilterPngRow`, `TinyPdf::Internal::Cff`, `StandardTextWidth`,
