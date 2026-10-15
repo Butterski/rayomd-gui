@@ -45,6 +45,7 @@ PreviewPages::~PreviewPages() {
         std::lock_guard<std::mutex> lock(mutex_);
         stop_ = true;
         queue_.clear();
+        for (const InFlight& running : inFlight_) running.cancel->store(true, std::memory_order_relaxed);
     }
     wake_.notify_all();
     for (std::thread& thread : threads_) thread.join();
@@ -96,22 +97,34 @@ void PreviewPages::Request(const std::vector<int>& pages, int widthPx) {
         }
     }
     std::vector<Job> jobs;
+    std::vector<CacheKey> wanted;
     bool wake = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const int page : pages) {
-            if (page < 0 || page >= PageCount() || Current(page, widthPx)) continue;
+            if (page < 0 || page >= PageCount()) continue;
             PageSlot& slot = pages_[static_cast<size_t>(page)];
             const CacheKey key{slot.key, widthPx};
+            wanted.push_back(key);
+            if (Current(page, widthPx)) continue;
             std::shared_ptr<const gfx::Image> image;
             if (Lookup(key, image)) {
                 Assign(slot, key, std::move(image));
                 continue;
             }
-            if (inFlight_.count(key) != 0) continue;
+            bool busy = false;
+            for (const InFlight& running : inFlight_) busy |= running.key == key && !running.cancel->load();
+            if (busy) continue;
             bool queued = false;
             for (const Job& job : jobs) queued |= job.key == key.pageKey && job.widthPx == widthPx;
-            if (!queued) jobs.push_back({pdf_, page, widthPx, slot.key});
+            if (!queued) jobs.push_back({pdf_, page, widthPx, slot.key, generation_});
+        }
+        // An older build's render nobody wants any more is abandoned.
+        for (const InFlight& running : inFlight_) {
+            if (running.generation >= generation_) continue;
+            bool stillWanted = false;
+            for (const CacheKey& key : wanted) stillWanted |= key == running.key;
+            if (!stillWanted) running.cancel->store(true, std::memory_order_relaxed);
         }
         queue_ = std::move(jobs);
         wake = !queue_.empty();
@@ -140,6 +153,11 @@ size_t PreviewPages::CacheBytes() const {
 uint64_t PreviewPages::RenderedCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return rendered_;
+}
+
+uint64_t PreviewPages::CancelledCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cancelled_;
 }
 
 bool PreviewPages::Lookup(const CacheKey& key, std::shared_ptr<const gfx::Image>& image) {
@@ -171,19 +189,22 @@ void PreviewPages::Insert(const CacheKey& key, std::shared_ptr<const gfx::Image>
 }
 
 void PreviewPages::Run() {
-    const pdf::RenderEnvironment environment{fontIndex_, &pdf::SharedImageCache(), &pdf::SharedFontCache()};
     for (;;) {
         Job job;
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
         {
             std::unique_lock<std::mutex> lock(mutex_);
             wake_.wait(lock, [this] { return stop_ || !queue_.empty(); });
             if (stop_) return;
             job = std::move(queue_.front());
             queue_.erase(queue_.begin());
-            inFlight_.insert({job.key, job.widthPx});
+            inFlight_.push_back({{job.key, job.widthPx}, job.generation, cancel});
         }
+        pdf::RenderEnvironment environment{fontIndex_, &pdf::SharedImageCache(), &pdf::SharedFontCache()};
+        environment.cancel = cancel.get();
         auto image = std::make_shared<gfx::Image>();
-        const bool ok = pdf::RenderPage(*job.pdf, job.page, job.widthPx, *image, nullptr, environment);
+        pdf::RenderStats stats;
+        const bool ok = pdf::RenderPage(*job.pdf, job.page, job.widthPx, *image, &stats, environment);
         std::shared_ptr<const gfx::Image> result;
         if (ok) {
             image->id = g_nextImageId.fetch_add(1, std::memory_order_relaxed);
@@ -192,9 +213,18 @@ void PreviewPages::Run() {
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            const CacheKey key{job.key, job.widthPx};
-            inFlight_.erase(key);
-            Insert(key, result);
+            for (size_t i = 0; i < inFlight_.size(); i++) {
+                if (inFlight_[i].cancel == cancel) {
+                    inFlight_.erase(inFlight_.begin() + static_cast<std::ptrdiff_t>(i));
+                    break;
+                }
+            }
+            if (stats.cancelled) {
+                // Abandoned: nothing to keep or show; a later Request queues it again if wanted.
+                cancelled_++;
+                continue;
+            }
+            Insert({job.key, job.widthPx}, result);
             rendered_++;
         }
         job.pdf.reset();

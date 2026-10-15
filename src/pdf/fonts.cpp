@@ -386,8 +386,8 @@ std::shared_ptr<const PdfFont> FontCache::Load(const PdfFile& file, const PdfVal
                                                const text::FontIndex* index) {
     // The index chooses the faces of standard fonts: the same dictionary under another index is
     // another font.
-    uint64_t key = file.ValueHash(entry);
-    key ^= static_cast<uint64_t>(reinterpret_cast<uintptr_t>(index)) * 0x9E3779B97F4A7C15ull;
+    PdfHash key = file.ValueHash(entry);
+    key.hi ^= static_cast<uint64_t>(reinterpret_cast<uintptr_t>(index)) * 0x9E3779B97F4A7C15ull;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto found = map_.find(key);

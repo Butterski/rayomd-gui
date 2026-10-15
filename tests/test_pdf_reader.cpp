@@ -144,9 +144,9 @@ RGUI_TEST("pdf.page_key_stable") {
     CHECK_EQ(a->PageCount(), b->PageCount());
     std::vector<uint64_t> keys;
     for (int i = 0; i < a->PageCount(); i++) {
-        CHECK_EQ(a->PageKey(i), b->PageKey(i));
-        CHECK_EQ(a->PageKey(i), a->PageKey(i));
-        keys.push_back(a->PageKey(i));
+        CHECK(a->PageKey(i) == b->PageKey(i));
+        CHECK(a->PageKey(i) == a->PageKey(i));
+        keys.push_back(a->PageKey(i).lo);
     }
     std::sort(keys.begin(), keys.end());
     CHECK(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
@@ -436,7 +436,7 @@ uint64_t Exercise(const PdfFile& file) {
             std::vector<PdfValue> operands;
             while (lexer.Next(op, operands)) digest += op.size() + operands.size();
         }
-        digest ^= file.PageKey(page);
+        digest ^= file.PageKey(page).lo ^ file.PageKey(page).hi;
         const PdfValue& resources = file.PageResources(page);
         for (const char* category : {"Font", "XObject", "ExtGState", "Shading"}) {
             for (const auto& entry : file.Get(resources, category).entries) {
@@ -620,7 +620,7 @@ RGUI_TEST("pdf.concurrent") {
     CHECK(reference);
     if (!reference) return;
     const uint64_t expected = Exercise(*reference);
-    std::vector<uint64_t> keys;
+    std::vector<rgui::pdf::PdfHash> keys;
     for (int i = 0; i < reference->PageCount(); i++) keys.push_back(reference->PageKey(i));
     for (int round = 0; round < 8; round++) {
         const auto file = PdfFile::Parse(pdf, nullptr);

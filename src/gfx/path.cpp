@@ -119,10 +119,24 @@ inline int Pieces(double q) {
     return static_cast<int>(ExactMath::Ceil(q));
 }
 
+// True when the n points, mapped by cull.toDevice, all lie beyond one edge of cull's rectangle.
+bool Outside(const FlattenCull& cull, const Pt* p, int n) {
+    bool left = true, right = true, above = true, below = true;
+    for (int i = 0; i < n; ++i) {
+        const Pt d = {cull.toDevice.a * p[i].x + cull.toDevice.c * p[i].y + cull.toDevice.e,
+                      cull.toDevice.b * p[i].x + cull.toDevice.d * p[i].y + cull.toDevice.f};
+        left = left && d.x < cull.x0;
+        right = right && d.x > cull.x1;
+        above = above && d.y < cull.y0;
+        below = below && d.y > cull.y1;
+    }
+    return left || right || above || below;
+}
+
 // Walks `path` under `m`, handing the visitor device points: Begin(p) starts a subpath, To(p)
 // continues it, End(closed) finishes it.
 template <typename Visitor>
-void Walk(const Path& path, const Matrix& m, float tolerance, Visitor& visitor) {
+void Walk(const Path& path, const Matrix& m, float tolerance, Visitor& visitor, const FlattenCull* cull) {
     const double tol = tolerance > 1e-6f ? tolerance : 1e-6;
     const std::vector<Verb>& verbs = path.Verbs();
     const std::vector<PointF>& points = path.Points();
@@ -161,6 +175,12 @@ void Walk(const Path& path, const Matrix& m, float tolerance, Visitor& visitor) 
             const Pt p1 = Transform(m, points[pi]);
             const Pt p2 = Transform(m, points[pi + 1]);
             pi += 2;
+            const Pt control[3] = {p0, p1, p2};
+            if (cull && Outside(*cull, control, 3)) {
+                cur = p2;
+                visitor.To(cur);
+                break;
+            }
             const double dd = Length(p0.x - 2 * p1.x + p2.x, p0.y - 2 * p1.y + p2.y);
             const int n = Pieces(ExactMath::Sqrt(dd / (4 * tol)));
             for (int i = 1; i < n; ++i) {
@@ -181,6 +201,12 @@ void Walk(const Path& path, const Matrix& m, float tolerance, Visitor& visitor) 
             const Pt p2 = Transform(m, points[pi + 1]);
             const Pt p3 = Transform(m, points[pi + 2]);
             pi += 3;
+            const Pt control[4] = {p0, p1, p2, p3};
+            if (cull && Outside(*cull, control, 4)) {
+                cur = p3;
+                visitor.To(cur);
+                break;
+            }
             const double d1 = Length(p0.x - 2 * p1.x + p2.x, p0.y - 2 * p1.y + p2.y);
             const double d2 = Length(p1.x - 2 * p2.x + p3.x, p1.y - 2 * p2.y + p3.y);
             const int n = Pieces(ExactMath::Sqrt(0.75 * (d1 > d2 ? d1 : d2) / tol));
@@ -237,15 +263,15 @@ struct PolylineVisitor {
 
 } // namespace
 
-void Flatten(const Path& path, const Matrix& m, float tolerance, LineSink& sink) {
+void Flatten(const Path& path, const Matrix& m, float tolerance, LineSink& sink, const FlattenCull* cull) {
     LineVisitor visitor{sink};
-    Walk(path, m, tolerance, visitor);
+    Walk(path, m, tolerance, visitor, cull);
 }
 
 void FlattenPolylines(const Path& path, const Matrix& m, float tolerance, std::vector<PointF>& scratch,
-                      PolylineSink& sink) {
+                      PolylineSink& sink, const FlattenCull* cull) {
     PolylineVisitor visitor{sink, scratch};
-    Walk(path, m, tolerance, visitor);
+    Walk(path, m, tolerance, visitor, cull);
 }
 
 } // namespace rgui::gfx

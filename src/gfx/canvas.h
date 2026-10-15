@@ -44,6 +44,14 @@ struct Paint {
     static Paint Gradient(std::shared_ptr<const LinearGradient> g) { return Paint{0, std::move(g)}; }
 };
 
+// An image resampled for one placement on a surface: the device rectangle the image covers
+// and the premultiplied sample of every pixel in it (Canvas::SampleImage).
+struct ImageSamples {
+    RectI rect;
+    std::vector<uint32_t> pixels;  // rect.Width() per row
+    bool opaque = true;
+};
+
 class Canvas {
 public:
     Canvas();
@@ -67,6 +75,14 @@ public:
     // `smooth`, else nearest), times `opacity`. An opaque image at an integer translation and
     // scale 1, with no clip mask, is copied row by row.
     void DrawImage(const Image& image, const Matrix& unitSquareToDevice, uint8_t opacity, bool smooth);
+    // The samples DrawImage takes, taken once for every pixel the image's square covers in the
+    // surface (whatever the clip): drawing them again with the same matrix and surface size
+    // only blends, the sampling (most of an image's cost) done. Each row is sampled from its
+    // first pixel, so the bytes may differ from DrawImage's by rounding. False (`out` empty)
+    // when the image covers nothing. Costs the budget one pixel per sample.
+    bool SampleImage(const Image& image, const Matrix& unitSquareToDevice, bool smooth, ImageSamples& out);
+    // Draws `samples` taken by SampleImage with this matrix, under the clip, times `opacity`.
+    void DrawSamples(const ImageSamples& samples, const Matrix& unitSquareToDevice, uint8_t opacity);
 
     // An 8-bit coverage mask (glyphs, icons) in `color`: alpha row r starts at alpha + r * stride
     // and covers dst.y0 + r; dst's size is the mask's.
@@ -79,6 +95,22 @@ public:
     void PushClipPath(const Path& path, const Matrix& m, FillRule rule);
     void PopClip();
     RectI ClipBounds() const;
+    // The same intersections made in the top clip itself, which the next PopClip removes whole:
+    // no new entry and, for a path, at most one new mask (none when the top clip had its own,
+    // which takes the product in place). With only the surface's clip, they push.
+    void IntersectClipRect(RectI rect);
+    void IntersectClipPath(const Path& path, const Matrix& m, FillRule rule);
+    // Clip entries pushed (the surface's own not counted), and bytes of masks in use.
+    size_t ClipDepth() const;
+    size_t MaskBytes() const;
+
+    // The budget every later drawing call spends (gfx/budget.h; nullptr: unlimited): fills and
+    // strokes through the rasterizer and stroker, rectangles, masks and copied images one pixel
+    // per pixel written. Once it is stopped, drawing and clip calls draw nothing (a clip path
+    // then clips everything away).
+    void SetBudget(WorkBudget* budget);
+    // Frees scratch buffers grown beyond about `bytes`: after an unusually large page.
+    void Trim(size_t bytes);
 
 private:
     struct Impl;

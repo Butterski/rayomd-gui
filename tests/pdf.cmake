@@ -2,6 +2,7 @@
 list(APPEND RGUI_TEST_SOURCES
     test_jpeg.cpp
     test_pdf_golden.cpp
+    test_pdf_limits.cpp
     test_pdf_reader.cpp
     test_pdf_render.cpp)
 

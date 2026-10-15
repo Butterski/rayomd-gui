@@ -84,7 +84,7 @@ public:
 
 private:
     struct Entry {
-        uint64_t key = 0;
+        PdfHash key;
         std::shared_ptr<const PdfFont> font;
         size_t bytes = 0;
     };
@@ -94,7 +94,7 @@ private:
     size_t budget_;
     size_t bytes_ = 0;
     List lru_;  // most recent first
-    std::unordered_map<uint64_t, List::iterator> map_;
+    std::unordered_map<PdfHash, List::iterator, PdfHashHasher> map_;
 };
 
 // The process's font cache, which preview builds share.

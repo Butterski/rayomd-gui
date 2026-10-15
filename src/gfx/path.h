@@ -56,11 +56,26 @@ protected:
 // The default flattening tolerance, in device pixels.
 inline constexpr float kFlattenTolerance = 0.2f;
 
+// Where flattening may be coarse: a curve whose control points, mapped by `toDevice` from the
+// space the path is flattened into, all lie on one side of the device rectangle [x0, x1] x
+// [y0, y1] (beyond its left, top, right or bottom edge) is emitted as its chord. Callers make the
+// rectangle the clip grown by whatever they draw around the line (a stroke's reach): the chord
+// lies within the curve's control polygon, so nothing visible changes. For a fill the chord is
+// exact even left of the clip, where the rasterizer keeps only each edge's vertical extent: the
+// curve and its chord cross every row the same signed number of times.
+struct FlattenCull {
+    Matrix toDevice;
+    double x0 = 0;
+    double y0 = 0;
+    double x1 = 0;
+    double y1 = 0;
+};
+
 // Emits `path` transformed by `m` as line segments, closing every subpath (a fill's implicit
 // close). A quadratic is cut into n = ceil(sqrt(|p0 - 2p1 + p2| / (4 tol))) pieces, a cubic into
 // n = ceil(sqrt(0.75 * max(|p0 - 2p1 + p2|, |p1 - 2p2 + p3|) / tol)), n clamped to [1, 256], the
-// control points measured after the transform.
-void Flatten(const Path& path, const Matrix& m, float tolerance, LineSink& sink);
+// control points measured after the transform; with `cull`, a curve outside it is one piece.
+void Flatten(const Path& path, const Matrix& m, float tolerance, LineSink& sink, const FlattenCull* cull = nullptr);
 
 // Receives flattened subpaths whole: `count` device-space points, `closed` when the subpath ended
 // with Close. A lone MoveTo arrives as one open point.
@@ -75,6 +90,6 @@ protected:
 // As Flatten, but each subpath is handed over as a polyline and open ones stay open (for
 // stroking). `scratch` holds the current subpath's points; pass the same vector to reuse it.
 void FlattenPolylines(const Path& path, const Matrix& m, float tolerance, std::vector<PointF>& scratch,
-                      PolylineSink& sink);
+                      PolylineSink& sink, const FlattenCull* cull = nullptr);
 
 } // namespace rgui::gfx

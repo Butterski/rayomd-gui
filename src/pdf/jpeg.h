@@ -24,8 +24,10 @@
 // Failures return false and set `reason` to a short token ("jpeg-arithmetic", "jpeg-12-bit",
 // "jpeg-dnl", "jpeg-truncated", "jpeg-corrupt", ...), which callers report as `image:<reason>`.
 // Every read is bounds-checked; buffers are sized from validated headers (no dimension 0 or
-// above 65535, at most 2^28 pixels, no more blocks than the data could code); work is bounded by
-// the data size.
+// above 65535, at most 2^28 pixels, no more blocks than the data could code). Work is bounded
+// apart from the data size, which progressive scans do not bound (an end-of-band run codes
+// 32767 blocks in a few bits): at most 1000 scans, which together visit each coefficient of the
+// frame at most 32 times ("jpeg-too-much-work").
 #pragma once
 
 #include <cstddef>
@@ -49,8 +51,11 @@ struct JpegInfo {
 bool ReadJpegInfo(const uint8_t* data, size_t size, JpegInfo& info, std::string* reason);
 
 // Decodes to opaque pixels 0xFFRRGGBB; sets out.width, out.height, out.pixels and out.opaque
-// (id and version are the caller's). `out` is left unchanged on failure.
-bool DecodeJpeg(const uint8_t* data, size_t size, gfx::Image& out, std::string* reason);
+// (id and version are the caller's). `out` is left unchanged on failure. With `scaleShift` s in
+// 1..3 the image is decoded at 1/2^s of its size, ceil(width / 2^s) by ceil(height / 2^s): each
+// sample is the rounded mean of a 2^s x 2^s square of the full-size block (the colour model
+// applied after), so the planes take 4^s times less memory.
+bool DecodeJpeg(const uint8_t* data, size_t size, gfx::Image& out, std::string* reason, int scaleShift = 0);
 
 // Decodes a one-component JPEG to its gray samples, width * height bytes, rows top to bottom (a
 // PDF /SMask). A JPEG with more components fails with "jpeg-not-gray".
