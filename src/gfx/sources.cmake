@@ -7,4 +7,7 @@ list(APPEND RGUI_CORE_SOURCES
     gfx/png_write.cpp
     gfx/raster.cpp
     gfx/stroke.cpp
-    gfx/svgpath.cpp)
+    gfx/svgpath.cpp
+    gfx/x86_64/accumulate.S
+    gfx/x86_64/blend.S
+    gfx/x86_64/jpeg.S)
