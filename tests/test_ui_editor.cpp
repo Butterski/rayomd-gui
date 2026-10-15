@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "runner.h"
 
-#include "app/platform.h"
 #include "ui/textbuffer.h"
 #include "ui/texteditor.h"
 #include "ui/textwrap.h"
+#include "text/fontchoice.h"
+#include "text/fontindex.h"
+#include "ui/theme.h"
+#include "ui/tokens.h"
+#include "ui/ui.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <functional>
 #include <random>
 #include <string>
 #include <vector>
@@ -20,44 +26,27 @@ using rgui::ui::WrapLine;
 
 namespace {
 
-// A platform with an in-memory clipboard that answers clipboard requests when told to.
-class ClipboardPlatform final : public rgui::Platform {
-public:
-    std::string clipboard;
+// An in-memory clipboard behind a Context, answering read requests when told to.
+struct FakeClipboard {
+    std::string text;
     std::vector<std::function<void(std::string)>> pending;
 
-    void AnswerClipboard() {
+    void Attach(rgui::ui::Context& ctx) {
+        ctx.SetClipboard([this](std::string t) { text = std::move(t); },
+            [this](std::function<void(std::string)> callback) { pending.push_back(std::move(callback)); });
+    }
+    void Answer() {
         auto callbacks = std::move(pending);
         pending.clear();
-        for (auto& callback : callbacks) callback(clipboard);
+        for (auto& callback : callbacks) callback(text);
     }
-
-    void SetTitle(std::string_view) override {}
-    void SetCursor(rgui::Cursor) override {}
-    void SetTextInputRect(rgui::gfx::RectI, bool) override {}
-    void RequestFrame() override {}
-    void Present(const rgui::gfx::Surface&, const std::vector<rgui::gfx::RectI>&) override {}
-    bool NeedsClientDecorations() const override { return false; }
-    void StartMove() override {}
-    void StartResize(rgui::Edge) override {}
-    void ToggleMaximize() override {}
-    void Minimize() override {}
-    void SetClipboardText(std::string text) override { clipboard = std::move(text); }
-    void RequestClipboardText(std::function<void(std::string)> callback) override {
-        pending.push_back(std::move(callback));
-    }
-    void ShowFileDialog(rgui::FileDialog, std::string, std::function<void(rgui::FileDialogResult)>) override {}
-    void OpenExternally(const std::string&) override {}
-    void PostToUi(std::function<void()>) override {}
-    uint64_t StartTimer(int, std::function<void()>) override { return 1; }
-    void CancelTimer(uint64_t) override {}
-    void Quit() override {}
-    std::filesystem::path ConfigDir() const override { return {}; }
-    std::filesystem::path ImageCacheDir() const override { return {}; }
-    std::filesystem::path DocumentsDir() const override { return {}; }
-    std::optional<std::filesystem::path> OmarchyThemeDir() const override { return std::nullopt; }
-    std::optional<std::filesystem::path> OmarchyUserShellToml() const override { return std::nullopt; }
 };
+
+void RunFrame(rgui::ui::Context& ctx, TextEditor& editor, double now) {
+    ctx.BeginFrame(800, 600, 1.0, now);
+    editor.Frame(ctx, {0, 0, 800, 600});
+    ctx.EndFrame();
+}
 
 // Columns 10 px wide, rows 20 px high; `cells` columns per row, 10 rows visible.
 void Grid(TextEditor& editor, int cells, int rows = 10) {
@@ -533,36 +522,183 @@ RGUI_TEST("ui.editor_caret_visibility") {
 }
 
 RGUI_TEST("ui.editor_clipboard_and_crlf") {
-    ClipboardPlatform platform;
+    rgui::ui::Context ctx;
+    FakeClipboard clipboard;
+    clipboard.Attach(ctx);
     TextEditor editor;
-    Grid(editor, 40);
+    RunFrame(ctx, editor, 0);
     editor.SetText("one\r\ntwo\rthree");
     CHECK(editor.CopyText() == "one\ntwo\nthree");
     editor.Select(0, 3);
-    CHECK(editor.HandleKey(Key::C, rgui::kModCtrl, &platform));
-    CHECK(platform.clipboard == "one");
-    CHECK(editor.HandleKey(Key::X, rgui::kModCtrl, &platform));
+    CHECK(editor.HandleKey(Key::C, rgui::kModCtrl, &ctx));
+    CHECK(clipboard.text == "one");
+    CHECK(editor.HandleKey(Key::X, rgui::kModCtrl, &ctx));
     CHECK(editor.CopyText() == "\ntwo\nthree");
-    platform.clipboard = "a\r\nb";
-    editor.HandleKey(Key::V, rgui::kModCtrl, &platform);
+    clipboard.text = "a\r\nb";
+    editor.HandleKey(Key::V, rgui::kModCtrl, &ctx);
+    RunFrame(ctx, editor, 10);
     CHECK(editor.CopyText() == "\ntwo\nthree");       // the clipboard answers later
-    platform.AnswerClipboard();
+    clipboard.Answer();
+    RunFrame(ctx, editor, 20);
     CHECK(editor.CopyText() == "a\nb\ntwo\nthree");
-    editor.HandleKey(Key::Insert, rgui::kModShift, &platform);
-    platform.AnswerClipboard();
+    editor.HandleKey(Key::Insert, rgui::kModShift, &ctx);
+    clipboard.Answer();
+    RunFrame(ctx, editor, 30);
     CHECK(editor.CopyText() == "a\nba\nb\ntwo\nthree");
     editor.HandleText("\r\n");
     CHECK(editor.CopyText().find('\r') == std::string::npos);
-    CHECK(editor.HandleKey(Key::Z, rgui::kModCtrl, &platform));
-    CHECK(editor.HandleKey(Key::Z, rgui::kModCtrl | rgui::kModShift, &platform));
+    CHECK(editor.HandleKey(Key::Z, rgui::kModCtrl, &ctx));
+    CHECK(editor.HandleKey(Key::Z, rgui::kModCtrl | rgui::kModShift, &ctx));
     CHECK(editor.CopyText() == "a\nba\nb\n\ntwo\nthree");
-    CHECK(editor.HandleKey(Key::Z, rgui::kModCtrl, &platform));
-    CHECK(editor.HandleKey(Key::Y, rgui::kModCtrl, &platform));
+    CHECK(editor.HandleKey(Key::Z, rgui::kModCtrl, &ctx));
+    CHECK(editor.HandleKey(Key::Y, rgui::kModCtrl, &ctx));
     CHECK(editor.CopyText() == "a\nba\nb\n\ntwo\nthree");
-    // A clipboard answer after the editor is gone does nothing.
-    {
-        TextEditor gone;
-        gone.HandleKey(Key::V, rgui::kModCtrl, &platform);
+}
+
+namespace {
+
+struct EditorFonts {
+    rgui::text::FontIndex index;
+    rgui::text::FontSet fonts;
+    bool ok = false;
+
+    EditorFonts() {
+        index.SetDirectories({"/usr/share/fonts"});
+        ok = index.Find("DejaVu Sans Mono", 400, false) != nullptr &&
+            fonts.Load(index, {"DejaVu Sans Mono"}, {"DejaVu Sans"});
     }
-    platform.AnswerClipboard();
+};
+
+rgui::InputEvent KeyEvent(Key key, uint8_t mods = 0) {
+    rgui::InputEvent e;
+    e.type = rgui::InputEvent::Type::KeyDown;
+    e.key = key;
+    e.mods = mods;
+    return e;
+}
+
+rgui::InputEvent TextEvent(std::string text, rgui::InputEvent::Type type = rgui::InputEvent::Type::Text) {
+    rgui::InputEvent e;
+    e.type = type;
+    e.text = std::move(text);
+    return e;
+}
+
+rgui::InputEvent ButtonEvent(float x, float y, bool pressed) {
+    rgui::InputEvent e;
+    e.type = rgui::InputEvent::Type::Button;
+    e.x = x;
+    e.y = y;
+    e.pressed = pressed;
+    return e;
+}
+
+rgui::InputEvent WheelEvent(float x, float y, float notches, uint8_t mods = 0) {
+    rgui::InputEvent e;
+    e.type = rgui::InputEvent::Type::Wheel;
+    e.x = x;
+    e.y = y;
+    e.notchesY = notches;
+    e.mods = mods;
+    return e;
+}
+
+// The glyph commands of a display list in `color`, and their glyph count.
+size_t CountGlyphs(const rgui::ui::DisplayList& list, uint32_t color) {
+    size_t n = 0;
+    for (const auto& c : list.Commands()) {
+        if (c.type == rgui::ui::CommandType::Glyphs && c.color == color) n += c.glyphCount;
+    }
+    return n;
+}
+
+} // namespace
+
+RGUI_TEST("ui.editor_widget_frame") {
+    EditorFonts f;
+    if (!f.ok) {
+        std::printf("skip ui.editor_widget_frame: DejaVu Sans Mono not installed\n");
+        return;
+    }
+    using rgui::ui::Context;
+    const rgui::ui::Tokens tokens = rgui::ui::BuildTokens(
+        rgui::ui::BundledPalette(*rgui::ui::FindBundledTheme("tokyo-night")), rgui::ui::TokenSources{});
+    Context ctx;
+    ctx.SetFonts(&f.fonts);
+    ctx.SetTokens(&tokens);
+    TextEditor editor;
+    int changes = 0;
+    editor.SetOnChanged([&] { changes++; });
+    const rgui::gfx::RectF pane{0, 0, 800, 600};
+    double now = 1000;
+    auto frame = [&](double at) -> const rgui::ui::FrameOutput& {
+        ctx.BeginFrame(800, 600, 1.0, at);
+        editor.Frame(ctx, pane);
+        return ctx.EndFrame();
+    };
+
+    // Unfocused and empty: the placeholder in the muted colour, no text input.
+    const rgui::ui::FrameOutput& first = frame(now);
+    CHECK(!first.textInputEnabled);
+    CHECK_EQ(CountGlyphs(*first.displayList, tokens.colors.mutedText.Premultiplied()), size_t(15));
+    // The grid: DejaVu Sans Mono's 'M' at 14 px, 140 % lines.
+    CHECK_NEAR(editor.ColumnWidth(), 1233.0 / 2048.0 * 14.0, 0.01);
+    CHECK_EQ(editor.LineHeight(), 20.0f);
+    CHECK_EQ(editor.WrapCells(), static_cast<int>((800 - 48) / editor.ColumnWidth()));
+
+    // A click focuses; keys and text apply in arrival order; Tab stays in the editor; the app's
+    // shortcuts stay unconsumed.
+    ctx.AddEvent(ButtonEvent(100, 100, true), now += 10);
+    ctx.AddEvent(ButtonEvent(100, 100, false), now);
+    frame(now);
+    ctx.AddEvent(TextEvent("ab"), now += 10);
+    ctx.AddEvent(KeyEvent(Key::Backspace), now);
+    ctx.AddEvent(KeyEvent(Key::Tab), now);
+    ctx.AddEvent(KeyEvent(Key::S, rgui::kModCtrl), now);
+    ctx.AddEvent(TextEvent("c\xE4\xB8\xAD"), now);
+    ctx.BeginFrame(800, 600, 1.0, now);
+    editor.Frame(ctx, pane);
+    CHECK(ctx.IsFocused(editor.WidgetId()));
+    CHECK(ctx.IsConsumed(2));    // Tab
+    CHECK(!ctx.IsConsumed(3));   // Ctrl+S
+    const rgui::ui::FrameOutput& typed = ctx.EndFrame();
+    CHECK(editor.CopyText() == "a\tc\xE4\xB8\xAD");
+    CHECK_EQ(changes, 4);
+    CHECK(typed.textInputEnabled);
+    // The caret after a(1) tab(3) c(1) 中(2): column 7.
+    CHECK_EQ(typed.textInputRect.x0, static_cast<int>(24 + 7 * editor.ColumnWidth()));
+    CHECK_EQ(CountGlyphs(*typed.displayList, tokens.colors.text.Premultiplied()), size_t(3));
+    CHECK_EQ(CountGlyphs(*typed.displayList, tokens.colors.mutedText.Premultiplied()), size_t(0));
+
+    // A preedit draws at the caret, underlined, outside the buffer.
+    ctx.AddEvent(TextEvent("xy", rgui::InputEvent::Type::Preedit), now += 10);
+    const rgui::ui::FrameOutput& pre = frame(now);
+    CHECK_EQ(CountGlyphs(*pre.displayList, tokens.colors.text.Premultiplied()), size_t(5));
+    CHECK(editor.CopyText() == "a\tc\xE4\xB8\xAD");
+    ctx.AddEvent(TextEvent("xy"), now += 10);
+    frame(now);
+    CHECK(editor.CopyText() == "a\tc\xE4\xB8\xADxy");
+    CHECK(editor.Preedit().empty());
+
+    // Selected text draws in the selection's foreground.
+    ctx.AddEvent(KeyEvent(Key::A, rgui::kModCtrl), now += 10);
+    const rgui::ui::FrameOutput& selected = frame(now);
+    CHECK_EQ(CountGlyphs(*selected.displayList, tokens.colors.selectedText.Premultiplied()), size_t(5));
+
+    // The wheel eases 120 px per notch over 200 ms; Ctrl+wheel steps the text size.
+    std::string many;
+    for (int i = 0; i < 400; i++) many += "line of text\n";
+    editor.SetText(many);
+    frame(now += 10);
+    ctx.AddEvent(WheelEvent(300, 300, 1), now += 10);
+    const rgui::ui::FrameOutput& wheel = frame(now);
+    CHECK(wheel.wantsFrame);
+    frame(now += 100);
+    CHECK(editor.ScrollY() > 0 && editor.ScrollY() < 120);
+    frame(now += 150);
+    CHECK_EQ(editor.ScrollY(), 120.0f);
+    ctx.AddEvent(WheelEvent(300, 300, -1, rgui::kModCtrl), now += 10);
+    frame(now);
+    CHECK_EQ(editor.ZoomIndex(), rgui::ui::kEditorZoomDefault + 1);
+    CHECK_EQ(editor.LineHeight(), 22.0f);   // round(1.4 x 15.4)
 }

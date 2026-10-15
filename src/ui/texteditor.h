@@ -5,15 +5,15 @@
 // line height, 24 px side margins, 16 px top margin, `# Start writing` as the placeholder.
 #pragma once
 
-#include "app/platform.h"
+#include "text/textlayout.h"
 #include "ui/textbuffer.h"
 #include "ui/textwrap.h"
+#include "ui/ui.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,6 +38,24 @@ public:
     TextEditor();
     TextEditor(const TextEditor&) = delete;
     TextEditor& operator=(const TextEditor&) = delete;
+
+    // ---- The widget -------------------------------------------------------------------------
+    // Runs the editor for a frame in `rect` (logical px): takes focus on a press, handles the
+    // frame's keys, text, preedit, pointer and wheel while focused (Ctrl+wheel steps the text
+    // size), keeps the IME's text-input rectangle on the caret and draws the visible rows.
+    // Keys it does not use (the app's shortcuts) stay unconsumed. The font is ctx.Fonts() at
+    // the `title` token times the zoom; colours are the tokens' derived colours.
+    void Frame(Context& ctx, RectF rect);
+    // The id it registers for focus and the clipboard ("##texteditor" under the id stack).
+    Id WidgetId() const { return id_; }
+
+    // The text size: an index into kEditorZoomLadder.
+    int ZoomIndex() const { return zoom_; }
+    void SetZoomIndex(int index);
+    // The font size of the grid at the current zoom, logical px.
+    static float FontSize(const Tokens& tokens, int zoomIndex);
+    // Rewraps every line (the interface font changed).
+    void InvalidateLayout();
 
     // ---- Text -------------------------------------------------------------------------------
     // Replaces the text (CRLF and CR become LF, malformed UTF-8 U+FFFD); clears undo, the
@@ -86,9 +104,10 @@ public:
     gfx::RectF CaretRect() const;
 
     // ---- Input ------------------------------------------------------------------------------
-    // A key press; false when the editor does not use it (the app's shortcuts). `platform`
-    // serves the clipboard and may be null (no clipboard).
-    bool HandleKey(Key key, uint8_t mods, Platform* platform);
+    // A key press; false when the editor does not use it (the app's shortcuts). `ctx` serves
+    // the clipboard (Context::SetClipboardText, RequestClipboard; a paste arrives in a later
+    // Frame) and may be null (no clipboard).
+    bool HandleKey(Key key, uint8_t mods, Context* ctx);
     // Committed text (typing, Compose, IME): replaces the selection; clears the preedit.
     void HandleText(std::string_view utf8);
     // The IME's preedit, drawn at the caret; not in the buffer.
@@ -114,9 +133,10 @@ public:
     size_t UndoBytes() const { return undoBytes_; }
     size_t UndoGroups() const { return undo_.size(); }
     void SelectAll();
-    void Copy(Platform& platform) const;
-    void Cut(Platform& platform);
-    void Paste(Platform& platform);
+    void Copy(Context& ctx) const;
+    void Cut(Context& ctx);
+    // Asks for the clipboard; Frame inserts it when it arrives.
+    void Paste(Context& ctx);
     // Inserts as one paste: its own undo group.
     void PasteText(std::string_view utf8);
 
@@ -165,6 +185,11 @@ private:
     void LineAt(size_t pos, size_t& start, size_t& end) const;
     void ExtendDragTo(size_t pos, bool atRowEnd);
 
+    // Frame helpers.
+    void HandleInput(Context& ctx, RectF rect, bool focused);
+    void Draw(Context& ctx, RectF rect, bool focused);
+    void DrawRow(Context& ctx, RectF rect, size_t row, float y, bool focused);
+
     TextBuffer buffer_;
     WrapLayout wrap_;
     uint64_t revision_ = 0;
@@ -194,8 +219,17 @@ private:
     Merge lastMerge_ = Merge::None;
     double lastEditTime_ = 0;
 
-    // Expires the clipboard callbacks of a destroyed editor.
-    std::shared_ptr<TextEditor*> self_;
+    // The widget.
+    Id id_ = 0;
+    int zoom_ = kEditorZoomDefault;
+    float fontSize_ = 14;
+    float ascent_ = 0, descent_ = 0;
+    SmoothScroll scroll_;
+    float zoomWheel_ = 0;
+    double lastAutoScroll_ = 0;
+    // The glyphs of a row being drawn, normal and selected.
+    std::vector<GlyphInstance> glyphs_[2];
+    std::string rowScratch_;
 };
 
 } // namespace rgui::ui

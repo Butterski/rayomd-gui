@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "ui/texteditor.h"
 
+#include "common/exact_math.h"
+#include "common/text_utils.h"
 #include "text/unicode.h"
 
 #include <algorithm>
@@ -13,7 +15,7 @@ constexpr int kDefaultWrapCells = 80;
 
 } // namespace
 
-TextEditor::TextEditor() : self_(std::make_shared<TextEditor*>(this)) {
+TextEditor::TextEditor() {
     wrap_.Reset(buffer_, kDefaultWrapCells);
 }
 
@@ -362,7 +364,7 @@ void TextEditor::LineAt(size_t pos, size_t& start, size_t& end) const {
 
 // ---- Keys and text --------------------------------------------------------------------------
 
-bool TextEditor::HandleKey(Key key, uint8_t mods, Platform* platform) {
+bool TextEditor::HandleKey(Key key, uint8_t mods, Context* ctx) {
     if (mods & kModSuper) return false;
     const bool alt = (mods & kModAlt) != 0;
     // A Ctrl shortcut never fires with Alt held (AltGr is Ctrl+Alt on Windows).
@@ -437,7 +439,7 @@ bool TextEditor::HandleKey(Key key, uint8_t mods, Platform* platform) {
         return true;
     case Key::Insert:
         if (shift && !ctrl) {
-            if (platform) Paste(*platform);
+            if (ctx) Paste(*ctx);
             return true;
         }
         return false;
@@ -453,15 +455,15 @@ bool TextEditor::HandleKey(Key key, uint8_t mods, Platform* platform) {
         return true;
     case Key::C:
         if (shift) return false;
-        if (platform) Copy(*platform);
+        if (ctx) Copy(*ctx);
         return true;
     case Key::X:
         if (shift) return false;
-        if (platform) Cut(*platform);
+        if (ctx) Cut(*ctx);
         return true;
     case Key::V:
         if (shift) return false;
-        if (platform) Paste(*platform);
+        if (ctx) Paste(*ctx);
         return true;
     case Key::Z:
         if (shift) Redo();
@@ -501,22 +503,20 @@ void TextEditor::PasteText(std::string_view utf8) {
     Edit(SelectionStart(), SelectionEnd() - SelectionStart(), text, Merge::None);
 }
 
-void TextEditor::Copy(Platform& platform) const {
-    if (HasSelection()) platform.SetClipboardText(SelectedText());
+void TextEditor::Copy(Context& ctx) const {
+    if (HasSelection()) ctx.SetClipboardText(SelectedText());
 }
 
-void TextEditor::Cut(Platform& platform) {
+void TextEditor::Cut(Context& ctx) {
     if (!HasSelection()) return;
-    platform.SetClipboardText(SelectedText());
+    ctx.SetClipboardText(SelectedText());
     EndGroup();
     Edit(SelectionStart(), SelectionEnd() - SelectionStart(), {}, Merge::None);
 }
 
-void TextEditor::Paste(Platform& platform) {
-    std::weak_ptr<TextEditor*> self = self_;
-    platform.RequestClipboardText([self](std::string text) {
-        if (auto editor = self.lock()) (*editor)->PasteText(text);
-    });
+void TextEditor::Paste(Context& ctx) {
+    if (id_ == 0) id_ = ctx.MakeId("##texteditor");
+    ctx.RequestClipboard(id_);
 }
 
 // ---- Pointer --------------------------------------------------------------------------------
@@ -597,6 +597,271 @@ bool TextEditor::AutoScroll() {
     const size_t pos = PositionAt(dragX_, dragY_, &end);
     ExtendDragTo(pos, end);
     return scrollY_ != before;
+}
+
+// ---- The widget -----------------------------------------------------------------------------
+
+float TextEditor::FontSize(const Tokens& tokens, int zoomIndex) {
+    zoomIndex = std::min(std::max(zoomIndex, 0), kEditorZoomCount - 1);
+    return static_cast<float>(tokens.font.title * tokens.textScale) * kEditorZoomLadder[zoomIndex];
+}
+
+void TextEditor::SetZoomIndex(int index) {
+    zoom_ = std::min(std::max(index, 0), kEditorZoomCount - 1);
+}
+
+void TextEditor::InvalidateLayout() {
+    wrap_.Reset(buffer_, wrap_.WrapCells());
+    ClampScroll();
+}
+
+namespace {
+
+// The grid of the editor font at `size`: the advance of 'M' and omawrite's 140 % line height.
+void GridMetrics(const Context& ctx, float size, float& column, float& line, float& ascent, float& descent) {
+    line = static_cast<float>(RayoMd::ExactMath::LlRound(1.4 * size));
+    column = 0.6f * size;
+    const FontMetrics m = ctx.Metrics(size);
+    ascent = m.ascent > 0 ? m.ascent : 0.8f * size;
+    descent = m.ascent > 0 ? m.descent : 0.2f * size;
+    const text::FontSet* fonts = ctx.Fonts();
+    if (fonts && fonts->IsLoaded()) {
+        const text::FontSet::Resolved m0 = fonts->Resolve('M', false);
+        if (m0.face) {
+            const float advance = text::GlyphAdvance(*m0.face, m0.glyph, size);
+            if (advance > 0) column = advance;
+        }
+    }
+}
+
+} // namespace
+
+void TextEditor::Frame(Context& ctx, RectF rect) {
+    id_ = ctx.MakeId("##texteditor");
+    SetNow(ctx.NowMs());
+    float column, line;
+    auto layout = [&] {
+        fontSize_ = FontSize(ctx.GetTokens(), zoom_);
+        GridMetrics(ctx, fontSize_, column, line, ascent_, descent_);
+        SetLayout(rect.w, rect.h, column, line);
+    };
+    layout();
+
+    // The view as it is now: keys and the pointer work on what is on screen.
+    scroll_.SetMax(MaxScrollY());
+    const float shown = scroll_.Value(now_, ctx.Scale());
+    scrollY_ = shown;
+    ClampScroll();
+
+    const Interaction in = ctx.Interact(id_, rect, kInteractFocusable);
+    const bool focused = ctx.FocusBehavior(id_);
+    if (in.hovered || in.held) ctx.SetCursor(Cursor::IBeam);
+    const int zoomBefore = zoom_;
+    HandleInput(ctx, rect, focused);
+    if (zoom_ != zoomBefore) {
+        layout();
+        EnsureCaretVisible();
+    }
+    if (in.pressed) {
+        const PointerInput& pointer = ctx.Pointer();
+        PointerDown(pointer.pressX - rect.x, pointer.pressY - rect.y, in.clickCount, (ctx.Mods() & kModShift) != 0);
+        lastAutoScroll_ = now_;
+    }
+    if (in.held && !in.pressed) PointerDrag(ctx.Pointer().x - rect.x, ctx.Pointer().y - rect.y);
+    if (in.released || (!in.held && dragging_)) PointerUp();
+    if (dragging_ && (dragY_ < 0 || dragY_ > rect.h)) {
+        if (now_ - lastAutoScroll_ >= 16) {
+            AutoScroll();
+            lastAutoScroll_ = now_;
+        }
+        ctx.WakeAt(lastAutoScroll_ + 16);
+    }
+
+    // Keys, clicks and auto-scroll move the view at once; the wheel eases.
+    scroll_.SetMax(MaxScrollY());
+    if (scrollY_ != shown) scroll_.JumpTo(scrollY_);
+    float pixels = 0;
+    const float notches = ctx.ConsumeWheel(rect, pixels);
+    if (notches != 0) scroll_.AddNotches(notches, now_);
+    if (pixels != 0) scroll_.AddPixels(pixels);
+    scrollY_ = scroll_.Value(now_, ctx.Scale());
+    if (scroll_.Animating(now_)) ctx.RequestAnimation();
+
+    if (focused) {
+        const gfx::RectF caret = CaretRect();
+        ctx.SetTextInputRect({rect.x + caret.x, rect.y + caret.y, caret.w, caret.h});
+    } else {
+        preedit_.clear();
+        preeditCursor_ = -1;
+    }
+    Draw(ctx, rect, focused);
+}
+
+void TextEditor::HandleInput(Context& ctx, RectF rect, bool focused) {
+    // Ctrl+wheel steps the text size, a step per notch (or 120 px of a touchpad).
+    float pixels = 0;
+    zoomWheel_ += ctx.ConsumeWheel(rect, pixels, true);
+    zoomWheel_ += pixels / SmoothScroll::kNotchStep;
+    // Rolling away from the user (negative notches) enlarges, as in browsers.
+    while (zoomWheel_ <= -1) {
+        SetZoomIndex(zoom_ + 1);
+        zoomWheel_ += 1;
+    }
+    while (zoomWheel_ >= 1) {
+        SetZoomIndex(zoom_ - 1);
+        zoomWheel_ -= 1;
+    }
+    std::string pasted;
+    if (ctx.TakeClipboard(id_, pasted)) PasteText(pasted);
+    if (!focused) return;
+    const std::vector<InputEvent>& events = ctx.Events();
+    for (size_t i = 0; i < events.size(); i++) {
+        if (ctx.IsConsumed(i)) continue;
+        const InputEvent& e = events[i];
+        switch (e.type) {
+        case InputEvent::Type::KeyDown:
+            if (HandleKey(e.key, e.mods, &ctx)) ctx.ConsumeEvent(i);
+            break;
+        case InputEvent::Type::Text:
+            HandleText(e.text);
+            ctx.ConsumeEvent(i);
+            break;
+        case InputEvent::Type::Preedit:
+            SetPreedit(e.text, e.preeditCursor);
+            ctx.ConsumeEvent(i);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void TextEditor::Draw(Context& ctx, RectF rect, bool focused) {
+    const DerivedColors& colors = ctx.GetTokens().colors;
+    ctx.FillRect(rect, colors.windowBackground);
+    ctx.PushClip(rect);
+    const size_t rows = wrap_.RowCount();
+    const size_t first = static_cast<size_t>(scrollY_ / lineHeight_);
+    float y = rect.y + kEditorPadTop + static_cast<float>(first) * lineHeight_ - scrollY_;
+    if (buffer_.Empty() && !focused) {
+        const float baseline = ctx.SnapToDevice(y + (lineHeight_ - ascent_ - descent_) / 2 + ascent_);
+        ctx.DrawText("# Start writing", rect.x + kEditorPadX, baseline, fontSize_, colors.mutedText);
+    } else {
+        for (size_t row = first; row < rows && y < rect.Bottom(); row++, y += lineHeight_) {
+            DrawRow(ctx, rect, row, y, focused);
+        }
+    }
+    if (focused) {
+        gfx::RectF caret = CaretRect();
+        if (!preedit_.empty() && preeditCursor_ > 0) {
+            // The IME's caret inside the preedit.
+            const std::string_view before(preedit_.data(), std::min(preedit_.size(), static_cast<size_t>(preeditCursor_)));
+            int col = CaretColumn();
+            const int start = col;
+            for (size_t i = 0; i < before.size();) {
+                uint32_t cp = static_cast<unsigned char>(before[i]);
+                size_t len = 1;
+                if (cp >= 0x80 && !RayoMd::Text::DecodeUtf8(before, i, cp, len)) {
+                    cp = 0xFFFD;
+                    len = 1;
+                }
+                col += CellsAt(cp, col);
+                i += len;
+            }
+            caret.x += static_cast<float>(col - start) * colWidth_;
+        }
+        ctx.FillRect({rect.x + caret.x, rect.y + caret.y, 1, lineHeight_}, colors.caret);
+    }
+    ctx.PopClip();
+}
+
+void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool focused) {
+    const DerivedColors& colors = ctx.GetTokens().colors;
+    const text::FontSet* fonts = ctx.Fonts();
+    size_t line, r;
+    wrap_.LineOfRow(row, line, r);
+    const size_t start = wrap_.RowStart(buffer_, line, r);
+    const size_t end = wrap_.RowEnd(buffer_, line, r);
+    const float textX = rect.x + kEditorPadX;
+    const bool lastRowOfLine = r + 1 == wrap_.RowsOf(line);
+
+    // The selection behind the text; a selected line break shows as one more cell.
+    const size_t selStart = SelectionStart();
+    const size_t selEnd = SelectionEnd();
+    if (selStart != selEnd && selStart <= end && selEnd > start) {
+        const size_t a = std::max(selStart, start);
+        const size_t b = std::min(selEnd, end);
+        const int colA = ColumnOf(start, a);
+        const int colB = ColumnOf(start, b);
+        const bool lineBreak = lastRowOfLine && selEnd > end && line + 1 < buffer_.LineCount();
+        const float cells = static_cast<float>(colB - colA + (lineBreak ? 1 : 0));
+        if (cells > 0) {
+            ctx.FillRect({textX + static_cast<float>(colA) * colWidth_, y, cells * colWidth_, lineHeight_},
+                colors.selection);
+        }
+    }
+    if (!fonts || !fonts->IsLoaded()) return;
+
+    const float scale = static_cast<float>(ctx.Scale());
+    const float baseline = static_cast<float>(
+        RayoMd::ExactMath::LlRound((y + (lineHeight_ - ascent_ - descent_) / 2 + ascent_) * scale));
+    const text::FontFace* main = &fonts->Face(false);
+    glyphs_[0].clear();
+    glyphs_[1].clear();
+    int col = 0;
+    auto place = [&](uint32_t cp, int w, bool selected) {
+        if (cp == ' ' || cp == '\t' || cp < 0x20 || cp == 0x7F) return;
+        const text::FontSet::Resolved g = fonts->Resolve(cp, false);
+        if (!g.face) return;
+        float x = textX + static_cast<float>(col) * colWidth_;
+        if (w > 0 && (g.face != main || w == 2)) {
+            // Fallback glyphs and wide code points sit centred in their cells.
+            x += (static_cast<float>(w) * colWidth_ - text::GlyphAdvance(*g.face, g.glyph, fontSize_)) / 2;
+        }
+        glyphs_[selected ? 1 : 0].push_back({g.face, g.glyph, x * scale, baseline});
+    };
+
+    // The preedit shows at the caret, pushing the rest of the row right, underlined.
+    const bool preeditHere = focused && !preedit_.empty() && row == CaretRow();
+    float preeditX0 = 0, preeditX1 = 0;
+    auto drawPreedit = [&]() {
+        preeditX0 = textX + static_cast<float>(col) * colWidth_;
+        for (size_t i = 0; i < preedit_.size();) {
+            uint32_t cp = static_cast<unsigned char>(preedit_[i]);
+            size_t len = 1;
+            if (cp >= 0x80 && !RayoMd::Text::DecodeUtf8(preedit_, i, cp, len)) {
+                cp = 0xFFFD;
+                len = 1;
+            }
+            const int w = CellsAt(cp, col);
+            place(cp, w, false);
+            col += w;
+            i += len;
+        }
+        preeditX1 = textX + static_cast<float>(col) * colWidth_;
+    };
+
+    for (size_t p = start; p < end;) {
+        if (preeditHere && p == caret_) drawPreedit();
+        size_t len;
+        const uint32_t cp = buffer_.Decode(p, len);
+        const int w = CellsAt(cp, col);
+        place(cp, w, p >= selStart && p < selEnd);
+        col += w;
+        p += len;
+    }
+    if (preeditHere && caret_ == end) drawPreedit();
+
+    // Glyph ink stays near the row; a quarter line of slack for tall accents.
+    const gfx::RectI ink = ctx.ToDevice({rect.x, y - lineHeight_ * 0.25f, rect.w, lineHeight_ * 1.5f});
+    const uint32_t colorsOut[2] = {ctx.Color(colors.text), ctx.Color(colors.selectedText)};
+    for (int k = 0; k < 2; k++) {
+        if (glyphs_[k].empty()) continue;
+        ctx.List().Glyphs(glyphs_[k].data(), glyphs_[k].size(), fontSize_ * scale, colorsOut[k], &ink);
+    }
+    if (preeditX1 > preeditX0) {
+        ctx.FillRect({preeditX0, y + lineHeight_ - 1, preeditX1 - preeditX0, 1}, colors.text);
+    }
 }
 
 } // namespace rgui::ui
