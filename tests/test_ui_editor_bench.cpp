@@ -20,7 +20,21 @@
 #include <string>
 #include <vector>
 
-// 1,000 characters typed one at a time into the middle of a 1 MiB document (tester.md
+// Under AddressSanitizer the frames are ~30x slower and their times mean nothing: the bench then
+// types 100 characters, to keep the large-document path covered within the unit run's time.
+#if defined(__SANITIZE_ADDRESS__)
+constexpr int kKeystrokes = 100;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr int kKeystrokes = 100;
+#else
+constexpr int kKeystrokes = 1000;
+#endif
+#else
+constexpr int kKeystrokes = 1000;
+#endif
+
+// kKeystrokes characters typed one at a time into the middle of a 1 MiB document (tester.md
 // repeated), each a full frame at 1920 x 1080: the editor's frame (input, layout, display list)
 // and the compositor's raster of the tiles that changed. Prints p50 and p99.
 RGUI_TEST("bench.typing") {
@@ -82,8 +96,8 @@ RGUI_TEST("bench.typing") {
 
     const char typed[] = "The quick brown fox jumps over the lazy dog. ";
     std::vector<double> ms;
-    ms.reserve(1000);
-    for (int i = 0; i < 1000; i++) {
+    ms.reserve(kKeystrokes);
+    for (int i = 0; i < kKeystrokes; i++) {
         rgui::InputEvent text;
         text.type = rgui::InputEvent::Type::Text;
         text.text.assign(1, typed[i % (sizeof(typed) - 1)]);
@@ -94,10 +108,11 @@ RGUI_TEST("bench.typing") {
         const auto t1 = std::chrono::steady_clock::now();
         ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
     }
-    CHECK_EQ(editor.Buffer().Size(), document.size() + 1000);
+    CHECK_EQ(editor.Buffer().Size(), document.size() + kKeystrokes);
     CHECK(damaged > 0);
     std::sort(ms.begin(), ms.end());
-    std::printf("bench.typing: 1000 keystrokes, %zu-byte document, %dx%d, %d tile threads: "
+    std::printf("bench.typing: %d keystrokes, %zu-byte document, %dx%d, %d tile threads: "
                 "p50 %.3f ms, p99 %.3f ms, max %.3f ms\n",
-        document.size(), kWidth, kHeight, compositor.Threads(), ms[499], ms[989], ms.back());
+        kKeystrokes, document.size(), kWidth, kHeight, compositor.Threads(), ms[ms.size() / 2],
+        ms[ms.size() * 99 / 100], ms.back());
 }
