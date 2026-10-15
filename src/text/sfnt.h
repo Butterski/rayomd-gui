@@ -35,7 +35,8 @@ struct FaceInfo {
     bool fixedPitch = false;    // post isFixedPitch
 };
 
-// False when the face does not exist or its tables are malformed.
+// False when the face does not exist, has no family name, or has neither glyf + loca nor
+// 'CFF ' outlines (CFF2 variable fonts and bitmap-only fonts are left out).
 bool ReadFaceInfo(const uint8_t* data, size_t size, uint32_t faceIndex, FaceInfo& info);
 
 struct TableSpan {

@@ -214,6 +214,8 @@ bool ReadFaceInfo(const uint8_t* data, size_t size, uint32_t faceIndex, FaceInfo
     info = FaceInfo();
     Directory dir;
     if (!ReadDirectory(data, size, faceIndex, dir)) return false;
+    // A face without outlines we draw (CFF2 variable fonts, bitmap-only fonts) is left out.
+    if ((dir.glyf.length == 0 || dir.loca.length == 0) && dir.cff.length == 0) return false;
     NameTable names;
     if (!names.Init(data, size, dir.name)) return false;
     const bool mac = !names.HasWindowsNames();
