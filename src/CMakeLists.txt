@@ -35,3 +35,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         rgui_flags(rayomd_gui_linux)
     endif()
 endif()
+
+# The Win32 platform layer (platform/win32/sources.cmake sets RGUI_WIN32_SOURCES): a library the
+# executable links. comdlg32, shell32, dwmapi and imm32 are loaded on first use, not imported:
+# the --wrap options travel to whatever links this library.
+if(WIN32)
+    set(RGUI_WIN32_SOURCES)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/sources.cmake)
+    add_library(rayomd_gui_win32 STATIC ${RGUI_WIN32_SOURCES})
+    target_link_libraries(rayomd_gui_win32 PUBLIC rayomd_gui_core user32 gdi32 advapi32)
+    target_compile_definitions(rayomd_gui_win32 PUBLIC UNICODE _UNICODE)
+    foreach(function ${RGUI_WIN32_DELAY_LOADED})
+        target_link_options(rayomd_gui_win32 INTERFACE "-Wl,--wrap=${function}")
+    endforeach()
+    rgui_flags(rayomd_gui_win32)
+endif()

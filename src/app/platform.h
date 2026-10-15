@@ -104,6 +104,11 @@ public:
     virtual void StartResize(Edge edge) = 0;
     virtual void ToggleMaximize() = 0;
     virtual void Minimize() = 0;
+    // Matches the system's window frame to the theme where the system draws one in colour
+    // (Windows: dark title bar, and on Windows 11 caption, caption text and border colours).
+    // Colours are 0xAARRGGBB, alpha ignored. Platforms without such a frame do nothing.
+    virtual void SetWindowColors(bool /*dark*/, uint32_t /*background*/, uint32_t /*foreground*/,
+                                 uint32_t /*accent*/) {}
 
     // Clipboard.
     virtual void SetClipboardText(std::string text) = 0;
