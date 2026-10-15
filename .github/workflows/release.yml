@@ -1,0 +1,246 @@
+name: Release
+
+# Every push to main builds the app for Linux and Windows and publishes the builds as the
+# `continuous` pre-release, whose tag moves to the pushed commit; a tag v<VERSION> publishes that
+# version's release, as rayomd's release workflow does. The jobs build without the tests: CI runs
+# them on the same pushes.
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Version metadata
+    runs-on: ubuntu-22.04
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      title: ${{ steps.version.outputs.title }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(head -n 1 VERSION | tr -d '\r\n ')"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+(\.[0-9]+){1,3}$'; then
+            echo "VERSION must be a numeric CMake project version, got: $version" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match VERSION ${version}; expected v${version}." >&2
+              exit 1
+            fi
+            tag="v${version}"
+            title="RayoMD GUI ${version}"
+          else
+            tag="continuous"
+            title="RayoMD GUI ${version} (${GITHUB_REF_NAME} ${GITHUB_SHA::7})"
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "title=$title"
+          } >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux binary
+    needs: version
+    # The oldest runner: the binary then needs glibc 2.34 or newer, not the newest Arch's.
+    runs-on: ubuntu-22.04
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++
+
+      - name: Build
+        run: |
+          cmake --preset linux-release -DBUILD_TESTING=OFF
+          cmake --build --preset linux-release --parallel 4
+          build/linux-release/src/rayomd-gui --version | grep -Fx "rayomd-gui ${VERSION}"
+          tests/check_hardening.sh linux build/linux-release/src/rayomd-gui
+
+      - name: Package
+        run: |
+          name="rayomd-gui-${VERSION}-linux-x64"
+          dist="dist/${name}"
+          install -Dm755 build/linux-release/src/rayomd-gui "${dist}/rayomd-gui"
+          install -Dm644 linux/rayomd-gui.desktop "${dist}/share/applications/rayomd-gui.desktop"
+          for size in 16 32 48 64 128 256; do
+            install -Dm644 "linux/icons/hicolor/${size}x${size}/apps/rayomd-gui.png" \
+              "${dist}/share/icons/hicolor/${size}x${size}/apps/rayomd-gui.png"
+          done
+          cp README.md LICENSE NOTICE VERSION "${dist}/"
+          install -Dm644 third_party/omarchy/LICENSE "${dist}/licenses/omarchy-LICENSE"
+          install -Dm644 external/rayomd/third_party/tex-gyre/GUST-FONT-LICENSE.txt \
+            "${dist}/licenses/GUST-FONT-LICENSE.txt"
+          tar -czf "${name}.tar.gz" -C dist "${name}"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rayomd-gui-linux
+          path: rayomd-gui-${{ needs.version.outputs.version }}-linux-x64.tar.gz
+          if-no-files-found: error
+
+  arch:
+    name: Arch Linux package
+    needs: version
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # makepkg writes this into the package's metadata.
+      PACKAGER: Milosz Kucharski <miloszkucharski@gmail.com>
+
+    steps:
+      - name: Install tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git cmake python namcap
+          useradd -m builder
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # linux/pkgbuild builds the working tree; its pkgver follows VERSION.
+      - name: Build, check and smoke-test the package
+        run: |
+          chown -R builder "$GITHUB_WORKSPACE"
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" linux/pkgbuild/PKGBUILD
+          (cd linux/pkgbuild && runuser -u builder -- makepkg --noconfirm)
+          namcap linux/pkgbuild/PKGBUILD linux/pkgbuild/rayomd-gui-*.pkg.tar.zst
+          pacman -U --noconfirm linux/pkgbuild/rayomd-gui-*.pkg.tar.zst
+          rayomd-gui --version | grep -Fx "rayomd-gui ${VERSION}"
+          cp linux/pkgbuild/rayomd-gui-*.pkg.tar.zst .
+
+      - name: Upload Arch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rayomd-gui-arch
+          path: rayomd-gui-*.pkg.tar.zst
+          if-no-files-found: error
+
+  windows:
+    name: Windows binary
+    needs: version
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2 MinGW
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-make
+
+      - name: Build
+        run: |
+          cmake --preset windows-mingw -DBUILD_TESTING=OFF
+          cmake --build --preset windows-mingw --parallel 4
+          # Redirected output: the GUI-subsystem exe writes to the pipe, and the shell waits for it.
+          build/windows/src/rayomd-gui.exe --version 2>&1 | tr -d '\r' | grep -Fx "rayomd-gui ${{ needs.version.outputs.version }}"
+          tests/check_hardening.sh windows build/windows/src/rayomd-gui.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          $name = "rayomd-gui-$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path "dist\$name\licenses" | Out-Null
+          Copy-Item "build\windows\src\rayomd-gui.exe" "dist\$name\rayomd-gui.exe"
+          Copy-Item README.md, LICENSE, NOTICE, VERSION "dist\$name\"
+          Copy-Item "third_party\omarchy\LICENSE" "dist\$name\licenses\omarchy-LICENSE"
+          Copy-Item "external\rayomd\third_party\tex-gyre\GUST-FONT-LICENSE.txt" "dist\$name\licenses\"
+          Compress-Archive -Path "dist\$name" -DestinationPath "$name.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rayomd-gui-windows
+          path: rayomd-gui-${{ needs.version.outputs.version }}-windows-x64.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [version, linux, arch, windows]
+    # Builds of other branches (a manual run) stay workflow artifacts.
+    if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      RELEASE_TITLE: ${{ needs.version.outputs.title }}
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create or update the release
+        run: |
+          files=(
+            "rayomd-gui-linux/rayomd-gui-${VERSION}-linux-x64.tar.gz"
+            rayomd-gui-arch/rayomd-gui-*.pkg.tar.zst
+            "rayomd-gui-windows/rayomd-gui-${VERSION}-windows-x64.zip"
+          )
+          if [ "$RELEASE_TAG" = "continuous" ]; then
+            # The newest build of main: the release and its tag are made again at this commit,
+            # so the tag always names the source of the files.
+            gh release delete continuous --cleanup-tag --yes 2>/dev/null || true
+            gh release create continuous "${files[@]}" \
+              --title "$RELEASE_TITLE" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --notes "The newest build of main, from ${GITHUB_SHA}, replaced on every push. Linux: the tarball (glibc 2.34 or newer) or the Arch package; Windows: the zip. Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          elif gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --latest
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${files[@]}" \
+              --title "$RELEASE_TITLE" \
+              --target "$GITHUB_SHA" \
+              --generate-notes \
+              --latest
+          fi

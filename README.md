@@ -56,6 +56,13 @@ build/windows/tests/rayomd-gui-tests.exe
 snapshot; ctest runs both when weston and sway are installed. On Arch, `linux/pkgbuild` builds
 a package of the working tree: `cd linux/pkgbuild && makepkg -f`.
 
+## Builds
+
+Every push to `main` runs the Release workflow (`.github/workflows/release.yml`). It builds the
+Linux binary on Ubuntu 22.04 (so it runs on glibc 2.34 or newer), the Arch package and the
+Windows executable, and publishes them as the `continuous` pre-release, replaced on each push.
+A tag `v<VERSION>` publishes the release of that version instead.
+
 ## License
 
 Apache License 2.0; see [`LICENSE`](LICENSE). [`NOTICE`](NOTICE) lists the third-party

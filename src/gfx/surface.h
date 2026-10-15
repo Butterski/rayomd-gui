@@ -3,6 +3,7 @@
 // little-endian word, the layout of WL_SHM_FORMAT_ARGB8888/XRGB8888 and of 32-bit DIB sections.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -15,7 +16,7 @@ struct Surface {
     int height = 0;
     int stride = 0;
 
-    uint32_t* Row(int y) const { return pixels + static_cast<ptrdiff_t>(y) * stride; }
+    uint32_t* Row(int y) const { return pixels + static_cast<std::ptrdiff_t>(y) * stride; }
 };
 
 // An owned image, rows top to bottom, `width` pixels each (stride == width).
