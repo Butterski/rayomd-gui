@@ -139,9 +139,31 @@ void Rasterizer::Impl::RenderBand(const Segment& s, int bandTop) {
     const int32_t r1 = (yb - 1) >> kPixelBits;
     int32_t yPrev = ya;
     int32_t xPrev = xAt(ya);
+    // x at the row boundaries (r + 1) * 256 below the first row, floor(dxs * (y - y0) / dys), by
+    // an exact DDA: quotient and remainder stepped by those of dxs * 256 / dys.
+    int64_t q = 0, rem = 0, stepQ = 0, stepR = 0;
+    if (r0 < r1 && dxs != 0) {
+        const int64_t num = dxs * ((static_cast<int64_t>(r0) + 1) * kOne - s.y0);
+        q = FloorDiv(num, dys);
+        rem = num - q * dys;
+        stepQ = FloorDiv(dxs * kOne, dys);
+        stepR = dxs * kOne - stepQ * dys;
+    }
     for (int32_t r = r0; r <= r1; ++r) {
-        const int32_t yNext = std::min(yb, (r + 1) << kPixelBits);
-        const int32_t xNext = s.x0 == s.x1 ? s.x0 : xAt(yNext);
+        int32_t yNext, xNext;
+        if (r == r1) {
+            yNext = yb;
+            xNext = xAt(yb);
+        } else {
+            yNext = (r + 1) << kPixelBits;
+            xNext = static_cast<int32_t>(s.x0 + q);
+            q += stepQ;
+            rem += stepR;
+            if (rem >= dys) {
+                rem -= dys;
+                ++q;
+            }
+        }
         const int local = r - bandTop;
         int32_t* row = cells.data() + 2 * static_cast<ptrdiff_t>(local) * width;
         RowPiece(row, rows[local], xPrev, yPrev, xNext, yNext, s.dir);
