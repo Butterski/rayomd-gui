@@ -47,6 +47,7 @@ void HeadlessPlatform::PostToUi(std::function<void()> task) {
 }
 
 uint64_t HeadlessPlatform::StartTimer(int ms, std::function<void()> callback) {
+    Tick();
     const uint64_t id = nextTimerId_++;
     timers_.push_back({now_ + std::max(ms, 0), id, std::move(callback)});
     return id;
@@ -88,6 +89,7 @@ bool HeadlessPlatform::RunNextTimer(int64_t until) {
 int HeadlessPlatform::Pump() {
     int ran = 0;
     for (;;) {
+        Tick();
         int round = RunPosted();
         while (RunNextTimer(now_)) {
             round++;
@@ -99,6 +101,7 @@ int HeadlessPlatform::Pump() {
 }
 
 int HeadlessPlatform::Advance(int ms) {
+    if (realClock_) return Pump();
     const int64_t target = now_ + std::max(ms, 0);
     int ran = Pump();
     while (RunNextTimer(target)) ran += 1 + Pump();
@@ -111,9 +114,42 @@ bool HeadlessPlatform::PumpUntil(const std::function<bool()>& done, int timeoutM
     for (;;) {
         Pump();
         if (done()) return true;
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (!posted_.wait_until(lock, deadline, [this] { return !tasks_.empty(); })) return false;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return false;
+        WaitForWork(static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count()) + 1);
     }
+}
+
+bool HeadlessPlatform::WaitForWork(int timeoutMs) {
+    auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(timeoutMs, 0));
+    const auto timer = NextDeadline();
+    if (timer < until) until = timer;
+    std::unique_lock<std::mutex> lock(mutex_);
+    posted_.wait_until(lock, until, [this] { return !tasks_.empty(); });
+    return !tasks_.empty() || std::chrono::steady_clock::now() >= timer;
+}
+
+void HeadlessPlatform::UseRealClock() {
+    if (realClock_) return;
+    origin_ = std::chrono::steady_clock::now() - std::chrono::milliseconds(now_);
+    realClock_ = true;
+}
+
+double HeadlessPlatform::RealNowMs() const {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - origin_).count();
+}
+
+void HeadlessPlatform::Tick() {
+    if (!realClock_) return;
+    const int64_t real = static_cast<int64_t>(RealNowMs());
+    if (real > now_) now_ = real;
+}
+
+std::chrono::steady_clock::time_point HeadlessPlatform::NextDeadline() const {
+    if (!realClock_ || timers_.empty()) return std::chrono::steady_clock::time_point::max();
+    int64_t first = timers_.front().deadline;
+    for (const Timer& timer : timers_) first = std::min(first, timer.deadline);
+    return origin_ + std::chrono::milliseconds(first);
 }
 
 std::filesystem::path HeadlessPlatform::ConfigDir() const {

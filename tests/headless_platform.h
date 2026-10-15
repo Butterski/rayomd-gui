@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // The tests' Platform: no window, no system. Posted tasks and timers run only when the test
-// pumps; time is a fake clock the test advances, so timer order is deterministic. Clipboard,
-// file dialogs and "open externally" live in memory; the test scripts the dialog answers and
-// reads back what the app asked for. Directories lie under the build directory.
+// pumps; time is a fake clock the test advances, so timer order is deterministic (measurements
+// switch to the real clock with UseRealClock). Clipboard, file dialogs and "open externally"
+// live in memory; the test scripts the dialog answers and reads back what the app asked for.
+// Directories lie under the build directory.
 #pragma once
 
 #include "app/platform.h"
@@ -37,10 +38,18 @@ public:
     // clock stands at each timer's deadline while it runs), then pumps.
     int Advance(int ms);
     // Pumps, and while `done()` is false waits (real time, at most `timeoutMs`) for a worker to
-    // post and pumps again. False when it timed out.
+    // post, or with the real clock for a timer to come due, and pumps again. False when it timed
+    // out.
     bool PumpUntil(const std::function<bool()>& done, int timeoutMs);
-    // Fake milliseconds since the platform was made.
-    int64_t Now() const { return now_; }
+    // Waits (real time, at most `timeoutMs`) until a task is posted or, with the real clock, a
+    // timer is due, without running anything. False when it timed out.
+    bool WaitForWork(int timeoutMs);
+    // From now on the clock is the real one (a steady clock, continuing from the fake time):
+    // timers come due as real time passes, at the next Pump. For measurements with real
+    // threads; Advance then only pumps.
+    void UseRealClock();
+    // Milliseconds since the platform was made (fake, or real after UseRealClock).
+    int64_t Now() const { return realClock_ ? static_cast<int64_t>(RealNowMs()) : now_; }
     // Timers started and neither fired nor cancelled.
     size_t PendingTimers() const { return timers_.size(); }
 
@@ -121,7 +130,7 @@ public:
     uint64_t StartTimer(int ms, std::function<void()> callback) override;
     void CancelTimer(uint64_t id) override;
     void Quit() override { quit = true; }
-    double NowMs() const override { return static_cast<double>(now_); }
+    double NowMs() const override { return realClock_ ? RealNowMs() : static_cast<double>(now_); }
 
     std::filesystem::path ConfigDir() const override;
     std::filesystem::path ImageCacheDir() const override;
@@ -144,6 +153,12 @@ private:
     int RunPosted();
     // Runs the earliest timer due at or before `until`; false when none is.
     bool RunNextTimer(int64_t until);
+    // The real clock's time on the fake clock's scale.
+    double RealNowMs() const;
+    // The real clock: brings now_ up to it.
+    void Tick();
+    // When the earliest timer is due in real time; time_point::max() without timers.
+    std::chrono::steady_clock::time_point NextDeadline() const;
 
     std::mutex mutex_;
     std::condition_variable posted_;
@@ -152,6 +167,8 @@ private:
     std::deque<FileDialogResult> dialogAnswers_;
     int64_t now_ = 0;
     uint64_t nextTimerId_ = 1;
+    bool realClock_ = false;
+    std::chrono::steady_clock::time_point origin_;  // real time at fake time 0
 };
 
 } // namespace rgui::test

@@ -2,6 +2,7 @@
 // The app on the headless platform: frames of the main window, the live preview, the unsaved
 // prompt, saving and exporting, file dialogs and their fallback, theme selection, settings and
 // snapshot mode.
+#include "app_harness.h"
 #include "headless_platform.h"
 #include "runner.h"
 
@@ -26,18 +27,15 @@ using rgui::App;
 using rgui::InputEvent;
 using rgui::Key;
 using rgui::StatusKind;
+using rgui::test::HaveFonts;
 using rgui::test::HeadlessPlatform;
+using rgui::test::TesterPath;
+using Harness = rgui::test::AppHarness;
 
-constexpr int kWidth = 1280;
-constexpr int kHeight = 820;
+constexpr int kWidth = Harness::kWidth;
+constexpr int kHeight = Harness::kHeight;
 
-fs::path TempDir(const char* name) {
-    const fs::path dir = fs::u8path(rgui::test::BuildDir()) / "test-app-window" / name;
-    std::error_code error;
-    fs::remove_all(dir, error);
-    fs::create_directories(dir, error);
-    return dir;
-}
+fs::path TempDir(const char* name) { return rgui::test::FreshDir("test-app-window", name); }
 
 std::string ReadFile(const fs::path& path) {
     std::string content;
@@ -48,116 +46,6 @@ std::string ReadFile(const fs::path& path) {
 bool StartsWith(const std::string& text, const std::string& prefix) {
     return text.compare(0, prefix.size(), prefix) == 0;
 }
-
-std::string TesterPath() { return std::string(rgui::test::SourceDir()) + "/external/rayomd/tester.md"; }
-
-bool HaveFonts() {
-    static const bool have = [] {
-        rgui::text::FontIndex index;
-        index.SetDirectories({"/usr/share/fonts"});
-        return index.Find("DejaVu Sans Mono", 400, false) != nullptr;
-    }();
-    return have;
-}
-
-// One app on a headless platform, its settings and files in a directory of its own.
-struct Harness {
-    HeadlessPlatform platform;
-    std::unique_ptr<App> app;
-    fs::path dir;
-    int framesSeen = 0;
-
-    explicit Harness(const char* name) : dir(TempDir(name)) {}
-
-    fs::path SettingsPath() const { return dir / "settings.ini"; }
-
-    // `settings` is the settings file's text (none when empty).
-    void Start(const std::string& settings, const std::string& file = {}, const std::string& snapshotPath = {}) {
-        if (!settings.empty()) RayoMd::File::WriteAll(SettingsPath(), settings);
-        rgui::Startup startup;
-        startup.args.mode = snapshotPath.empty() ? rgui::Args::Mode::Run : rgui::Args::Mode::Snapshot;
-        startup.args.snapshotPath = snapshotPath;
-        startup.args.file = file;
-        startup.settingsPath = SettingsPath();
-        startup.settings.Load(startup.settingsPath);
-        startup.fontIndex = std::make_unique<rgui::text::FontIndex>();
-        startup.fontIndex->SetDirectories({"/usr/share/fonts"});
-        startup.fontIndex->Start();
-        startup.fontPaths = {};
-        app = App::Create(platform, std::move(startup));
-        app->OnResize(kWidth, kHeight, 1.0);
-    }
-
-    rgui::MainWindow& Window() { return app->Window(); }
-
-    // Runs what is posted and due, then a frame if one was requested.
-    void Step() {
-        platform.Pump();
-        if (platform.frameRequests != framesSeen) {
-            framesSeen = platform.frameRequests;
-            app->OnFrame();
-        }
-    }
-    // A frame now, requested or not.
-    void Frame() {
-        platform.Pump();
-        framesSeen = platform.frameRequests;
-        app->OnFrame();
-    }
-    // Steps until `done` (frames as they are requested, waiting for the workers in between).
-    bool RunUntil(const std::function<bool()>& done, int timeoutMs = 30000) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-        for (;;) {
-            Step();
-            if (done()) return true;
-            if (std::chrono::steady_clock::now() > deadline) return false;
-            if (platform.frameRequests == framesSeen) {
-                platform.PumpUntil([&] { return platform.frameRequests != framesSeen || done(); }, 20);
-            }
-        }
-    }
-    bool Settle() {
-        return RunUntil([&] {
-            return Window().PreviewSettled() && Window().ShownGeneration() == Window().RequestedGeneration();
-        });
-    }
-
-    void KeyDown(Key key, uint8_t mods = 0) {
-        InputEvent e;
-        e.type = InputEvent::Type::KeyDown;
-        e.key = key;
-        e.mods = mods;
-        app->OnInput(e);
-        Frame();
-    }
-    void Type(const std::string& text) {
-        InputEvent e;
-        e.type = InputEvent::Type::Text;
-        e.text = text;
-        app->OnInput(e);
-        Frame();
-    }
-    void Click(float x, float y, double gapMs = 0) {
-        InputEvent e;
-        e.type = InputEvent::Type::PointerMove;
-        e.x = x;
-        e.y = y;
-        app->OnInput(e);
-        e.type = InputEvent::Type::Button;
-        e.pressed = true;
-        app->OnInput(e);
-        Frame();
-        e.pressed = false;
-        app->OnInput(e);
-        Frame();
-        if (gapMs > 0) platform.Advance(static_cast<int>(gapMs));
-    }
-
-    uint32_t Pixel(int x, int y) const {
-        return platform.lastFrame[static_cast<size_t>(y) * static_cast<size_t>(platform.lastFrameWidth) +
-                                  static_cast<size_t>(x)];
-    }
-};
 
 int Channel(uint32_t p, int shift) { return static_cast<int>((p >> shift) & 0xFF); }
 
