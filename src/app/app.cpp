@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app/app.h"
 
+#include "app/safefile.h"
 #include "app/themeselect.h"
 #include "common/exact_math.h"
-#include "common/file_io.h"
 #include "gfx/png_write.h"
 
 #include <algorithm>
@@ -229,7 +229,7 @@ bool App::SaveRecoveryCopy() {
     for (int n = 2; fs::exists(path, error) && n < 100; ++n) {
         path = dir / fs::u8path(stem + "-" + stamp + "-" + std::to_string(n) + ".md");
     }
-    if (!RayoMd::File::WriteAll(path, window_->Editor().CopyText())) {
+    if (!WriteFileAtomically(path, window_->Editor().CopyText(), WriteMode::Document, nullptr)) {
         std::fprintf(stderr, "rayomd-gui: cannot save the unsaved text to %s\n", path.u8string().c_str());
         return false;
     }
