@@ -97,7 +97,15 @@ void FontIndex::Start() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (started_) return;
     started_ = true;
-    thread_ = std::thread([this] { Scan(); });
+    thread_ = std::thread([this] {
+#ifdef _WIN32
+        // Nothing waits for the scan on Windows (the interface font, the standard-font substitutes
+        // and the default fallbacks come from their known files; FontSet never waits): its reads
+        // of every font file run at background I/O and CPU priority, behind the first preview's.
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+#endif
+        Scan();
+    });
 }
 
 void FontIndex::Wait() const {

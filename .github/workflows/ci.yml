@@ -70,6 +70,9 @@ jobs:
           mkdir -p "$appdata/RayoMD"
           printf 'ui.theme=tokyo-night\n' > "$appdata/RayoMD/rayomd-gui.ini"
           # Redirected output: the GUI-subsystem exe writes to the pipes, and the shell waits for it.
+          # Twice: the first start reads the fonts cold, the second shows the warm start.
+          APPDATA="$(cygpath -w "$appdata")" build/windows/src/rayomd-gui.exe --snapshot snapshot.png external/rayomd/tester.md 2>&1 | cat
+          test "${PIPESTATUS[0]}" -eq 0
           APPDATA="$(cygpath -w "$appdata")" build/windows/src/rayomd-gui.exe --snapshot snapshot.png external/rayomd/tester.md 2>&1 | cat
           test "${PIPESTATUS[0]}" -eq 0
           python tests/e2e/check_snapshot.py snapshot.png 1a1b26 7aa2f7
