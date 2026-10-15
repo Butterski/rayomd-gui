@@ -4,6 +4,7 @@
 
 #include "gfx/geometry.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -60,5 +61,20 @@ inline constexpr float kFlattenTolerance = 0.2f;
 // n = ceil(sqrt(0.75 * max(|p0 - 2p1 + p2|, |p1 - 2p2 + p3|) / tol)), n clamped to [1, 256], the
 // control points measured after the transform.
 void Flatten(const Path& path, const Matrix& m, float tolerance, LineSink& sink);
+
+// Receives flattened subpaths whole: `count` device-space points, `closed` when the subpath ended
+// with Close. A lone MoveTo arrives as one open point.
+class PolylineSink {
+public:
+    virtual void Polyline(const PointF* points, size_t count, bool closed) = 0;
+
+protected:
+    ~PolylineSink() = default;
+};
+
+// As Flatten, but each subpath is handed over as a polyline and open ones stay open (for
+// stroking). `scratch` holds the current subpath's points; pass the same vector to reuse it.
+void FlattenPolylines(const Path& path, const Matrix& m, float tolerance, std::vector<PointF>& scratch,
+                      PolylineSink& sink);
 
 } // namespace rgui::gfx
