@@ -56,6 +56,12 @@ public:
     static float FontSize(const Context& ctx, int zoomIndex);
     // Rewraps every line (the interface font changed).
     void InvalidateLayout();
+    // Rewraps up to `bytes` more of a line an edit left cut (WrapLayout::Settle); Frame does
+    // kSettleBytes a frame. Returns whether rows are still left.
+    static constexpr size_t kSettleBytes = 256 << 10;
+    bool SettleWrap(size_t bytes) { return wrap_.Settle(buffer_, bytes); }
+    // How far an edit rewraps past itself before cutting (WrapLayout::SetEditBudget).
+    void SetWrapEditBudget(size_t bytes) { wrap_.SetEditBudget(bytes); }
 
     // ---- Text -------------------------------------------------------------------------------
     // Replaces the text (CRLF and CR become LF, malformed UTF-8 U+FFFD); clears undo, the
@@ -232,7 +238,6 @@ private:
     double lastAutoScroll_ = 0;
     // The glyphs of a row being drawn, normal and selected.
     std::vector<GlyphInstance> glyphs_[2];
-    std::string rowScratch_;
 };
 
 } // namespace rgui::ui

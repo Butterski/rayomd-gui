@@ -39,12 +39,17 @@ void TextEditor::SetText(std::string_view text) {
 }
 
 void TextEditor::Apply(size_t pos, size_t len, std::string_view bytes) {
-    const size_t firstLine = buffer_.LineOf(pos);
-    const size_t oldLastLine = buffer_.LineOf(pos + len);
-    buffer_.Erase(pos, len);
-    buffer_.Insert(pos, bytes);
-    const size_t newLastLine = firstLine + static_cast<size_t>(std::count(bytes.begin(), bytes.end(), '\n'));
-    wrap_.OnEdit(buffer_, firstLine, oldLastLine, newLastLine);
+    WrapLayout::Edit edit;
+    edit.pos = std::min(pos, buffer_.Size());
+    edit.removed = std::min(len, buffer_.Size() - edit.pos);
+    edit.inserted = bytes.size();
+    edit.firstLine = buffer_.LineOf(edit.pos);
+    edit.oldLastLine = buffer_.LineOf(edit.pos + edit.removed);
+    edit.oldLastStart = buffer_.LineStart(edit.oldLastLine);
+    buffer_.Erase(edit.pos, edit.removed);
+    buffer_.Insert(edit.pos, bytes);
+    edit.newLastLine = edit.firstLine + static_cast<size_t>(std::count(bytes.begin(), bytes.end(), '\n'));
+    wrap_.OnEdit(buffer_, edit);
 }
 
 void TextEditor::Changed() {
@@ -207,14 +212,14 @@ void TextEditor::EnsureCaretVisible() {
 // ---- Caret ----------------------------------------------------------------------------------
 
 int TextEditor::ColumnOf(size_t rowStart, size_t pos) const {
-    int col = 0;
+    CellCursor cell;
     for (size_t p = rowStart; p < pos;) {
         size_t len;
         const uint32_t cp = buffer_.Decode(p, len);
-        col += CellsAt(cp, col);
+        cell.Advance(cell.Width(cp));
         p += len;
     }
-    return col;
+    return cell.col;
 }
 
 size_t TextEditor::CaretRow() const {
@@ -241,13 +246,13 @@ size_t TextEditor::PositionInRow(size_t row, float col, bool* atRowEnd) const {
     const size_t start = wrap_.RowStart(buffer_, line, r);
     const size_t end = wrap_.RowEnd(buffer_, line, r);
     if (atRowEnd) *atRowEnd = false;
-    int c = 0;
+    CellCursor cell;
     for (size_t p = start; p < end;) {
         size_t len;
         const uint32_t cp = buffer_.Decode(p, len);
-        const int w = CellsAt(cp, c);
-        if (col < static_cast<float>(c) + static_cast<float>(w) * 0.5f) return p;
-        c += w;
+        const int w = cell.Width(cp);
+        if (col < static_cast<float>(cell.col) + static_cast<float>(w) * 0.5f) return p;
+        cell.Advance(w);
         p += len;
     }
     if (atRowEnd && r + 1 < wrap_.RowsOf(line)) *atRowEnd = true;
@@ -678,6 +683,10 @@ void TextEditor::Frame(Context& ctx, RectF rect) {
         ctx.WakeAt(lastAutoScroll_ + 16);
     }
 
+    // A line an edit left cut is rewrapped a budget a frame, the frames going on until it is
+    // done.
+    if (wrap_.Pending() && wrap_.Settle(buffer_, kSettleBytes)) ctx.RequestAnimation();
+
     // Keys, clicks and auto-scroll move the view at once; the wheel eases.
     scroll_.SetMax(MaxScrollY());
     if (scrollY_ != shown) scroll_.JumpTo(scrollY_);
@@ -757,8 +766,9 @@ void TextEditor::Draw(Context& ctx, RectF rect, bool focused) {
         if (!preedit_.empty() && preeditCursor_ > 0) {
             // The IME's caret inside the preedit.
             const std::string_view before(preedit_.data(), std::min(preedit_.size(), static_cast<size_t>(preeditCursor_)));
-            int col = CaretColumn();
-            const int start = col;
+            CellCursor cell;
+            cell.col = CaretColumn();
+            const int start = cell.col;
             for (size_t i = 0; i < before.size();) {
                 uint32_t cp = static_cast<unsigned char>(before[i]);
                 size_t len = 1;
@@ -766,10 +776,10 @@ void TextEditor::Draw(Context& ctx, RectF rect, bool focused) {
                     cp = 0xFFFD;
                     len = 1;
                 }
-                col += CellsAt(cp, col);
+                cell.Advance(cell.Width(cp));
                 i += len;
             }
-            caret.x += static_cast<float>(col - start) * colWidth_;
+            caret.x += static_cast<float>(cell.col - start) * colWidth_;
         }
         ctx.FillRect({rect.x + caret.x, rect.y + caret.y, 1, lineHeight_}, colors.caret);
     }
@@ -794,7 +804,9 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
     const text::FontFace* main = fonts && fonts->IsLoaded() ? &fonts->Face(false) : nullptr;
     glyphs_[0].clear();
     glyphs_[1].clear();
-    int col = 0;
+    // At most kMaxRowBytes of text, and at most kMaxZeroWidthRun marks per cell (CellCursor).
+    CellCursor cell;
+    const int& col = cell.col;
     auto place = [&](uint32_t cp, int w, bool selected) {
         if (!main || cp == ' ' || cp == '\t' || cp < 0x20 || cp == 0x7F) return;
         const text::FontSet::Resolved g = fonts->Resolve(cp, false);
@@ -819,9 +831,9 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
                 cp = 0xFFFD;
                 len = 1;
             }
-            const int w = CellsAt(cp, col);
+            const int w = cell.Width(cp);
             place(cp, w, false);
-            col += w;
+            cell.Advance(w);
             i += len;
         }
         preeditX1 = textX + static_cast<float>(col) * colWidth_;
@@ -833,11 +845,11 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
         if (preeditHere && p == caret_) drawPreedit();
         size_t len;
         const uint32_t cp = buffer_.Decode(p, len);
-        const int w = CellsAt(cp, col);
+        const int w = cell.Width(cp);
         const bool selected = p >= selStart && p < selEnd;
         if (selected && selColA < 0) selColA = col;
         place(cp, w, selected);
-        col += w;
+        cell.Advance(w);
         if (selected) selColB = col;
         p += len;
     }

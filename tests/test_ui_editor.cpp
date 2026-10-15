@@ -11,6 +11,7 @@
 #include "ui/ui.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -186,7 +187,77 @@ RGUI_TEST("ui.editor_wrap_line") {
     CHECK(breaks == (std::vector<uint32_t>{6}));
     CHECK_EQ(WrapLine("", 4, breaks), 0u);
     CHECK(breaks.empty());
+
+    // A run of zero-width code points takes a cell after every kMaxZeroWidthRun of them.
+    std::string marks = "a";
+    for (int i = 0; i < 17; i++) marks += "\xE2\x80\x8B";   // U+200B ZERO WIDTH SPACE
+    CHECK_EQ(WrapLine(marks, 80, breaks), 2u);
+    CHECK(breaks.empty());
+    std::string run(1 + 3 * 1000, 'a');
+    for (size_t i = 1; i < run.size(); i += 3) run.replace(i, 3, "\xE2\x80\x8B");
+    // The count restarts with each row: the first row holds 'a' and 89 marks (10 cells), each
+    // later row 98 (10 cells of 9, and 8 more that take none): 1 + 9 rows + the rest.
+    CHECK_EQ(WrapLine(run, 10, breaks), 112u);
+    CHECK_EQ(breaks.size(), size_t(10));
+    CHECK_EQ(breaks[0], 1u + 3 * 89);
+    CHECK_EQ(breaks[1], 1u + 3 * (89 + 98));
+    // A row ends after kMaxRowBytes bytes, hanging spaces and long words alike.
+    WrapLine(std::string(10000, ' '), 80, breaks);
+    CHECK(breaks == (std::vector<uint32_t>{4096, 8192}));
+    CHECK_EQ(WrapLine(std::string(10000, 'a'), 1 << 20, breaks), 10000u);
+    CHECK(breaks == (std::vector<uint32_t>{4096, 8192}));
 }
+
+namespace {
+
+// The editor's layout is what wrapping every line from scratch gives: rows per line, the
+// tree's row numbers both ways and every row start.
+bool LayoutMatches(const TextEditor& editor) {
+    const TextBuffer& buffer = editor.Buffer();
+    const WrapLayout& wrap = editor.Wrap();
+    if (wrap.LineCount() != buffer.LineCount()) return false;
+    size_t rows = 0;
+    std::vector<uint32_t> breaks;
+    std::string scratch;
+    for (size_t line = 0; line < buffer.LineCount(); line++) {
+        const size_t start = buffer.LineStart(line);
+        WrapLine(buffer.Range(start, buffer.LineEnd(line) - start, scratch), wrap.WrapCells(), breaks);
+        if (wrap.RowsOf(line) != breaks.size() + 1 || wrap.FirstRowOf(line) != rows) return false;
+        for (size_t r = 0; r <= breaks.size(); r++) {
+            size_t gotLine, gotRow;
+            wrap.LineOfRow(rows + r, gotLine, gotRow);
+            if (gotLine != line || gotRow != r) return false;
+            if (wrap.RowStart(buffer, line, r) != start + (r == 0 ? 0 : breaks[r - 1])) return false;
+        }
+        rows += breaks.size() + 1;
+    }
+    return wrap.RowCount() == rows;
+}
+
+// The layout is usable while a line is cut: every line's rows split it at increasing offsets
+// into runs of at most kMaxRowBytes (a code point more), and the tree counts them.
+bool LayoutValid(const TextEditor& editor) {
+    const TextBuffer& buffer = editor.Buffer();
+    const WrapLayout& wrap = editor.Wrap();
+    if (wrap.LineCount() != buffer.LineCount()) return false;
+    size_t rows = 0;
+    for (size_t line = 0; line < buffer.LineCount(); line++) {
+        if (wrap.FirstRowOf(line) != rows) return false;
+        for (size_t r = 0; r < wrap.RowsOf(line); r++) {
+            const size_t start = wrap.RowStart(buffer, line, r), end = wrap.RowEnd(buffer, line, r);
+            if (end < start || end - start > rgui::ui::kMaxRowBytes + 3) return false;
+            if (r > 0 && end == start) return false;
+            size_t gotLine, gotRow;
+            wrap.LineOfRow(rows + r, gotLine, gotRow);
+            if (gotLine != line || gotRow != r) return false;
+        }
+        if (wrap.RowEnd(buffer, line, wrap.RowsOf(line) - 1) != buffer.LineEnd(line)) return false;
+        rows += wrap.RowsOf(line);
+    }
+    return wrap.RowCount() == rows;
+}
+
+} // namespace
 
 RGUI_TEST("ui.editor_fenwick_random_edits") {
     TextEditor editor;
@@ -204,28 +275,66 @@ RGUI_TEST("ui.editor_fenwick_random_edits") {
         else editor.HandleText(pieces[rng() % 8]);
         if (i % 50 == 0) Grid(editor, 6 + static_cast<int>(rng() % 20));
         if (i % 25 != 0) continue;
-
-        const TextBuffer& buffer = editor.Buffer();
-        const WrapLayout& wrap = editor.Wrap();
-        CHECK_EQ(wrap.LineCount(), buffer.LineCount());
-        size_t rows = 0;
-        bool same = true;
-        std::vector<uint32_t> breaks;
-        std::string scratch;
-        for (size_t line = 0; line < buffer.LineCount(); line++) {
-            const size_t start = buffer.LineStart(line);
-            WrapLine(buffer.Range(start, buffer.LineEnd(line) - start, scratch), wrap.WrapCells(), breaks);
-            same = same && wrap.RowsOf(line) == breaks.size() + 1 && wrap.FirstRowOf(line) == rows;
-            for (size_t r = 0; r <= breaks.size(); r++) {
-                size_t gotLine, gotRow;
-                wrap.LineOfRow(rows + r, gotLine, gotRow);
-                same = same && gotLine == line && gotRow == r;
-            }
-            rows += breaks.size() + 1;
-        }
-        CHECK(same);
-        CHECK_EQ(wrap.RowCount(), rows);
+        CHECK(LayoutMatches(editor));
     }
+}
+
+// Edits rewrap from the row before the edited one until the rows line up with the old ones, or
+// up to a budget past the edit, the rest settled later: long lines of words, long words, tabs,
+// wide and zero-width code points and line breaks, edited by typing, deleting, pasting across
+// lines, undo and redo. Every edit leaves a valid layout; settled, it is a full wrap's.
+RGUI_TEST("ui.editor_incremental_wrap") {
+    std::mt19937 rng(23);
+    const char* pieces[] = {"word ", "a", " ", "longerwordthanrowsareforsure", "\n", "\t", "\xE4\xB8\xAD",
+        "\xCC\x81\xCC\x81\xCC\x81\xCC\x81\xCC\x81", "\xE2\x80\x8B\xE2\x80\x8B\xE2\x80\x8B", "x y\nz w ", "    "};
+    constexpr int kPieces = sizeof(pieces) / sizeof(pieces[0]);
+    size_t cuts = 0;
+    for (int round = 0; round < 10; round++) {
+        TextEditor editor;
+        const int cells = round < 2 ? 1 + 2 * round : 5 + static_cast<int>(rng() % 30);
+        Grid(editor, cells);
+        // Odd rounds cut after a few bytes: most edits leave rows to settle.
+        const bool tight = round % 2 == 1;
+        std::string text;
+        while (text.size() < 3000) text += pieces[rng() % kPieces];
+        // Mostly one long line: the edits land inside wrapped lines.
+        text.erase(std::remove(text.begin(), text.end(), '\n'), text.end());
+        text.insert(text.size() / 2, "\n");
+        editor.SetText(text);
+        CHECK(LayoutMatches(editor));
+        double now = 0;
+        bool ok = true;
+        for (int i = 0; i < 400 && ok; i++) {
+            if (tight) editor.SetWrapEditBudget(rng() % 24);
+            editor.SetNow(now += 2000);
+            const size_t size = editor.Buffer().Size();
+            const size_t a = size ? rng() % (size + 1) : 0;
+            const int kind = static_cast<int>(rng() % 10);
+            if (kind < 5) {
+                editor.Select(a, a);
+                editor.HandleText(pieces[rng() % kPieces]);
+            } else if (kind < 7 && size > 0) {
+                editor.Select(a, a);
+                editor.HandleKey(rng() % 2 ? Key::Backspace : Key::Delete, 0, nullptr);
+            } else if (kind < 8) {
+                editor.Select(a, std::min(size, a + rng() % 200));
+                editor.PasteText(rng() % 2 ? "" : "pasted\ntext and more words\n\tend");
+            } else if (kind < 9) {
+                editor.Undo();
+            } else {
+                editor.Redo();
+            }
+            cuts += editor.Wrap().Pending() ? 1 : 0;
+            if (rng() % 3 == 0) editor.SettleWrap(rng() % 64);
+            ok = LayoutValid(editor);
+            if (i % 7 == 0 || !tight) {
+                while (editor.SettleWrap(rng() % 256)) {}
+                ok = ok && LayoutMatches(editor);
+            }
+        }
+        CHECK(ok);
+    }
+    CHECK(cuts > 100);
 }
 
 RGUI_TEST("ui.editor_insert_erase") {
@@ -721,4 +830,182 @@ RGUI_TEST("ui.editor_widget_frame") {
     frame(now);
     CHECK(editor.SelectedText() == "alpha");
     CHECK(!editor.Dragging());
+}
+
+// ---- Pathological text: memory and time bounds ---------------------------------------------
+
+namespace {
+
+// Times mean nothing under AddressSanitizer (~30x slower): the bounds are checked in release.
+#if defined(__SANITIZE_ADDRESS__)
+constexpr bool kTimed = false;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr bool kTimed = false;
+#else
+constexpr bool kTimed = true;
+#endif
+#else
+constexpr bool kTimed = true;
+#endif
+
+double MsSince(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+double Median(std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+}
+
+} // namespace
+
+// A file of empty lines costs about 8 bytes per line in the line index and the wrap layout
+// (it was 40: a 128 MiB file of newlines took over 5 GiB), and typing at its top does not
+// touch every line below. 8 M lines in release (1 M under AddressSanitizer).
+RGUI_TEST("ui.editor_many_lines") {
+    const size_t kLines = kTimed ? size_t(8) << 20 : size_t(1) << 20;
+    TextEditor editor;
+    Grid(editor, 80);
+    editor.SetText(std::string(kLines, '\n'));
+    CHECK_EQ(editor.Buffer().LineCount(), kLines + 1);
+    CHECK_EQ(editor.Wrap().RowCount(), kLines + 1);
+    const size_t bytes = editor.Buffer().LineIndexBytes() + editor.Wrap().MemoryBytes();
+    std::printf("ui.editor_many_lines: %zu lines, %.2f bytes per line\n", kLines + 1,
+        static_cast<double>(bytes) / static_cast<double>(kLines + 1));
+    CHECK(bytes <= (kLines + 1) * 9);
+
+    double now = 0;
+    std::vector<double> ms;
+    editor.Select(0, 0);
+    for (int i = 0; i < 32; i++) {
+        editor.SetNow(now += 50);
+        const auto t0 = std::chrono::steady_clock::now();
+        editor.HandleText("x");
+        ms.push_back(MsSince(t0));
+    }
+    CHECK_EQ(editor.Buffer().LineEnd(0), size_t(32));
+    CHECK_EQ(editor.Buffer().LineStart(kLines), kLines + 32);
+    std::printf("ui.editor_many_lines: keystroke at the top, median %.4f ms\n", Median(ms));
+    if (kTimed) CHECK(Median(ms) < 0.5);
+}
+
+// 10 M zero-width code points after one letter (1 M under AddressSanitizer): about 1.1 M
+// cells in rows of at most kMaxRowBytes, so a frame draws a screenful of rows, not one row of
+// 10 M glyphs.
+RGUI_TEST("ui.editor_zero_width_run") {
+    const size_t marks = kTimed ? 10000000 : 1000000;
+    std::string text = "a";
+    text.reserve(1 + 3 * marks);
+    for (size_t i = 0; i < marks; i++) text += "\xE2\x80\x8B";
+    const rgui::ui::Tokens tokens = rgui::ui::BuildTokens(
+        rgui::ui::BundledPalette(*rgui::ui::FindBundledTheme("tokyo-night")), rgui::ui::TokenSources{});
+    EditorFonts f;
+    rgui::ui::Context ctx;
+    if (f.ok) ctx.SetFonts(&f.fonts);
+    ctx.SetTokens(&tokens);
+    TextEditor editor;
+    editor.SetText(text);
+    std::string().swap(text);
+    double now = 1000;
+    auto frame = [&] {
+        ctx.BeginFrame(800, 600, 1.0, now += 16);
+        editor.Frame(ctx, {0, 0, 800, 600});
+        ctx.EndFrame();
+    };
+    frame();   // the first frame wraps at the pane's width
+    const rgui::ui::TextBuffer& buffer = editor.Buffer();
+    const WrapLayout& wrap = editor.Wrap();
+    CHECK(wrap.RowCount() > marks / 1000);
+    size_t widest = 0;
+    for (size_t r = 0; r < wrap.RowsOf(0); r++) {
+        widest = std::max(widest, wrap.RowEnd(buffer, 0, r) - wrap.RowStart(buffer, 0, r));
+    }
+    CHECK(widest <= rgui::ui::kMaxRowBytes + 3);
+    std::vector<double> ms;
+    for (int i = 0; i < 5; i++) {
+        const auto t0 = std::chrono::steady_clock::now();
+        frame();
+        ms.push_back(MsSince(t0));
+    }
+    std::printf("ui.editor_zero_width_run: %zu rows, widest %zu bytes, frame median %.3f ms\n",
+        wrap.RowCount(), widest, Median(ms));
+    if (kTimed) CHECK(Median(ms) < 20);
+}
+
+// A keystroke in a 32 MiB line of words rewraps a few rows, not the line (it copied and
+// decoded the whole line twice). The words repeat a pattern about a row wide, so most edits
+// reflow the rows to the line's end: they stop at the budget past the edit, and frames settle
+// the rest a budget at a time. Settled, the layout is a fresh one's, and stays so through a
+// line break.
+RGUI_TEST("ui.editor_long_line_keystroke") {
+    const size_t size = kTimed ? size_t(32) << 20 : size_t(4) << 20;
+    const std::string words = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor ";
+    std::string text;
+    text.reserve(size + words.size());
+    while (text.size() < size) text += words;
+    TextEditor editor;
+    Grid(editor, 80);
+    editor.SetText(text);
+    std::string().swap(text);
+    CHECK(editor.Wrap().RowCount() > size / 100);
+    auto matchesFresh = [&] {
+        TextEditor fresh;
+        Grid(fresh, 80);
+        fresh.SetText(editor.CopyText());
+        const WrapLayout& a = fresh.Wrap();
+        const WrapLayout& b = editor.Wrap();
+        bool same = a.RowCount() == b.RowCount() && a.LineCount() == b.LineCount();
+        for (size_t line = 0; same && line < a.LineCount(); line++) {
+            same = a.RowsOf(line) == b.RowsOf(line);
+            for (size_t r = 0; same && r < a.RowsOf(line); r++) {
+                same = a.RowStart(fresh.Buffer(), line, r) == b.RowStart(editor.Buffer(), line, r);
+            }
+        }
+        return same;
+    };
+
+    double now = 0;
+    editor.Select(size / 2 + 3, size / 2 + 3);
+    editor.HandleText("w");   // the first moves the gap there
+    std::vector<double> ms;
+    const char typed[] = "The quick brown fox jumps over the lazy dog. ";
+    for (int i = 0; i < 40; i++) {
+        editor.SetNow(now += 50);
+        const auto t0 = std::chrono::steady_clock::now();
+        editor.HandleText(std::string(1, typed[i % (sizeof(typed) - 1)]));
+        ms.push_back(MsSince(t0));
+    }
+    for (int i = 0; i < 10; i++) {
+        editor.SetNow(now += 50);
+        const auto t0 = std::chrono::steady_clock::now();
+        editor.HandleKey(Key::Backspace, 0, nullptr);
+        ms.push_back(MsSince(t0));
+    }
+    const double maxMs = *std::max_element(ms.begin(), ms.end());
+    std::vector<double> settle;
+    while (editor.Wrap().Pending()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        editor.SettleWrap(TextEditor::kSettleBytes);
+        settle.push_back(MsSince(t0));
+    }
+    const double settleMax = settle.empty() ? 0 : *std::max_element(settle.begin(), settle.end());
+    std::printf("ui.editor_long_line_keystroke: %zu-byte line, %zu rows, keystroke median %.3f ms, max %.3f ms; "
+                "settled in %zu frames of at most %.3f ms\n",
+        editor.Buffer().Size(), editor.Wrap().RowCount(), Median(ms), maxMs, settle.size(), settleMax);
+    if (kTimed) {
+        CHECK(Median(ms) < 3);
+        CHECK(maxMs < 15);
+        CHECK(settleMax < 15);
+    }
+    CHECK(matchesFresh());
+
+    // Typing leaves rows to settle; a line break then splits the line, settled.
+    for (int i = 0; i < 5; i++) {
+        editor.SetNow(now += 50);
+        editor.HandleText("q");
+    }
+    editor.HandleKey(Key::Enter, 0, nullptr);
+    CHECK(!editor.Wrap().Pending());
+    CHECK(matchesFresh());
 }
