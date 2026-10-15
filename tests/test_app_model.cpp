@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // The app's model: export settings, the document, the build worker and the arguments.
+#include "app_harness.h"
 #include "headless_platform.h"
 #include "runner.h"
 
@@ -16,6 +17,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -482,7 +484,8 @@ RGUI_TEST("app.headless.timers") {
 // ---------------------------------------------------------------------------------------------
 // Build worker
 
-// A build function that records what it builds and, while closed, holds the build that comes in.
+// A build function that records what it builds and, while closed, holds the build that comes in;
+// a build cancelled meanwhile then ends as the engine's would.
 struct Gate {
     std::mutex mutex;
     std::condition_variable changed;
@@ -499,6 +502,11 @@ struct Gate {
                 changed.notify_all();
                 changed.wait(lock, [this] { return open; });
                 waiting--;
+            }
+            if (options.cancel != nullptr && options.cancel->load()) {
+                TinyPdf::BuildResult cancelled;
+                cancelled.error = TinyPdf::BuildError::Cancelled;
+                return cancelled;
             }
             return TinyPdf::BuildPdf(md, options, out);
         };
@@ -533,30 +541,29 @@ RGUI_TEST("app.buildworker.order") {
         gate.Close();
         worker.RequestPreview("# p1\n", "", TinyPdf::PdfOptions(), 1);
         gate.WaitForBuild();
-        // While p1 builds: newer previews replace each other, exports queue up before them.
+        // While p1 builds: newer previews replace each other, exports queue up before them, and
+        // the first export cancels p1 (p4, newer, replaces it rather than p1 building again).
         worker.RequestPreview("# p2\n", "", TinyPdf::PdfOptions(), 2);
         worker.RequestPreview("# p3\n", "", TinyPdf::PdfOptions(), 3);
         worker.RequestExport("# e1\n", "", TinyPdf::PdfOptions(), Utf8(dir / "e1.pdf"), false);
         worker.RequestPreview("# p4\n", "", TinyPdf::PdfOptions(), 4);
         worker.RequestExport("# e2\n", "", TinyPdf::PdfOptions(), Utf8(dir / "e2.pdf"), true);
         gate.Open();
-        CHECK(platform.PumpUntil([&] { return previews.size() == 2 && exports.size() == 2; }, 20000));
+        CHECK(platform.PumpUntil([&] { return previews.size() == 1 && exports.size() == 2; }, 20000));
     }
     const std::vector<std::string> order = {"# p1\n", "# e1\n", "# e2\n"};
     CHECK_EQ(gate.built.size(), size_t(4));
     for (size_t i = 0; i < order.size() && i < gate.built.size(); i++) CHECK_EQ(gate.built[i], order[i]);
     if (gate.built.size() == 4) CHECK_EQ(gate.built[3], std::string("# p4\n"));
 
-    CHECK_EQ(previews.size(), size_t(2));
-    if (previews.size() == 2) {
-        CHECK_EQ(previews[0].generation, 1);
-        CHECK_EQ(previews[1].generation, 4);
-        for (const rgui::PreviewReady& ready : previews) {
-            CHECK(ready.error.empty());
-            CHECK(ready.pdf != nullptr);
-            if (ready.pdf) CHECK_EQ(static_cast<uint32_t>(ready.pdf->PageCount()), ready.pages);
-        }
-        CHECK(previews[0].pages >= 1);
+    CHECK_EQ(previews.size(), size_t(1));
+    if (previews.size() == 1) {
+        const rgui::PreviewReady& ready = previews[0];
+        CHECK_EQ(ready.generation, 4);
+        CHECK(ready.error.empty());
+        CHECK(ready.pdf != nullptr);
+        if (ready.pdf) CHECK_EQ(static_cast<uint32_t>(ready.pdf->PageCount()), ready.pages);
+        CHECK(ready.pages >= 1);
     }
     CHECK_EQ(exports.size(), size_t(2));
     if (exports.size() == 2) {
@@ -688,6 +695,144 @@ RGUI_TEST("app.buildworker.shutdown") {
     CHECK_EQ(callbacks, 0);
     CHECK_EQ(gate.built.size(), size_t(1));
     CHECK(platform.openedExternally.empty());
+}
+
+RGUI_TEST("app.buildworker.cancel") {
+    const fs::path dir = TempDir("cancel");
+    rgui::test::HeadlessPlatform platform;
+    rgui::test::CancellableBuild engine;
+    std::vector<rgui::PreviewReady> previews;
+    std::vector<rgui::ExportFinished> exports;
+    std::string order;
+    auto worker = std::make_unique<rgui::BuildWorker>(
+        platform,
+        [&](rgui::PreviewReady ready) {
+            order += "p" + std::to_string(ready.generation);
+            previews.push_back(std::move(ready));
+        },
+        [&](rgui::ExportFinished finished) {
+            order += "e";
+            exports.push_back(std::move(finished));
+        },
+        engine.Function());
+
+    // The preview being built stops; one still waiting is dropped; both are answered.
+    engine.shots = 1;
+    worker->RequestPreview("# p1\n", "", TinyPdf::PdfOptions(), 1);
+    CHECK(engine.WaitBlocked());
+    worker->CancelPreview();
+    CHECK(platform.PumpUntil([&] { return previews.size() == 1; }, 10000));
+    engine.hold = true;
+    worker->RequestExport("# e1\n", "", TinyPdf::PdfOptions(), Utf8(dir / "e1.pdf"), false);
+    worker->RequestPreview("# p2\n", "", TinyPdf::PdfOptions(), 2);
+    worker->CancelPreview();
+    CHECK(platform.PumpUntil([&] { return previews.size() == 2; }, 10000));
+    engine.hold = false;
+    CHECK(platform.PumpUntil([&] { return exports.size() == 1; }, 10000));
+    if (previews.size() != 2 || exports.size() != 1) return;
+    for (const rgui::PreviewReady& ready : previews) {
+        CHECK(ready.buildError == TinyPdf::BuildError::Cancelled);
+        CHECK(ready.pdf == nullptr);
+        CHECK(ready.error.empty());
+    }
+    CHECK(exports[0].ok);   // CancelPreview leaves exports alone
+
+    // An export stops the preview being built, which is built again after it.
+    engine.shots = 1;
+    worker->RequestPreview("# p3\n", "", TinyPdf::PdfOptions(), 3);
+    CHECK(engine.WaitBlocked());
+    worker->RequestExport("# e2\n", "", TinyPdf::PdfOptions(), Utf8(dir / "e2.pdf"), false);
+    CHECK(platform.PumpUntil([&] { return previews.size() == 3 && exports.size() == 2; }, 20000));
+    CHECK_EQ(order, std::string("p1p2eep3"));
+    if (previews.size() == 3) {
+        CHECK(previews[2].buildError == TinyPdf::BuildError::None);
+        CHECK(previews[2].pdf != nullptr);
+        CHECK_EQ(previews[2].stats.words, size_t(2));
+    }
+
+    // Quitting: a build that ends only when cancelled does not hold the destructor up.
+    engine.shots = 1;
+    worker->RequestPreview("# p4\n", "", TinyPdf::PdfOptions(), 4);
+    CHECK(engine.WaitBlocked());
+    const auto start = std::chrono::steady_clock::now();
+    worker.reset();
+    const double quitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    CHECK(quitMs < 1000);
+    platform.Pump();
+    CHECK_EQ(previews.size(), size_t(3));
+    CHECK_EQ(engine.cancelled.load(), 3);   // p1, p3 (built again) and p4; p2 never started
+}
+
+// The worker reads the PDF theme file, again only when its size or time changed.
+RGUI_TEST("app.buildworker.theme") {
+    const fs::path dir = TempDir("worker-theme");
+    rgui::test::HeadlessPlatform platform;
+    std::vector<int32_t> headings;   // options.theme.headingColor per build (worker thread)
+    std::mutex mutex;
+    std::vector<rgui::PreviewReady> previews;
+    std::vector<rgui::ExportFinished> exports;
+    rgui::BuildWorker worker(
+        platform, [&](rgui::PreviewReady ready) { previews.push_back(std::move(ready)); },
+        [&](rgui::ExportFinished finished) { exports.push_back(std::move(finished)); },
+        [&](const std::string& md, const TinyPdf::PdfOptions& options, std::string& out) {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                headings.push_back(options.theme.headingColor);
+            }
+            return TinyPdf::BuildPdf(md, options, out);
+        });
+    const fs::path theme = dir / "a.theme";
+    const std::string themeFile = Utf8(theme);
+    auto preview = [&](int generation, const std::string& file) {
+        previews.clear();
+        worker.RequestPreview("# T\n", "", TinyPdf::PdfOptions(), generation, file);
+        CHECK(platform.PumpUntil([&] { return !previews.empty(); }, 10000));
+        std::lock_guard<std::mutex> lock(mutex);
+        return headings.empty() ? 0 : headings.back();
+    };
+
+    CHECK(RayoMd::File::WriteAll(theme, "heading-color = #112233\n"));
+    CHECK_EQ(preview(1, themeFile), 0x112233);
+    if (previews.empty()) return;
+    CHECK_EQ(previews[0].themeFile, themeFile);
+    CHECK(previews[0].themeError.empty());
+
+    // Changed (same size, a later time): read again.
+    const fs::file_time_type first = fs::last_write_time(theme);
+    CHECK(RayoMd::File::WriteAll(theme, "heading-color = #445566\n"));
+    fs::last_write_time(theme, first + std::chrono::seconds(2));
+    CHECK_EQ(preview(2, themeFile), 0x445566);
+    // Same size and time: not read again.
+    CHECK(RayoMd::File::WriteAll(theme, "heading-color = #778899\n"));
+    fs::last_write_time(theme, first + std::chrono::seconds(2));
+    CHECK_EQ(preview(3, themeFile), 0x445566);
+
+    // A bad file: the default theme, and the error.
+    CHECK(RayoMd::File::WriteAll(theme, "wobble = 3\n"));
+    CHECK_EQ(preview(4, themeFile), TinyPdf::PdfTheme::kStyleColor);
+    if (!previews.empty()) CHECK(previews[0].themeError.find("wobble") != std::string::npos);
+    const std::string missing = Utf8(dir / "missing.theme");
+    CHECK_EQ(preview(5, missing), TinyPdf::PdfTheme::kStyleColor);
+    if (!previews.empty()) CHECK_EQ(previews[0].themeError, "cannot read " + missing);
+
+    // Exports too.
+    CHECK(RayoMd::File::WriteAll(theme, "heading-color = #0a0b0c\n"));
+    worker.RequestExport("# T\n", "", TinyPdf::PdfOptions(), Utf8(dir / "t.pdf"), false, missing);
+    CHECK(platform.PumpUntil([&] { return !exports.empty(); }, 10000));
+    if (!exports.empty()) {
+        CHECK(exports[0].ok);
+        CHECK_EQ(exports[0].themeFile, missing);
+        CHECK_EQ(exports[0].themeError, "cannot read " + missing);
+    }
+
+    // Without a theme file, the options' theme is used as given.
+    TinyPdf::PdfOptions given;
+    given.theme.headingColor = 0x010203;
+    previews.clear();
+    worker.RequestPreview("# T\n", "", given, 6);
+    CHECK(platform.PumpUntil([&] { return !previews.empty(); }, 10000));
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!headings.empty()) CHECK_EQ(headings.back(), 0x010203);
 }
 
 // ---------------------------------------------------------------------------------------------

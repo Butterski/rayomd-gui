@@ -2,6 +2,7 @@
 // The app on the headless platform: frames of the main window, the live preview, the unsaved
 // prompt, saving and exporting, file dialogs and their fallback, theme selection, settings and
 // snapshot mode.
+#include "app_harness.h"
 #include "headless_platform.h"
 #include "runner.h"
 
@@ -26,18 +27,15 @@ using rgui::App;
 using rgui::InputEvent;
 using rgui::Key;
 using rgui::StatusKind;
+using rgui::test::HaveFonts;
 using rgui::test::HeadlessPlatform;
+using rgui::test::TesterPath;
+using Harness = rgui::test::AppHarness;
 
-constexpr int kWidth = 1280;
-constexpr int kHeight = 820;
+constexpr int kWidth = Harness::kWidth;
+constexpr int kHeight = Harness::kHeight;
 
-fs::path TempDir(const char* name) {
-    const fs::path dir = fs::u8path(rgui::test::BuildDir()) / "test-app-window" / name;
-    std::error_code error;
-    fs::remove_all(dir, error);
-    fs::create_directories(dir, error);
-    return dir;
-}
+fs::path TempDir(const char* name) { return rgui::test::FreshDir("test-app-window", name); }
 
 std::string ReadFile(const fs::path& path) {
     std::string content;
@@ -48,116 +46,6 @@ std::string ReadFile(const fs::path& path) {
 bool StartsWith(const std::string& text, const std::string& prefix) {
     return text.compare(0, prefix.size(), prefix) == 0;
 }
-
-std::string TesterPath() { return std::string(rgui::test::SourceDir()) + "/external/rayomd/tester.md"; }
-
-bool HaveFonts() {
-    static const bool have = [] {
-        rgui::text::FontIndex index;
-        index.SetDirectories({"/usr/share/fonts"});
-        return index.Find("DejaVu Sans Mono", 400, false) != nullptr;
-    }();
-    return have;
-}
-
-// One app on a headless platform, its settings and files in a directory of its own.
-struct Harness {
-    HeadlessPlatform platform;
-    std::unique_ptr<App> app;
-    fs::path dir;
-    int framesSeen = 0;
-
-    explicit Harness(const char* name) : dir(TempDir(name)) {}
-
-    fs::path SettingsPath() const { return dir / "settings.ini"; }
-
-    // `settings` is the settings file's text (none when empty).
-    void Start(const std::string& settings, const std::string& file = {}, const std::string& snapshotPath = {}) {
-        if (!settings.empty()) RayoMd::File::WriteAll(SettingsPath(), settings);
-        rgui::Startup startup;
-        startup.args.mode = snapshotPath.empty() ? rgui::Args::Mode::Run : rgui::Args::Mode::Snapshot;
-        startup.args.snapshotPath = snapshotPath;
-        startup.args.file = file;
-        startup.settingsPath = SettingsPath();
-        startup.settings.Load(startup.settingsPath);
-        startup.fontIndex = std::make_unique<rgui::text::FontIndex>();
-        startup.fontIndex->SetDirectories({"/usr/share/fonts"});
-        startup.fontIndex->Start();
-        startup.fontPaths = {};
-        app = App::Create(platform, std::move(startup));
-        app->OnResize(kWidth, kHeight, 1.0);
-    }
-
-    rgui::MainWindow& Window() { return app->Window(); }
-
-    // Runs what is posted and due, then a frame if one was requested.
-    void Step() {
-        platform.Pump();
-        if (platform.frameRequests != framesSeen) {
-            framesSeen = platform.frameRequests;
-            app->OnFrame();
-        }
-    }
-    // A frame now, requested or not.
-    void Frame() {
-        platform.Pump();
-        framesSeen = platform.frameRequests;
-        app->OnFrame();
-    }
-    // Steps until `done` (frames as they are requested, waiting for the workers in between).
-    bool RunUntil(const std::function<bool()>& done, int timeoutMs = 30000) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-        for (;;) {
-            Step();
-            if (done()) return true;
-            if (std::chrono::steady_clock::now() > deadline) return false;
-            if (platform.frameRequests == framesSeen) {
-                platform.PumpUntil([&] { return platform.frameRequests != framesSeen || done(); }, 20);
-            }
-        }
-    }
-    bool Settle() {
-        return RunUntil([&] {
-            return Window().PreviewSettled() && Window().ShownGeneration() == Window().RequestedGeneration();
-        });
-    }
-
-    void KeyDown(Key key, uint8_t mods = 0) {
-        InputEvent e;
-        e.type = InputEvent::Type::KeyDown;
-        e.key = key;
-        e.mods = mods;
-        app->OnInput(e);
-        Frame();
-    }
-    void Type(const std::string& text) {
-        InputEvent e;
-        e.type = InputEvent::Type::Text;
-        e.text = text;
-        app->OnInput(e);
-        Frame();
-    }
-    void Click(float x, float y, double gapMs = 0) {
-        InputEvent e;
-        e.type = InputEvent::Type::PointerMove;
-        e.x = x;
-        e.y = y;
-        app->OnInput(e);
-        e.type = InputEvent::Type::Button;
-        e.pressed = true;
-        app->OnInput(e);
-        Frame();
-        e.pressed = false;
-        app->OnInput(e);
-        Frame();
-        if (gapMs > 0) platform.Advance(static_cast<int>(gapMs));
-    }
-
-    uint32_t Pixel(int x, int y) const {
-        return platform.lastFrame[static_cast<size_t>(y) * static_cast<size_t>(platform.lastFrameWidth) +
-                                  static_cast<size_t>(x)];
-    }
-};
 
 int Channel(uint32_t p, int shift) { return static_cast<int>((p >> shift) & 0xFF); }
 
@@ -243,43 +131,59 @@ RGUI_TEST("app.headless_frame") {
     CHECK(rgui::gfx::WritePng(png, surface));
 }
 
-// Typing reaches the preview 80 ms after the last change; a page the edit did not touch keeps
-// its image.
+// Typing reaches the engine within the keystroke's frame, with no delay; what is typed while a
+// build runs goes into the one build after it. A page the edit did not touch keeps its image.
 RGUI_TEST("app.preview_pipeline") {
     if (!HaveFonts()) {
         std::printf("skip app.preview_pipeline: DejaVu Sans Mono not installed\n");
         return;
     }
     Harness h("preview_pipeline");
+    rgui::test::CancellableBuild engine;
+    h.build = engine.Function();
     h.Start("ui.theme=tokyo-night\n");
     CHECK(h.Settle());
-    const int generation = h.Window().RequestedGeneration();
+    rgui::MainWindow& w = h.Window();
+    const int generation = w.RequestedGeneration();
+    const int calls = engine.calls;
+    engine.hold = true;
     h.Type("# Pipeline");
-    CHECK(h.Window().Doc().modified);
+    CHECK(w.Doc().modified);
     CHECK_EQ(h.platform.title, std::string("* untitled.md - RayoMD"));
-    h.platform.Advance(79);
-    CHECK_EQ(h.Window().RequestedGeneration(), generation);
-    h.platform.Advance(1);
-    CHECK_EQ(h.Window().RequestedGeneration(), generation + 1);
-    // Typing again restarts the wait.
+    // Started in the keystroke's frame: no timer runs first.
+    CHECK_EQ(w.RequestedGeneration(), generation + 1);
+    CHECK(w.PreviewBuilding());
+    // While it builds, nothing more starts or waits in the queue.
     h.Type(" test");
-    h.platform.Advance(60);
     h.Type("ed");
-    h.platform.Advance(60);
-    CHECK_EQ(h.Window().RequestedGeneration(), generation + 1);
-    h.platform.Advance(20);
-    CHECK_EQ(h.Window().RequestedGeneration(), generation + 2);
+    CHECK_EQ(w.RequestedGeneration(), generation + 1);
+    CHECK(!w.PreviewSettled());
+    // When it is done, the next build starts at once, with all of that typing.
+    engine.hold = false;
     CHECK(h.Settle());
-    CHECK_EQ(h.Window().Doc().text, std::string("# Pipeline tested"));
-    CHECK(StartsWith(h.Window().ShownStatus(), "Preview: 1 page in "));
+    CHECK_EQ(w.RequestedGeneration(), generation + 2);
+    CHECK_EQ(engine.calls.load(), calls + 2);
+    CHECK_EQ(std::string(w.Editor().Text()), std::string("# Pipeline tested"));
+    CHECK(StartsWith(w.ShownStatus(), "Preview: 1 page in "));
+    // The worker counted the words and lines of the text it built.
+    CHECK_EQ(w.Stats().words, size_t(3));
+    CHECK_EQ(w.Stats().lines, size_t(1));
     CHECK(PageWithText(h));
+    // Two changes in one frame: one build.
+    InputEvent text;
+    text.type = InputEvent::Type::Text;
+    text.text = "!";
+    h.app->OnInput(text);
+    h.app->OnInput(text);
+    h.Frame();
+    CHECK_EQ(w.RequestedGeneration(), generation + 3);
+    CHECK(h.Settle());
+    CHECK_EQ(w.RequestedGeneration(), generation + 3);
 
     // Two pages; then an edit of page 2 only.
-    rgui::MainWindow& w = h.Window();
     const uint64_t before = w.Preview().RenderedCount();
     w.Editor().SelectAll();
     w.Editor().PasteText("# One\n\nFirst page.\n\n\\pagebreak\n\nSecond page.\n");
-    h.platform.Advance(80);
     CHECK(h.Settle());
     CHECK_EQ(w.Preview().PageCount(), 2);
     // Page 2, below the view, is rendered ahead of time.
@@ -289,7 +193,6 @@ RGUI_TEST("app.preview_pipeline") {
     const size_t end = w.Editor().Buffer().Size();
     w.Editor().Select(end, end);
     w.Editor().HandleText("More.");
-    h.platform.Advance(80);
     CHECK(h.Settle());
     CHECK(h.RunUntil([&] { return w.Preview().RenderedCount() == before + 3; }));
     // Nothing else renders: page 1 kept its image.
@@ -325,7 +228,6 @@ RGUI_TEST("app.preview_scroll") {
     const int generation = w.ShownGeneration();
     w.Editor().Select(0, 0);
     w.Editor().HandleText("X");
-    h.platform.Advance(80);
     CHECK(h.RunUntil([&] { return w.ShownGeneration() > generation && w.PreviewSettled(); }));
     CHECK_NEAR(w.PreviewScroll(), 1500.0f, 1.0f);
 
@@ -352,6 +254,7 @@ RGUI_TEST("app.unsaved_prompt") {
     const fs::path doc = h.dir / "doc.md";
     RayoMd::File::WriteAll(doc, "Hello\n");
     h.Start("ui.theme=tokyo-night\n", doc.u8string());
+    CHECK(h.WaitLoaded());
     h.Frame();
     rgui::MainWindow& w = h.Window();
     h.Type("A");
@@ -492,6 +395,19 @@ RGUI_TEST("app.save_and_export") {
     CHECK_EQ(w.ShownStatus(&kind), std::string("File dialog failed"));
     CHECK(kind == StatusKind::Error);
 
+    // A target without the .pdf extension gets it, also as the remembered target.
+    h.platform.ScriptDialog({rgui::FileDialogResult::Chosen, (h.dir / "noext").u8string()});
+    h.KeyDown(Key::E, rgui::kModCtrl | rgui::kModShift);
+    CHECK(h.RunUntil([&] { return StartsWith(w.ShownStatus(), "Exported noext.pdf ("); }));
+    CHECK(fs::exists(h.dir / "noext.pdf"));
+    CHECK(!fs::exists(h.dir / "noext"));
+    fs::remove(h.dir / "noext.pdf", error);
+    const size_t asked = h.platform.dialogs.size();
+    h.KeyDown(Key::E, rgui::kModCtrl);
+    CHECK(h.RunUntil([&] { return fs::exists(h.dir / "noext.pdf"); }));
+    CHECK_EQ(h.platform.dialogs.size(), asked);
+    CHECK(!fs::exists(h.dir / "noext"));
+
     // Drops: a Markdown file opens (the document is saved), anything else is refused, and an
     // edited document asks first.
     const fs::path dropped = h.dir / "dropped.markdown";
@@ -500,6 +416,7 @@ RGUI_TEST("app.save_and_export") {
     CHECK_EQ(w.ShownStatus(&kind), std::string("Not a Markdown, text or PDF file: picture.PNG"));
     CHECK(kind == StatusKind::Warning);
     h.app->OnDropFile(dropped.u8string());
+    CHECK(h.WaitLoaded());
     CHECK_EQ(w.Doc().filePath, dropped.u8string());
     CHECK_EQ(w.Doc().text, std::string("Dropped\n"));
     h.Frame();
@@ -671,6 +588,148 @@ RGUI_TEST("app.client_decorations") {
     // The close button (right of the header) quits an unmodified document.
     h.Click(kWidth - 4 - 14, 18);
     CHECK(h.platform.quit);
+}
+
+// Files open on the loader's thread; the newest request wins; a failure keeps the document.
+RGUI_TEST("app.open_async") {
+    if (!HaveFonts()) {
+        std::printf("skip app.open_async: DejaVu Sans Mono not installed\n");
+        return;
+    }
+    Harness h("open_async");
+    const fs::path a = h.dir / "a.md";
+    const fs::path b = h.dir / "b.md";
+    const fs::path missing = h.dir / "missing.md";
+    RayoMd::File::WriteAll(a, "# A\n\nalpha beta\n");
+    RayoMd::File::WriteAll(b, "# B\n");
+    h.Start("ui.theme=tokyo-night\n");
+    CHECK(h.Settle());
+    rgui::MainWindow& w = h.Window();
+
+    // While the file opens, the UI says so and keeps drawing; the old document stays.
+    w.Open(a.u8string());
+    CHECK(w.Loading());
+    CHECK_EQ(w.ShownStatus(), std::string("Opening a.md\xE2\x80\xA6"));
+    CHECK(w.Editor().Buffer().Empty());
+    h.app->OnFrame();
+    CHECK(!w.PreviewSettled());
+    CHECK(h.WaitLoaded());
+    CHECK_EQ(std::string(w.Editor().Text()), std::string("# A\n\nalpha beta\n"));
+    CHECK_EQ(w.Doc().filePath, a.u8string());
+    CHECK(!w.Doc().modified);
+    // Counted on the loader's thread.
+    CHECK_EQ(w.Stats().words, size_t(4));
+    CHECK_EQ(w.Stats().lines, size_t(4));
+    CHECK(h.Settle());
+    CHECK_EQ(h.platform.title, std::string("a.md - RayoMD"));
+
+    // A later open replaces one still opening.
+    w.Open(missing.u8string());
+    w.Open(b.u8string());
+    CHECK(h.WaitLoaded());
+    CHECK_EQ(w.Doc().filePath, b.u8string());
+    CHECK_EQ(w.ShownStatus(), std::string());
+    CHECK(h.Settle());
+
+    // A file that cannot be opened: the document stays, the status says why.
+    w.Open(missing.u8string());
+    CHECK(h.WaitLoaded());
+    StatusKind kind = StatusKind::Info;
+    CHECK_EQ(w.ShownStatus(&kind), std::string("Cannot read missing.md"));
+    CHECK(kind == StatusKind::Error);
+    CHECK_EQ(w.Doc().filePath, b.u8string());
+    CHECK_EQ(std::string(w.Editor().Text()), std::string("# B\n"));
+    CHECK(h.Settle());
+
+    // A new document while a file opens: the file is not shown when it comes.
+    w.Open(a.u8string());
+    InputEvent key;
+    key.type = InputEvent::Type::KeyDown;
+    key.key = Key::N;
+    key.mods = rgui::kModCtrl;
+    h.app->OnInput(key);
+    h.app->OnFrame();   // before anything posted runs
+    CHECK(!w.Loading());
+    CHECK(h.Settle());
+    h.platform.PumpUntil([] { return false; }, 50);
+    h.Step();
+    CHECK(w.Doc().filePath.empty());
+    CHECK(w.Editor().Buffer().Empty());
+}
+
+// The preview build in flight is cancelled when the document changes, when an export comes
+// (and built again after it), when it runs over its time budget, and when the window goes.
+RGUI_TEST("app.preview_cancel") {
+    if (!HaveFonts()) {
+        std::printf("skip app.preview_cancel: DejaVu Sans Mono not installed\n");
+        return;
+    }
+    Harness h("preview_cancel");
+    rgui::test::CancellableBuild engine;
+    h.build = engine.Function();
+    h.Start("ui.theme=tokyo-night\n");
+    CHECK(h.Settle());
+    rgui::MainWindow& w = h.Window();
+
+    // Opening another document.
+    const fs::path doc = h.dir / "doc.md";
+    RayoMd::File::WriteAll(doc, "# Doc\n");
+    engine.shots = 1;
+    h.Type("slow");
+    CHECK(engine.WaitBlocked());
+    w.Open(doc.u8string());
+    CHECK(h.Settle());
+    CHECK_EQ(engine.cancelled.load(), 1);
+    CHECK_EQ(std::string(w.Editor().Text()), std::string("# Doc\n"));
+    CHECK(StartsWith(w.ShownStatus(), "Preview: 1 page in "));
+
+    // An export: the preview waits for it, then builds, with no new request.
+    engine.shots = 1;
+    h.Type("x");
+    CHECK(engine.WaitBlocked());
+    const int generation = w.RequestedGeneration();
+    const fs::path pdf = h.dir / "out.pdf";
+    h.platform.ScriptDialog({rgui::FileDialogResult::Chosen, pdf.u8string()});
+    h.KeyDown(Key::E, rgui::kModCtrl);
+    CHECK(h.RunUntil([&] { return fs::exists(pdf); }));
+    CHECK(h.Settle());
+    CHECK_EQ(engine.cancelled.load(), 2);
+    CHECK_EQ(w.RequestedGeneration(), generation);
+    CHECK_EQ(w.ShownGeneration(), generation);
+    CHECK(StartsWith(ReadFile(pdf), "%PDF-"));
+
+    // Over the time budget: stopped, said, not built again until the next change.
+    engine.shots = 1;
+    h.Type("y");
+    CHECK(engine.WaitBlocked());
+    const int stopped = w.RequestedGeneration();
+    h.platform.Advance(rgui::MainWindow::kPreviewBudgetMs - 1);
+    CHECK(w.PreviewBuilding());
+    CHECK_EQ(engine.cancelled.load(), 2);
+    h.platform.Advance(1);
+    CHECK(h.RunUntil([&] { return !w.PreviewBuilding(); }));
+    CHECK_EQ(engine.cancelled.load(), 3);
+    StatusKind kind = StatusKind::Info;
+    CHECK_EQ(w.ShownStatus(&kind), std::string("Preview stopped: the document takes too long to build"));
+    CHECK(kind == StatusKind::Warning);
+    h.platform.PumpUntil([] { return false; }, 50);
+    h.Step();
+    CHECK_EQ(w.RequestedGeneration(), stopped);
+    CHECK(!w.PreviewSettled());
+    h.Type("z");
+    CHECK(h.Settle());
+    CHECK_EQ(w.RequestedGeneration(), stopped + 1);
+    CHECK(StartsWith(w.ShownStatus(), "Preview: "));
+
+    // Quitting with a build that would not end by itself.
+    engine.shots = 1;
+    h.Type("q");
+    CHECK(engine.WaitBlocked());
+    const auto start = std::chrono::steady_clock::now();
+    h.app.reset();
+    const double quitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    CHECK(quitMs < 1000);
+    CHECK_EQ(engine.cancelled.load(), 4);
 }
 
 RGUI_TEST("app.snapshot") {

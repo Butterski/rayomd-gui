@@ -48,6 +48,21 @@ std::vector<std::string> InterfaceFamilyCandidates(const FontChoicePaths& paths)
 // Yu Gothic UI, Malgun Gothic, Segoe UI Symbol, Segoe UI Emoji.
 std::vector<std::string> DefaultFallbackFamilies();
 
+// An interface family's files at a known place: its regular face and its bold one (empty when
+// the family has none of its own), each face 0 of its file.
+struct KnownFontFiles {
+    std::string family;
+    std::string regular;
+    std::string bold;
+};
+
+// The interface families' files where the system installs them, in InterfaceFamilyCandidates
+// order, so startup need not wait for the font index's scan. Windows: Cascadia Mono
+// (CascadiaMono.ttf), Consolas (consola.ttf, consolab.ttf) and Courier New (cour.ttf,
+// courbd.ttf) in each of FontIndex::DefaultDirectories(). Linux: none (the family comes from
+// fontconfig, and its files from the index).
+std::vector<KnownFontFiles> KnownInterfaceFontFiles();
+
 // The interface font: regular (400) and bold (700; the regular face when the family has no
 // bold) faces of the chosen family, and the fallback chain, each fallback face mapped the first
 // time a code point needs it. Not thread-safe: the UI thread owns it (ShapeRun, Resolve). The
@@ -68,8 +83,16 @@ public:
     // False when no face can be opened at all.
     bool Load(const FontIndex& index, const std::vector<std::string>& candidates,
         const std::vector<std::string>& fallbacks);
+    // The first of `files` whose regular file opens and names `family` (and its bold file
+    // when it does too, at weight 600 or more), without waiting for the index, which serves
+    // the fallbacks later. False when none does.
+    bool LoadKnown(const FontIndex& index, const std::vector<KnownFontFiles>& files,
+        const std::vector<std::string>& fallbacks);
+    // KnownInterfaceFontFiles() first, then the index.
     bool Load(const FontIndex& index, const FontChoicePaths& paths) {
-        return Load(index, InterfaceFamilyCandidates(paths), DefaultFallbackFamilies());
+        const std::vector<std::string> fallbacks = DefaultFallbackFamilies();
+        return LoadKnown(index, KnownInterfaceFontFiles(), fallbacks) ||
+            Load(index, InterfaceFamilyCandidates(paths), fallbacks);
     }
 
     bool IsLoaded() const { return regular_ != nullptr; }
@@ -94,6 +117,11 @@ private:
     };
 
     static std::unique_ptr<Loaded> OpenEntry(const FontEntry& entry);
+    // Face 0 of `path` when one of its families is `family` (and, for `bold`, its weight is
+    // 600 or more).
+    static std::unique_ptr<Loaded> OpenKnown(const std::string& path, const std::string& family, bool bold);
+    void Reset(const FontIndex& index);
+    void AddFallbacks(const std::vector<std::string>& fallbacks);
     const FontFace* FallbackFace(Fallback& fallback, bool bold) const;
 
     const FontIndex* index_ = nullptr;
