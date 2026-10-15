@@ -58,7 +58,8 @@ struct RenderStats {
 // must outlive the renders that use it.
 struct RenderEnvironment {
     // System faces for the standard fonts; nullptr draws no standard-font text
-    // ("font:no-substitute:...").
+    // ("font:no-substitute:..."). On Windows Arial, Courier New and Times New Roman are opened by
+    // file name first, so a render never waits for the index's scan when they are there.
     const text::FontIndex* fontIndex = nullptr;
     // Decoded images; nullptr decodes them on every use.
     ImageCache* images = nullptr;

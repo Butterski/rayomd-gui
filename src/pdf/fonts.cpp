@@ -56,6 +56,26 @@ const text::FontFace* OpenSystemFace(const text::FontEntry& entry) {
     return found->second ? &found->second->face : nullptr;
 }
 
+#ifdef _WIN32
+// Arial, Courier New and Times New Roman, which every Windows has under fixed file names: the face
+// for a group's style (regular, bold, italic, bold italic) from the font folders, or nullptr. So
+// the first preview never waits for the font index's scan of the font folders, which a cold
+// folder of a few hundred fonts makes take up to a second.
+const text::FontFace* OpenWindowsStandardFace(std::string_view group, bool bold, bool italic) {
+    static const char* const kSans[] = {"arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"};
+    static const char* const kMono[] = {"cour.ttf", "courbd.ttf", "couri.ttf", "courbi.ttf"};
+    static const char* const kSerif[] = {"times.ttf", "timesbd.ttf", "timesi.ttf", "timesbi.ttf"};
+    const char* const* files = group == "Helvetica" ? kSans : group == "Courier" ? kMono : kSerif;
+    const char* const name = files[(bold ? 1 : 0) + (italic ? 2 : 0)];
+    for (const std::string& dir : text::FontIndex::DefaultDirectories()) {
+        text::FontEntry entry;
+        entry.path = dir + "\\" + name;
+        if (const text::FontFace* face = OpenSystemFace(entry)) return face;
+    }
+    return nullptr;
+}
+#endif
+
 bool Contains(std::string_view text, std::string_view part) {
     return text.find(part) != std::string_view::npos;
 }
@@ -142,6 +162,9 @@ std::shared_ptr<const PdfFont> LoadStandard(const PdfFile& file, const PdfValue&
     const bool italic = Contains(name, "Oblique") || Contains(name, "Italic");
     const text::FontFace* face = nullptr;
     if (index) {
+#ifdef _WIN32
+        face = OpenWindowsStandardFace(group, bold, italic);
+#endif
         for (int i = 0; i < 5 && !face; i++) {
             if (const text::FontEntry* entry = index->Find(families[i], bold ? 700 : 400, italic)) {
                 face = OpenSystemFace(*entry);

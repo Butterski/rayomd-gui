@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -90,6 +91,30 @@ bool NoHelvetica(const char* test) {
 }
 
 } // namespace
+
+RGUI_TEST("pdf.standard_fonts_without_scan") {
+#ifdef _WIN32
+    // Helvetica's substitute comes from arial.ttf by name, not from the index: an index of an
+    // empty folder (no Arial in it) still draws it, so the first preview never waits for a scan.
+    const std::filesystem::path empty = std::filesystem::u8path(rgui::test::BuildDir()) / "test-no-fonts";
+    std::error_code error;
+    std::filesystem::create_directories(empty, error);
+    rgui::text::FontIndex index;
+    index.SetDirectories({empty.u8string()});
+    rgui::pdf::FontCache fonts;
+    const rgui::pdf::RenderEnvironment environment{&index, nullptr, &fonts};
+    const auto file = PdfFile::Parse(PagePdf("BT /F1 10 Tf (H) Tj ET", kHelvetica), nullptr);
+    CHECK(file != nullptr);
+    if (!file) return;
+    Image image;
+    RenderStats stats;
+    CHECK(RenderPage(*file, 0, 20, image, &stats, environment));
+    CHECK(!Has(stats, "font:no-substitute:Helvetica"));
+    CHECK(index.Entries().empty());
+#else
+    std::printf("skip pdf.standard_fonts_without_scan: Windows only\n");
+#endif
+}
 
 RGUI_TEST("pdf.render_page_size") {
     const auto file = PdfFile::Parse(PagePdf("", "<< >>", 200, 100), nullptr);

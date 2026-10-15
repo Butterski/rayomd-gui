@@ -45,7 +45,8 @@ std::vector<std::string> InterfaceFamilyCandidates(const FontChoicePaths& paths)
 // The fallback chain for code points the interface family lacks.
 // Linux: Noto Sans Mono, DejaVu Sans Mono, Noto Sans Mono CJK SC, Noto Sans CJK SC, Noto Sans,
 // DejaVu Sans, Noto Sans Symbols, Noto Sans Symbols 2. Windows: Segoe UI, Microsoft YaHei UI,
-// Yu Gothic UI, Malgun Gothic, Segoe UI Symbol, Segoe UI Emoji.
+// Yu Gothic UI, Malgun Gothic, Segoe UI Symbol, Segoe UI Emoji, each opened from its known file
+// (segoeui.ttf, msyh.ttc, ...) before the index is asked, so none waits for the index's scan.
 std::vector<std::string> DefaultFallbackFamilies();
 
 // An interface family's files at a known place: its regular face and its bold one (empty when
@@ -117,8 +118,8 @@ private:
     };
 
     static std::unique_ptr<Loaded> OpenEntry(const FontEntry& entry);
-    // Face 0 of `path` when one of its families is `family` (and, for `bold`, its weight is
-    // 600 or more).
+    // The first face of `path` (any face of a collection) one of whose families is `family` (and,
+    // for `bold`, whose weight is 600 or more).
     static std::unique_ptr<Loaded> OpenKnown(const std::string& path, const std::string& family, bool bold);
     void Reset(const FontIndex& index);
     void AddFallbacks(const std::vector<std::string>& fallbacks);

@@ -684,6 +684,30 @@ RGUI_TEST("text.font_set_known_files") {
 #endif
 }
 
+RGUI_TEST("text.fallback_known_files") {
+#ifdef _WIN32
+    // The default fallbacks open from their known files: with an index of a folder of no fonts,
+    // a code point the interface font lacks still finds its face, without the index's scan.
+    if (!MappedFile().Open(FontIndex::DefaultDirectories().front() + "\\msyh.ttc")) {
+        std::printf("skip text.fallback_known_files: no msyh.ttc\n");
+        return;
+    }
+    const std::string empty = std::string(rgui::test::BuildDir()) + "\\test-no-fonts";
+    std::error_code error;
+    std::filesystem::create_directories(std::filesystem::u8path(empty), error);
+    FontIndex index;
+    index.SetDirectories({empty});
+    FontSet fonts;
+    CHECK(fonts.LoadKnown(index, KnownInterfaceFontFiles(), DefaultFallbackFamilies()));
+    const FontSet::Resolved cjk = fonts.Resolve(0x65E5, false);   // 日, from Microsoft YaHei UI
+    CHECK(cjk.glyph != 0);
+    CHECK(cjk.face != &fonts.Face(false));
+    CHECK(!index.Scanned());
+#else
+    std::printf("skip text.fallback_known_files: Windows only\n");
+#endif
+}
+
 RGUI_TEST("text.shape_run") {
     FontIndex index;
     index.SetDirectories({"/usr/share/fonts"});

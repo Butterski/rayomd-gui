@@ -302,13 +302,18 @@ std::vector<KnownFontFiles> KnownInterfaceFontFiles() {
 std::unique_ptr<FontSet::Loaded> FontSet::OpenKnown(const std::string& path, const std::string& family, bool bold) {
     auto loaded = std::make_unique<Loaded>();
     if (!loaded->file.Open(path)) return nullptr;
-    FaceInfo info;
-    if (!ReadFaceInfo(loaded->file.Data(), loaded->file.Size(), 0, info)) return nullptr;
-    bool named = false;
-    for (const std::string& name : info.families) named = named || FamilyEquals(name, family);
-    if (!named || (bold && info.weight < 600)) return nullptr;
-    if (!loaded->face.Open(loaded->file.Data(), loaded->file.Size(), 0)) return nullptr;
-    return loaded;
+    // A collection (.ttc) holds several families: the first face that names `family`.
+    const uint32_t faces = FaceCount(loaded->file.Data(), loaded->file.Size());
+    for (uint32_t face = 0; face < faces; face++) {
+        FaceInfo info;
+        if (!ReadFaceInfo(loaded->file.Data(), loaded->file.Size(), face, info)) continue;
+        bool named = false;
+        for (const std::string& name : info.families) named = named || FamilyEquals(name, family);
+        if (!named || (bold && info.weight < 600)) continue;
+        if (!loaded->face.Open(loaded->file.Data(), loaded->file.Size(), face)) return nullptr;
+        return loaded;
+    }
+    return nullptr;
 }
 
 void FontSet::Reset(const FontIndex& index) {
@@ -397,8 +402,36 @@ const FontFace* FontSet::FallbackFace(Fallback& fallback, bool bold) const {
     const int slot = bold ? 1 : 0;
     if (!fallback.tried[slot]) {
         fallback.tried[slot] = true;
-        const FontEntry* const entry = index_ != nullptr ? index_->Find(fallback.family, bold ? 700 : 400, false) : nullptr;
-        if (entry != nullptr) fallback.faces[slot] = OpenEntry(*entry);
+#ifdef _WIN32
+        // DefaultFallbackFamilies()' files by name (regular, bold; no bold file: the regular one
+        // serves), so a code point the interface font lacks never waits on the UI thread for the
+        // font index's scan, which a cold font folder makes take up to a second.
+        static const struct {
+            const char* family;
+            const char* regular;
+            const char* bold;
+        } kKnown[] = {
+            {"Segoe UI", "segoeui.ttf", "segoeuib.ttf"},
+            {"Microsoft YaHei UI", "msyh.ttc", "msyhbd.ttc"},
+            {"Yu Gothic UI", "YuGothR.ttc", "YuGothB.ttc"},
+            {"Malgun Gothic", "malgun.ttf", "malgunbd.ttf"},
+            {"Segoe UI Symbol", "seguisym.ttf", ""},
+            {"Segoe UI Emoji", "seguiemj.ttf", ""},
+        };
+        for (const auto& known : kKnown) {
+            if (!FamilyEquals(known.family, fallback.family)) continue;
+            const bool ownBold = bold && *known.bold != 0;
+            for (const std::string& dir : FontIndex::DefaultDirectories()) {
+                fallback.faces[slot] = OpenKnown(dir + "\\" + (ownBold ? known.bold : known.regular), fallback.family, ownBold);
+                if (fallback.faces[slot] != nullptr) break;
+            }
+        }
+        if (fallback.faces[slot] == nullptr)
+#endif
+        {
+            const FontEntry* const entry = index_ != nullptr ? index_->Find(fallback.family, bold ? 700 : 400, false) : nullptr;
+            if (entry != nullptr) fallback.faces[slot] = OpenEntry(*entry);
+        }
     }
     return fallback.faces[slot] != nullptr ? &fallback.faces[slot]->face : nullptr;
 }
