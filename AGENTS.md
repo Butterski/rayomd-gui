@@ -77,6 +77,14 @@ memory, so it is the PDF, not an approximation of it.
 - Our code throws no exceptions. No iostreams: C stdio, `RayoMd::File` and platform APIs.
 - Every reader of outside data checks its bounds and fails closed: fonts, PDFs, JPEG, keymaps,
   Compose files, TOML, XML, D-Bus, Wayland.
+- Work per input stays bounded so no document can stall the app. The preview renderer spends
+  every page from `pdf::RenderLimits` (operators, glyphs, geometry, dashes, pixels, image decode
+  and held bytes, clip depth), checks `RenderEnvironment::cancel`, culls what lies outside the
+  clip and stops a page with a named limit; the JPEG decoder caps the work of a frame's scans.
+  The editor keeps about 9 bytes per line, cuts rows at `kMaxRowBytes` and zero-width runs at
+  `kMaxZeroWidthRun`, and rewraps from the edited row. A preview build is cancelled through
+  `PdfOptions::cancel` when it is no longer wanted or passes 10 s. A new loop over input data
+  spends a budget or proves its bound.
 - Files the app reads or writes on its own (documents, exports, settings, Omarchy and PDF theme
   files, fonts.conf) go through `src/app/safefile.h`: `ReadRegularFile` (regular files only,
   never blocks on a FIFO, size-capped) and `WriteFileAtomically` (a random, exclusively created
