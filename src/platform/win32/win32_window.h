@@ -22,8 +22,12 @@
 // way each damage rectangle is invalidated. Framebuffer() changes on every OnResize.
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 
 #include "app/platform.h"
@@ -90,6 +94,7 @@ public:
     void StartResize(Edge edge) override;
     void ToggleMaximize() override;
     void Minimize() override;
+    bool IsMaximized() const override { return Maximized(); }
     void SetWindowColors(bool dark, uint32_t background, uint32_t foreground, uint32_t accent) override;
     void SetClipboardText(std::string text) override;
     void RequestClipboardText(std::function<void(std::string)> callback) override;

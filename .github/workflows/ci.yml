@@ -48,3 +48,17 @@ jobs:
             mingw-w64-ucrt-x86_64-python
       - name: Build and test
         run: cmake --preset windows-mingw && cmake --build --preset windows-mingw --parallel 4 && build/windows/tests/rayomd-gui-tests.exe
+      - name: Snapshot
+        run: |
+          appdata="$(mktemp -d)"
+          mkdir -p "$appdata/RayoMD"
+          printf 'ui.theme=tokyo-night\n' > "$appdata/RayoMD/rayomd-gui.ini"
+          # Redirected output: the GUI-subsystem exe writes to the pipes, and the shell waits for it.
+          APPDATA="$(cygpath -w "$appdata")" build/windows/src/rayomd-gui.exe --snapshot snapshot.png external/rayomd/tester.md 2>&1 | cat
+          test "${PIPESTATUS[0]}" -eq 0
+          python tests/e2e/check_snapshot.py snapshot.png 1a1b26 7aa2f7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snapshot-windows
+          path: snapshot.png
