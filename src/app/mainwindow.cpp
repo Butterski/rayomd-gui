@@ -1,0 +1,858 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "app/mainwindow.h"
+
+#include "app/themeselect.h"
+#include "pdf/reader.h"
+#include "ui/settingsfile.h"
+#include "ui/widgets.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <utility>
+
+namespace rgui {
+
+namespace {
+
+namespace fs = std::filesystem;
+using ui::RectF;
+
+constexpr float kPageMargin = 16;   // above the first page, below the last and between pages
+constexpr float kFooterMargin = 12; // Omawrite's footer: 12 px from the edges, 12 px apart
+constexpr float kIconHit = 28;
+constexpr float kOptionsLabelWidth = 96;
+
+constexpr const char* kEmbedTooltip =
+    "Embeds the complete Markdown source, including comments, front matter and anything not visible on "
+    "the pages; anyone with the PDF can read it.";
+
+const ui::Rgba kWhite{255, 255, 255, 255};
+
+std::vector<std::string> Names(const char* const* names, int count) {
+    return std::vector<std::string>(names, names + count);
+}
+
+std::string Count(uint32_t n, const char* word) {
+    return std::to_string(n) + " " + word + (n == 1 ? "" : "s");
+}
+
+const char* DialogTitle(FileDialog kind) {
+    switch (kind) {
+    case FileDialog::OpenDocument: return "Open Markdown or RayoMD PDF";
+    case FileDialog::SaveMarkdown: return "Save Markdown";
+    case FileDialog::ExportPdf: return "Export PDF";
+    case FileDialog::ChooseTheme: return "Choose PDF theme file";
+    }
+    return "";
+}
+
+// The index of the ladder value nearest `value`.
+template <size_t N>
+int Nearest(const float (&ladder)[N], double value, int fallback) {
+    if (!(value > 0)) return fallback;
+    int best = fallback;
+    double bestDistance = 1e300;
+    for (size_t i = 0; i < N; i++) {
+        const double d = ladder[i] > value ? ladder[i] - value : value - ladder[i];
+        if (d < bestDistance) {
+            bestDistance = d;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
+std::string LowerExtension(const std::string& path) {
+    std::string ext = fs::u8path(path).extension().u8string();
+    for (char& c : ext) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return ext;
+}
+
+} // namespace
+
+MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hooks hooks)
+    : platform_(platform), hooks_(std::move(hooks)), link_(std::make_shared<Link>()) {
+    link_->owner = this;
+    editor_.SetOnChanged([this] {
+        doc_.modified = true;
+        SchedulePreview();
+    });
+    export_.imageCacheDirectory = platform_.ImageCacheDir().u8string();
+    worker_ = std::make_unique<BuildWorker>(
+        platform_, [this](PreviewReady ready) { OnPreview(std::move(ready)); },
+        [this](ExportFinished finished) { OnExport(std::move(finished)); });
+    preview_ = std::make_unique<PreviewPages>(platform_, fontIndex, [this] {
+        if (hooks_.requestFrame) hooks_.requestFrame();
+    });
+    SetOmarchyAvailable(platform_.OmarchyThemeDir().has_value());
+}
+
+MainWindow::~MainWindow() {
+    link_->alive = false;
+    if (previewTimer_ != 0) platform_.CancelTimer(previewTimer_);
+    // The workers stop before the window they call back goes.
+    preview_.reset();
+    worker_.reset();
+}
+
+// ---- Settings ----
+
+void MainWindow::LoadSettings(const ui::SettingsFile& file) {
+    themeSetting_ = file.GetString("ui.theme", kThemeOmarchy);
+    if (themeSetting_.empty()) themeSetting_ = kThemeOmarchy;
+    editor_.SetZoomIndex(Nearest(ui::kEditorZoomLadder, file.GetDouble("ui.editorZoom", 1.0), ui::kEditorZoomDefault));
+    previewZoom_ = Nearest(kPreviewZoomLadder, file.GetDouble("ui.previewZoom", 1.0), kPreviewZoomDefault);
+    double ratio = file.GetDouble("ui.splitRatio", 0.5);
+    if (!(ratio >= 0.2 && ratio <= 0.8)) ratio = ratio > 0.8 ? 0.8 : (ratio < 0.2 ? 0.2 : 0.5);   // NaN: 0.5
+    splitRatio_ = static_cast<float>(ratio);
+    optionsVisible_ = file.GetBool("ui.optionsVisible", false);
+    lastDirectory_ = file.GetString("ui.lastDirectory");
+    export_.Load(file);
+    export_.imageCacheDirectory = platform_.ImageCacheDir().u8string();
+}
+
+void MainWindow::StoreSettings(ui::SettingsFile& file) const {
+    file.SetString("ui.theme", themeSetting_);
+    file.SetDouble("ui.editorZoom", ui::kEditorZoomLadder[editor_.ZoomIndex()]);
+    file.SetDouble("ui.previewZoom", kPreviewZoomLadder[previewZoom_]);
+    file.SetDouble("ui.splitRatio", splitRatio_);
+    file.SetBool("ui.optionsVisible", optionsVisible_);
+    if (lastDirectory_.empty() || !file.SetString("ui.lastDirectory", lastDirectory_)) file.Erase("ui.lastDirectory");
+    export_.Store(file);
+}
+
+void MainWindow::SetOmarchyAvailable(bool available) {
+    omarchy_ = available;
+    themeItems_ = ThemeMenuItems(available);
+}
+
+// ---- Status ----
+
+void MainWindow::SetStatus(std::string text, StatusKind kind, bool fromPreview) {
+    status_ = std::move(text);
+    statusKind_ = kind;
+    statusFromPreview_ = fromPreview;
+    Dirty();
+}
+
+void MainWindow::SetNotice(std::string text) {
+    notice_ = std::move(text);
+    Dirty();
+}
+
+std::string MainWindow::ShownStatus(StatusKind* kind) const {
+    StatusKind shownKind = statusKind_;
+    std::string shown = status_;
+    if (statusFromPreview_ || status_.empty()) {
+        if (!export_.themeError.empty()) {
+            shown = "PDF theme: " + export_.themeError;
+            shownKind = StatusKind::Warning;
+        } else if (!notice_.empty()) {
+            shown = notice_;
+            shownKind = StatusKind::Warning;
+        }
+    }
+    if (kind) *kind = shownKind;
+    return shown;
+}
+
+std::string MainWindow::Title() const {
+    return (doc_.modified ? "* " : "") + doc_.displayName + " - RayoMD";
+}
+
+// ---- The frame ----
+
+void MainWindow::Frame(ui::Context& ctx) {
+    dirty_ = false;
+    RectF win = ctx.WindowRect();
+    const bool csd = platform_.NeedsClientDecorations();
+    if (csd && !platform_.IsMaximized()) ResizeEdges(ctx);
+    if (csd) Header(ctx, ui::CutTop(win, kHeaderHeight));
+    Footer(ctx, ui::CutBottom(win, kFooterHeight));
+    if (optionsVisible_) Options(ctx, ui::CutRight(win, kOptionsWidth));
+
+    // Editor | splitter | preview. The panes keep clear of the splitter's 6 px grip, whose sides
+    // take their colours.
+    const ui::DerivedColors& colors = ctx.GetTokens().colors;
+    bool splitMoved = false;
+    const float split = ui::Splitter(ctx, "##split", win, splitRatio_, &splitMoved);
+    if (splitMoved) hooks_.settingsChanged();
+    const RectF editorRect{win.x, win.y, std::max(0.0f, split - 3 - win.x), win.h};
+    const RectF previewRect{split + 4, win.y, std::max(0.0f, win.Right() - split - 4), win.h};
+    ctx.FillRect({split - 3, win.y, 3, win.h}, colors.windowBackground);
+    ctx.FillRect({split + 1, win.y, 3, win.h}, colors.previewBackground);
+
+    if (focusEditor_) {
+        ctx.SetFocus(ctx.MakeId("##texteditor"));
+        focusEditor_ = false;
+    }
+    const int zoomBefore = editor_.ZoomIndex();
+    editor_.Frame(ctx, editorRect);
+    if (editor_.ZoomIndex() != zoomBefore) hooks_.settingsChanged();
+    PreviewPane(ctx, previewRect);
+
+    Prompts(ctx);
+    Shortcuts(ctx);
+    ctx.SetTitle(Title());
+    if (dirty_) ctx.RequestAnimation();
+}
+
+void MainWindow::ResizeEdges(ui::Context& ctx) {
+    const float w = ctx.Width(), h = ctx.Height(), e = kResizeEdge, c = 2 * kResizeEdge;
+    struct Zone {
+        const char* id;
+        RectF rect;
+        Edge edge;
+        Cursor cursor;
+    };
+    // Corners first: they take a press before the sides they overlap.
+    const Zone zones[] = {
+        {"##resize-tl", {0, 0, c, c}, Edge::TopLeft, Cursor::ResizeNWSE},
+        {"##resize-tr", {w - c, 0, c, c}, Edge::TopRight, Cursor::ResizeNESW},
+        {"##resize-bl", {0, h - c, c, c}, Edge::BottomLeft, Cursor::ResizeNESW},
+        {"##resize-br", {w - c, h - c, c, c}, Edge::BottomRight, Cursor::ResizeNWSE},
+        {"##resize-t", {0, 0, w, e}, Edge::Top, Cursor::ResizeV},
+        {"##resize-b", {0, h - e, w, e}, Edge::Bottom, Cursor::ResizeV},
+        {"##resize-l", {0, 0, e, h}, Edge::Left, Cursor::ResizeH},
+        {"##resize-r", {w - e, 0, e, h}, Edge::Right, Cursor::ResizeH},
+    };
+    // Above the window's widgets, so they take no pointer in the edges.
+    ctx.PushLayer(ui::kLayerPopup);
+    for (const Zone& zone : zones) {
+        const ui::Interaction in = ctx.Interact(ctx.MakeId(zone.id), zone.rect);
+        if (in.hovered || in.held) ctx.SetCursor(zone.cursor);
+        if (in.pressed) {
+            platform_.StartResize(zone.edge);
+            ctx.ClearActive();   // the compositor has the pointer now; no release may follow
+        }
+        ctx.Block(zone.rect);
+    }
+    ctx.PopLayer();
+}
+
+void MainWindow::Header(ui::Context& ctx, RectF rect) {
+    const ui::Tokens& t = ctx.GetTokens();
+    ctx.FillRect({rect.x, rect.Bottom() - 1, rect.w, 1}, t.colors.hairline);
+    RectF row = rect;
+    ui::CutRight(row, 4);
+    auto button = [&](const char* id, ui::Icon icon) {
+        const RectF strip = ui::CutRight(row, kIconHit);
+        ui::CutRight(row, 4);
+        return ui::IconButton(ctx, id, icon, {strip.x, rect.y + (rect.h - kIconHit) / 2, kIconHit, kIconHit}, {},
+                              ui::IconStyle::Text);
+    };
+    if (button("##close", ui::Icon::Close)) RequestClose();
+    if (button("##maximize", ui::Icon::Maximize)) platform_.ToggleMaximize();
+    if (button("##minimize", ui::Icon::Minimize)) platform_.Minimize();
+    // The rest drags the window; a double click maximizes.
+    const ui::Interaction in = ctx.Interact(ctx.MakeId("##header"), row);
+    if (in.pressed) {
+        if (in.clickCount == 2) platform_.ToggleMaximize();
+        else platform_.StartMove();
+        ctx.ClearActive();
+    }
+    const float side = rect.Right() - row.Right();
+    ctx.DrawTextInRect(Title(), {rect.x + side, rect.y, std::max(0.0f, rect.w - 2 * side), rect.h},
+                       ctx.FontSize(t.font.body), t.colors.text, ui::Align::Center);
+}
+
+void MainWindow::Footer(ui::Context& ctx, RectF rect) {
+    const ui::Tokens& t = ctx.GetTokens();
+    ctx.FillRect({rect.x, rect.y, rect.w, 1}, t.colors.hairline);
+    // 16 px icons 12 px apart from 12 px in: hit areas of 28 side by side.
+    float x = rect.x + kFooterMargin - (kIconHit - 16) / 2;
+    const float y = rect.y + (rect.h - kIconHit) / 2;
+    auto next = [&] {
+        const RectF r{x, y, kIconHit, kIconHit};
+        x += kIconHit;
+        return r;
+    };
+    if (ui::IconButton(ctx, "##open", ui::Icon::Open, next(), "Open (Ctrl+O)")) Guarded(Action::OpenDialog);
+    if (ui::IconButton(ctx, "##save", ui::Icon::Save, next(), "Save (Ctrl+S)")) Save(false);
+    if (ui::IconButton(ctx, "##export", ui::Icon::Export, next(), "Export PDF (Ctrl+E)", ui::IconStyle::Accent)) {
+        ExportPdf(false);
+    }
+    if (ui::IconButton(ctx, "##options", ui::Icon::Options, next(), "Options (Ctrl+,)")) {
+        optionsVisible_ = !optionsVisible_;
+        hooks_.settingsChanged();
+        Dirty();
+    }
+    const float statusX = x - (kIconHit - 16) / 2 + kFooterMargin;
+
+    const float small = ctx.FontSize(t.font.bodySmall);
+    const std::string counts = std::to_string(stats_.words) + " words \xC2\xB7 " + std::to_string(stats_.lines) + " lines";
+    const float countsWidth = ctx.TextWidth(counts, small);
+    const float countsX = rect.Right() - kFooterMargin - countsWidth;
+    ctx.DrawTextInRect(counts, {countsX, rect.y, countsWidth, rect.h}, small, t.colors.mutedText);
+
+    StatusKind kind = StatusKind::Info;
+    const std::string status = ShownStatus(&kind);
+    if (!status.empty()) {
+        const ui::Rgba color = kind == StatusKind::Error     ? t.colors.error
+                               : kind == StatusKind::Warning ? t.colors.warning
+                                                             : t.colors.mutedText;
+        ctx.DrawTextInRect(status, {statusX, rect.y, std::max(0.0f, countsX - kFooterMargin - statusX), rect.h}, small,
+                           color);
+    }
+}
+
+void MainWindow::Options(ui::Context& ctx, RectF rect) {
+    const ui::Tokens& t = ctx.GetTokens();
+    ctx.FillRect({rect.x, rect.y, 1, rect.h}, t.colors.hairline);
+    const RectF viewport{rect.x + 1, rect.y, std::max(0.0f, rect.w - 1), rect.h};
+    const float pad = static_cast<float>(t.spacing.panelPadding);
+    const float offset = ui::BeginScrollArea(ctx, "##options", viewport);
+    float height = 0;
+    OptionsContent(ctx, {viewport.x + pad, viewport.y + pad - offset, std::max(0.0f, viewport.w - 2 * pad), 1e6f},
+                   height);
+    ui::EndScrollArea(ctx, height + 2 * pad);
+}
+
+void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
+    const ui::Tokens& t = ctx.GetTokens();
+    const float top = column.y;
+    const float rowH = static_cast<float>(t.spacing.controlHeight);
+    const float gap = static_cast<float>(t.spacing.rowGap);
+    const float numberWidth = static_cast<float>(t.spacing.numberFieldWidth);
+    bool changed = false;
+    auto row = [&] {
+        const RectF r = ui::CutTop(column, rowH);
+        ui::CutTop(column, gap);
+        return r;
+    };
+    auto labeled = [&](std::string_view label) {
+        RectF r = row();
+        ui::Label(ctx, label, ui::CutLeft(r, kOptionsLabelWidth));
+        return r;
+    };
+    auto number = [&](RectF r) { return RectF{r.x, r.y, std::min(numberWidth, r.w), r.h}; };
+    auto check = [&](const char* label, bool& value) { changed |= ui::Checkbox(ctx, label, value, row()); };
+
+    static const std::vector<std::string> styles = Names(ExportSettings::kStyleNames, ExportSettings::kStyleCount);
+    static const std::vector<std::string> margins = Names(ExportSettings::kMarginNames, ExportSettings::kMarginCount);
+    static const std::vector<std::string> sizes = Names(ExportSettings::kPageSizeNames, ExportSettings::kPageSizeCount);
+
+    // Document.
+    ui::SectionHeader(ctx, "Document", column, true);
+    changed |= ui::Dropdown(ctx, "##style", export_.style, styles, labeled("Style"));
+    changed |= ui::Dropdown(ctx, "##margin", export_.margin, margins, labeled("Margins"));
+    if (export_.margin == ExportSettings::kCustomMargin) {
+        changed |= ui::NumberField(ctx, "##marginInches", export_.customMarginInches, ExportSettings::kMinMarginInches,
+                                   ExportSettings::kMaxMarginInches, 0.05, 2, " in", number(labeled("")));
+    }
+    changed |= ui::Dropdown(ctx, "##pageSize", export_.pageSize, sizes, labeled("Page size"));
+    check("Landscape", export_.landscape);
+    if (export_.pageSize == ExportSettings::kCustomPage) {
+        changed |= ui::NumberField(ctx, "##pageWidth", export_.customWidthMm, ExportSettings::kMinPageMm,
+                                   ExportSettings::kMaxPageMm, 1, 1, " mm", number(labeled("Width")));
+        changed |= ui::NumberField(ctx, "##pageHeight", export_.customHeightMm, ExportSettings::kMinPageMm,
+                                   ExportSettings::kMaxPageMm, 1, 1, " mm", number(labeled("Height")));
+    }
+    {
+        std::string name = export_.themeFile.empty() ? std::string() : fs::u8path(export_.themeFile).filename().u8string();
+        ui::TextField(ctx, "##themeFile", name, labeled("PDF theme"), "None", true);
+        RectF r = row();
+        ui::CutLeft(r, kOptionsLabelWidth);
+        const char* choose = "Choose\xE2\x80\xA6##theme";
+        if (ui::Button(ctx, choose, ui::CutLeft(r, ui::ButtonWidth(ctx, choose)))) ChooseThemeFile();
+        ui::CutLeft(r, static_cast<float>(t.spacing.sm));
+        if (!export_.themeFile.empty() &&
+            ui::IconButton(ctx, "##clearTheme", ui::Icon::Close, ui::CutLeft(r, kIconHit), "Clear the PDF theme")) {
+            export_.themeFile.clear();
+            export_.ReloadTheme();
+            changed = true;
+        }
+        if (!export_.themeError.empty()) {
+            const float size = ctx.FontSize(t.font.bodySmall);
+            const float lineH = ctx.SnapToDevice(1.4f * size);
+            for (std::string_view line : ui::WrapText(ctx, export_.themeError, size, column.w)) {
+                ctx.DrawTextInRect(line, ui::CutTop(column, lineH), size, t.colors.error);
+            }
+            ui::CutTop(column, gap);
+        }
+    }
+
+    // Contents.
+    ui::SectionHeader(ctx, "Contents", column);
+    check("Table of contents", export_.toc);
+    ctx.BeginDisabled(!export_.toc);
+    double depth = export_.tocDepth;
+    if (ui::NumberField(ctx, "##tocDepth", depth, ExportSettings::kMinTocDepth, ExportSettings::kMaxTocDepth, 1, 0, "",
+                        number(labeled("Depth")))) {
+        export_.tocDepth = static_cast<int>(depth);
+        changed = true;
+    }
+    ctx.EndDisabled();
+    check("Page numbers", export_.pageNumbers);
+    check("Highlight code", export_.highlightCode);
+
+    // Output.
+    ui::SectionHeader(ctx, "Output", column);
+    check("PDF/A-3b", export_.pdfa);
+    check("PDF/UA-1", export_.pdfua);
+    check("Compress", export_.compress);
+    check("Fast images", export_.fastImages);
+    {
+        const RectF r = row();
+        changed |= ui::Checkbox(ctx, "Embed Markdown source", export_.embedSource, r);
+        ui::Tooltip(ctx, ctx.MakeId("Embed Markdown source"), r, kEmbedTooltip);
+    }
+#ifdef _WIN32
+    check("URL images", export_.urlImages);
+#endif
+    check("Open after export", export_.openAfterExport);
+
+    // Interface.
+    ui::SectionHeader(ctx, "Interface", column);
+    int theme = ThemeMenuIndex(themeSetting_);
+    if (ui::Dropdown(ctx, "##theme", theme, themeItems_, labeled("Theme"))) {
+        themeSetting_ = ThemeSettingOf(theme, omarchy_);
+        hooks_.settingsChanged();
+        if (hooks_.themeChanged) hooks_.themeChanged();
+        Dirty();
+    }
+
+    height = column.y - top;
+    if (changed) OptionsChanged();
+}
+
+void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
+    const ui::Tokens& t = ctx.GetTokens();
+    ctx.FillRect(rect, t.colors.previewBackground);
+
+    // Ctrl+wheel zooms, keeping the page at the top of the view where it is.
+    float pixels = 0;
+    previewZoomWheel_ += ctx.ConsumeWheel(rect, pixels, true) + pixels / ui::SmoothScroll::kNotchStep;
+    int zoom = previewZoom_;
+    while (previewZoomWheel_ <= -1) {
+        zoom++;
+        previewZoomWheel_ += 1;
+    }
+    while (previewZoomWheel_ >= 1) {
+        zoom--;
+        previewZoomWheel_ -= 1;
+    }
+    zoom = std::min(std::max(zoom, 0), kPreviewZoomCount - 1);
+    if (zoom != previewZoom_) {
+        if (!anchor_) anchor_ = ViewAnchor();
+        previewZoom_ = zoom;
+        hooks_.settingsChanged();
+    }
+
+    // The layout: pages centred, (pane width - 32) x zoom wide, 16 px around and between them.
+    const int count = preview_->PageCount();
+    const float pageW = std::max(16.0f, ctx.SnapToDevice((rect.w - 2 * kPageMargin) * kPreviewZoomLadder[previewZoom_]));
+    pageTops_.resize(static_cast<size_t>(count));
+    pageHeights_.resize(static_cast<size_t>(count));
+    float y = kPageMargin;
+    for (int i = 0; i < count; i++) {
+        const double ratio = preview_->PageHeightPt(i) / preview_->PageWidthPt(i);
+        const float h = std::max(1.0f, ctx.SnapToDevice(static_cast<float>(pageW * ratio)));
+        pageTops_[static_cast<size_t>(i)] = y;
+        pageHeights_[static_cast<size_t>(i)] = h;
+        y += h + kPageMargin;
+    }
+    const float content = count > 0 ? y : 0;
+    pageWidth_ = pageW;
+
+    if (anchor_ && count > 0) {
+        const int page = std::min(anchor_->page, count - 1);
+        const size_t i = static_cast<size_t>(page);
+        const float target = page == anchor_->page ? pageTops_[i] + anchor_->fraction * pageHeights_[i] : content;
+        ui::SmoothScroll& scroll = ui::ScrollAreaScroll(ctx, "##preview");
+        scroll.SetMax(content - rect.h);
+        scroll.JumpTo(target);
+    }
+    anchor_.reset();
+
+    const float offset = ui::BeginScrollArea(ctx, "##preview", rect, content);
+    previewOffset_ = offset;
+    const float pageX = ctx.SnapToDevice(rect.x + (rect.w - pageW) / 2);
+    const int widthPx = std::max(1, static_cast<int>(pageW * ctx.Scale() + 0.5));
+    std::vector<int> visible;
+    for (int i = 0; i < count; i++) {
+        const size_t k = static_cast<size_t>(i);
+        const float top = rect.y - offset + pageTops_[k];
+        if (top + pageHeights_[k] <= rect.y) continue;
+        if (top >= rect.Bottom()) break;
+        visible.push_back(i);
+        const RectF page{pageX, top, pageW, pageHeights_[k]};
+        ctx.StrokeRect({page.x - 1, page.y - 1, page.w + 2, page.h + 2}, 1, t.colors.hairline);
+        ctx.FillRect(page, kWhite);
+        if (const gfx::Image* image = preview_->Image(i)) ctx.DrawImage(*image, page);
+    }
+    ui::EndScrollArea(ctx, content);
+
+    // The visible pages, the one nearest the middle of the view first, then their neighbours.
+    wanted_ = visible;
+    const float middle = offset + rect.h / 2;
+    std::stable_sort(wanted_.begin(), wanted_.end(), [&](int a, int b) {
+        const auto distance = [&](int i) {
+            const size_t k = static_cast<size_t>(i);
+            const float center = pageTops_[k] + pageHeights_[k] / 2;
+            return center > middle ? center - middle : middle - center;
+        };
+        return distance(a) < distance(b);
+    });
+    if (!visible.empty()) {
+        for (int d = 1; d <= 2; d++) {
+            if (visible.front() - d >= 0) wanted_.push_back(visible.front() - d);
+            if (visible.back() + d < count) wanted_.push_back(visible.back() + d);
+        }
+    }
+    preview_->Request(wanted_, widthPx);
+
+    bool current = count > 0 && !visible.empty() && previewTimer_ == 0 && shownGeneration_ == requestedGeneration_ &&
+                   preview_->Generation() == shownGeneration_;
+    for (const int i : visible) current = current && preview_->Current(i, widthPx);
+    settled_ = current;
+}
+
+void MainWindow::Prompts(ui::Context& ctx) {
+    if (prompt_.open) {
+        const char* when = prompt_.action == Action::Close ? "closing"
+                           : prompt_.action == Action::New ? "starting a new document"
+                                                           : "opening another file";
+        const std::string body = "Save changes to " + doc_.displayName + " before " + when + "?";
+        const ui::ModalButton buttons[] = {
+            {"Save", true, Key::S, true, false},
+            {"Discard", false, Key::D, false, false},
+            {"Cancel", false, Key::C, false, true},
+        };
+        const int chosen = ui::MessageModal(ctx, "##unsaved", "Unsaved changes", body, buttons, 3);
+        if (chosen >= 0) {
+            const Action action = prompt_.action;
+            const std::string path = prompt_.path;
+            prompt_ = {};
+            Dirty();
+            if (chosen == 0) {
+                Save(false, [this, action, path] { Proceed(action, path); });
+            } else if (chosen == 1) {
+                Proceed(action, path);
+            }
+        }
+    }
+    if (pathPrompt_.open) {
+        const RectF body = ui::BeginModal(ctx, "##pathPrompt", pathPrompt_.title, ui::TextFieldHeight(ctx));
+        if (pathPrompt_.focus) {
+            ctx.SetFocus(ctx.MakeId("##path"));
+            pathPrompt_.focus = false;
+        }
+        ui::TextField(ctx, "##path", pathPrompt_.text, body);
+        const ui::ModalButton buttons[] = {
+            {"OK", true, Key::None, true, false},
+            {"Cancel", false, Key::None, false, true},
+        };
+        const int chosen = ui::EndModal(ctx, buttons, 2);
+        if (chosen == 1 || (chosen == 0 && !pathPrompt_.text.empty())) {
+            std::function<void(std::string)> onChosen = std::move(pathPrompt_.onChosen);
+            std::string path = std::move(pathPrompt_.text);
+            pathPrompt_ = {};
+            focusEditor_ = true;
+            Dirty();
+            if (chosen == 0 && onChosen) onChosen(std::move(path));
+        }
+    }
+}
+
+void MainWindow::Shortcuts(ui::Context& ctx) {
+    constexpr uint8_t ctrl = kModCtrl;
+    constexpr uint8_t ctrlShift = kModCtrl | kModShift;
+    // Exact modifiers: Ctrl+Alt (AltGr) never matches.
+    if (ctx.ConsumeKey(Key::O, ctrl)) Guarded(Action::OpenDialog);
+    if (ctx.ConsumeKey(Key::N, ctrl)) Guarded(Action::New);
+    if (ctx.ConsumeKey(Key::S, ctrl)) Save(false);
+    if (ctx.ConsumeKey(Key::S, ctrlShift)) Save(true);
+    if (ctx.ConsumeKey(Key::E, ctrl)) ExportPdf(false);
+    if (ctx.ConsumeKey(Key::E, ctrlShift)) ExportPdf(true);
+    if (ctx.ConsumeKey(Key::Comma, ctrl)) {
+        optionsVisible_ = !optionsVisible_;
+        hooks_.settingsChanged();
+        Dirty();
+    }
+    int zoom = editor_.ZoomIndex();
+    if (ctx.ConsumeKey(Key::Equal, ctrl) || ctx.ConsumeKey(Key::Equal, ctrlShift) || ctx.ConsumeKey(Key::Plus, ctrl) ||
+        ctx.ConsumeKey(Key::Plus, ctrlShift)) {
+        zoom++;
+    }
+    if (ctx.ConsumeKey(Key::Minus, ctrl)) zoom--;
+    if (ctx.ConsumeKey(Key::Digit0, ctrl)) {
+        zoom = ui::kEditorZoomDefault;
+        if (previewZoom_ != kPreviewZoomDefault) {
+            previewZoom_ = kPreviewZoomDefault;
+            hooks_.settingsChanged();
+            Dirty();
+        }
+    }
+    zoom = std::min(std::max(zoom, 0), ui::kEditorZoomCount - 1);
+    if (zoom != editor_.ZoomIndex()) {
+        editor_.SetZoomIndex(zoom);
+        hooks_.settingsChanged();
+        Dirty();
+    }
+    if (ctx.ConsumeKey(Key::Q, ctrl)) RequestClose();
+}
+
+// ---- Actions ----
+
+void MainWindow::RequestClose() { Guarded(Action::Close); }
+
+void MainWindow::DropFile(const std::string& path) {
+    const std::string ext = LowerExtension(path);
+    if (ext != ".md" && ext != ".markdown" && ext != ".txt" && ext != ".pdf") {
+        SetStatus("Not a Markdown, text or PDF file: " + fs::u8path(path).filename().u8string(), StatusKind::Warning);
+        if (hooks_.requestFrame) hooks_.requestFrame();
+        return;
+    }
+    Guarded(Action::OpenPath, path);
+}
+
+void MainWindow::Guarded(Action action, std::string path) {
+    if (prompt_.open || pathPrompt_.open) return;
+    if (doc_.modified) {
+        prompt_.open = true;
+        prompt_.action = action;
+        prompt_.path = std::move(path);
+        Dirty();
+        if (hooks_.requestFrame) hooks_.requestFrame();
+        return;
+    }
+    Proceed(action, path);
+}
+
+void MainWindow::Proceed(Action action, const std::string& path) {
+    switch (action) {
+    case Action::Close:
+        if (hooks_.quit) hooks_.quit();
+        break;
+    case Action::OpenDialog:
+        ShowOpenDialog();
+        break;
+    case Action::OpenPath:
+        Open(path);
+        break;
+    case Action::New:
+        NewDocument();
+        break;
+    }
+}
+
+void MainWindow::NewDocument() {
+    doc_.New();
+    editor_.SetText({});
+    syncedRevision_ = editor_.Revision();
+    stats_ = doc_.Stats();
+    exportTargets_.erase(std::string());
+    SetStatus({}, StatusKind::Info);
+    focusEditor_ = true;
+    PreviewNow();
+    if (hooks_.requestFrame) hooks_.requestFrame();
+}
+
+bool MainWindow::Open(const std::string& path) {
+    std::string status;
+    if (!doc_.Open(path, status)) {
+        SetStatus(status, StatusKind::Error);
+        if (hooks_.requestFrame) hooks_.requestFrame();
+        return false;
+    }
+    editor_.SetText(doc_.text);
+    syncedRevision_ = editor_.Revision();
+    stats_ = doc_.Stats();
+    exportTargets_.erase(std::string());
+    Remember(path);
+    SetStatus(status, StatusKind::Info);
+    focusEditor_ = true;
+    PreviewNow();
+    if (hooks_.requestFrame) hooks_.requestFrame();
+    return true;
+}
+
+void MainWindow::ShowOpenDialog() {
+    AskPath(FileDialog::OpenDocument, SuggestedFolder(), [this](std::string path) { Open(path); });
+}
+
+void MainWindow::Save(bool ask, std::function<void()> then) {
+    if (!ask && !doc_.filePath.empty()) {
+        if (SaveTo(doc_.filePath) && then) then();
+        return;
+    }
+    AskPath(FileDialog::SaveMarkdown, SuggestedSavePath(), [this, then = std::move(then)](std::string path) {
+        if (SaveTo(path) && then) then();
+    });
+}
+
+bool MainWindow::SaveTo(const std::string& path) {
+    SyncText();
+    const std::string before = doc_.filePath;
+    std::string status;
+    const bool ok = doc_.Save(path, status);
+    SetStatus(status, ok ? StatusKind::Info : StatusKind::Error);
+    if (ok) {
+        Remember(path);
+        // Relative images now resolve from the new place.
+        if (before != doc_.filePath) SchedulePreview();
+    }
+    if (hooks_.requestFrame) hooks_.requestFrame();
+    return ok;
+}
+
+void MainWindow::ExportPdf(bool ask) {
+    const std::string key = doc_.filePath;
+    const auto found = exportTargets_.find(key);
+    if (!ask && found != exportTargets_.end()) {
+        StartExport(found->second);
+        return;
+    }
+    AskPath(FileDialog::ExportPdf, found != exportTargets_.end() ? found->second : SuggestedExportPath(),
+            [this, key](std::string path) {
+                exportTargets_[key] = path;
+                StartExport(path);
+            });
+}
+
+void MainWindow::StartExport(const std::string& path) {
+    SyncText();
+    export_.ReloadTheme();
+    worker_->RequestExport(doc_.text, doc_.filePath, export_.ToPdfOptions(doc_.filePath, false), path,
+                           export_.openAfterExport);
+}
+
+void MainWindow::ChooseThemeFile() {
+    AskPath(FileDialog::ChooseTheme, export_.themeFile.empty() ? SuggestedFolder() : export_.themeFile,
+            [this](std::string path) {
+                export_.themeFile = std::move(path);
+                export_.ReloadTheme();
+                OptionsChanged();
+            });
+}
+
+void MainWindow::AskPath(FileDialog kind, std::string suggested, std::function<void(std::string)> onChosen) {
+    platform_.ShowFileDialog(kind, suggested,
+                             [link = link_, kind, suggested, onChosen = std::move(onChosen)](FileDialogResult result) mutable {
+        if (!link->alive) return;
+        MainWindow& window = *link->owner;
+        switch (result.kind) {
+        case FileDialogResult::Chosen:
+            if (!result.path.empty() && onChosen) onChosen(std::move(result.path));
+            break;
+        case FileDialogResult::Cancelled:
+            break;
+        case FileDialogResult::Unavailable:
+            if (!window.pathPrompt_.open) {
+                window.pathPrompt_.open = true;
+                window.pathPrompt_.focus = true;
+                window.pathPrompt_.title = DialogTitle(kind);
+                window.pathPrompt_.text = std::move(suggested);
+                window.pathPrompt_.onChosen = std::move(onChosen);
+            }
+            break;
+        case FileDialogResult::Failed:
+            window.SetStatus("File dialog failed", StatusKind::Error);
+            break;
+        }
+        if (window.hooks_.requestFrame) window.hooks_.requestFrame();
+    });
+}
+
+void MainWindow::OptionsChanged() {
+    hooks_.settingsChanged();
+    SchedulePreview();
+    Dirty();
+}
+
+void MainWindow::SchedulePreview() {
+    if (previewTimer_ != 0) platform_.CancelTimer(previewTimer_);
+    previewTimer_ = platform_.StartTimer(kPreviewDelayMs, [link = link_] {
+        if (!link->alive) return;
+        link->owner->previewTimer_ = 0;
+        link->owner->PreviewNow();
+    });
+}
+
+void MainWindow::PreviewNow() {
+    if (previewTimer_ != 0) {
+        platform_.CancelTimer(previewTimer_);
+        previewTimer_ = 0;
+    }
+    SyncText();
+    export_.ReloadTheme();
+    worker_->RequestPreview(doc_.text, doc_.filePath, export_.ToPdfOptions(doc_.filePath, true), ++requestedGeneration_);
+}
+
+void MainWindow::SyncText() {
+    if (editor_.Revision() == syncedRevision_) return;
+    doc_.text = editor_.CopyText();
+    syncedRevision_ = editor_.Revision();
+    stats_ = doc_.Stats();
+}
+
+void MainWindow::Remember(const std::string& path) {
+    const std::string dir = fs::u8path(path).parent_path().u8string();
+    if (!dir.empty() && dir != lastDirectory_) {
+        lastDirectory_ = dir;
+        hooks_.settingsChanged();
+    }
+}
+
+std::string MainWindow::SuggestedFolder() const {
+    const fs::path dir = lastDirectory_.empty() ? platform_.DocumentsDir() : fs::u8path(lastDirectory_);
+    return (dir / "").u8string();
+}
+
+std::string MainWindow::SuggestedSavePath() const {
+    if (!doc_.filePath.empty()) return doc_.filePath;
+    const fs::path dir = lastDirectory_.empty() ? platform_.DocumentsDir() : fs::u8path(lastDirectory_);
+    return (dir / fs::u8path(doc_.displayName)).u8string();
+}
+
+std::string MainWindow::SuggestedExportPath() const {
+    if (!doc_.filePath.empty()) {
+        const fs::path source = fs::u8path(doc_.filePath);
+        return (source.parent_path() / source.stem()).u8string() + ".pdf";
+    }
+    return (platform_.DocumentsDir() / fs::u8path(doc_.displayName).stem()).u8string() + ".pdf";
+}
+
+// ---- Results ----
+
+std::optional<MainWindow::Anchor> MainWindow::ViewAnchor() const {
+    if (pageTops_.empty()) return std::nullopt;
+    // The first page whose bottom margin reaches below the top of the view.
+    size_t i = 0;
+    while (i + 1 < pageTops_.size() && pageTops_[i] + pageHeights_[i] + kPageMargin <= previewOffset_) i++;
+    Anchor anchor;
+    anchor.page = static_cast<int>(i);
+    anchor.fraction = pageHeights_[i] > 0 ? (previewOffset_ - pageTops_[i]) / pageHeights_[i] : 0;
+    return anchor;
+}
+
+void MainWindow::OnPreview(PreviewReady ready) {
+    // An older build than the one shown (a newer one finished first) changes nothing.
+    if (ready.generation <= shownGeneration_) return;
+    shownGeneration_ = ready.generation;
+    if (ready.pdf) {
+        // Keep the view on the page at its top, at the same place within it.
+        if (!anchor_) anchor_ = ViewAnchor();
+        preview_->SetDocument(std::move(ready.pdf), ready.generation);
+        std::string status = "Preview: " + Count(ready.pages, "page") + " in " + FormatMs(ready.ms);
+        if (ready.missingCharacters > 0) status += "; " + Count(ready.missingCharacters, "character") + " missing";
+        if (ready.failedImages > 0) {
+            status += "; " + Count(ready.failedImages, "image") + " failed";
+            if (doc_.filePath.empty()) status += "; save the document to show its relative images";
+        }
+        SetStatus(std::move(status), StatusKind::Info, true);
+    } else {
+        SetStatus("Export failed: " + ready.error, StatusKind::Error, true);
+    }
+    if (hooks_.requestFrame) hooks_.requestFrame();
+}
+
+void MainWindow::OnExport(ExportFinished finished) {
+    SetStatus(std::move(finished.message), finished.ok ? StatusKind::Info : StatusKind::Error);
+    if (hooks_.requestFrame) hooks_.requestFrame();
+}
+
+} // namespace rgui

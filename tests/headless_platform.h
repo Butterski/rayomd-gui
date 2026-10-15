@@ -73,10 +73,16 @@ public:
     int minimizes = 0;
     bool quit = false;
     std::string clipboard;
+    int windowColorCalls = 0;   // SetWindowColors, with its last arguments
+    bool windowDark = false;
+    uint32_t windowBackground = 0;
+    uint32_t windowForeground = 0;
+    uint32_t windowAccent = 0;
 
     // --- What the test sets ---
 
     bool clientDecorations = false;
+    bool maximized = false;
     std::optional<std::filesystem::path> omarchyThemeDir;
     std::optional<std::filesystem::path> omarchyUserShellToml;
 
@@ -95,6 +101,14 @@ public:
     void StartResize(Edge edge) override { resizes.push_back(edge); }
     void ToggleMaximize() override { maximizeToggles++; }
     void Minimize() override { minimizes++; }
+    bool IsMaximized() const override { return maximized; }
+    void SetWindowColors(bool dark, uint32_t background, uint32_t foreground, uint32_t accent) override {
+        windowColorCalls++;
+        windowDark = dark;
+        windowBackground = background;
+        windowForeground = foreground;
+        windowAccent = accent;
+    }
 
     void SetClipboardText(std::string text) override { clipboard = std::move(text); }
     void RequestClipboardText(std::function<void(std::string)> callback) override;
@@ -107,6 +121,7 @@ public:
     uint64_t StartTimer(int ms, std::function<void()> callback) override;
     void CancelTimer(uint64_t id) override;
     void Quit() override { quit = true; }
+    double NowMs() const override { return static_cast<double>(now_); }
 
     std::filesystem::path ConfigDir() const override;
     std::filesystem::path ImageCacheDir() const override;
