@@ -131,6 +131,8 @@ public:
     bool CanUndo() const { return !undo_.empty(); }
     bool CanRedo() const { return !redo_.empty(); }
     size_t UndoBytes() const { return undoBytes_; }
+    // The cap on undo data (kUndoLimitBytes unless changed); the oldest groups go beyond it.
+    void SetUndoLimit(size_t bytes) { undoLimit_ = bytes; TrimUndo(); }
     size_t UndoGroups() const { return undo_.size(); }
     void SelectAll();
     void Copy(Context& ctx) const;
@@ -215,6 +217,7 @@ private:
     std::deque<UndoGroup> undo_;
     std::vector<UndoGroup> redo_;
     size_t undoBytes_ = 0;
+    size_t undoLimit_ = kUndoLimitBytes;
     bool groupOpen_ = false;
     Merge lastMerge_ = Merge::None;
     double lastEditTime_ = 0;

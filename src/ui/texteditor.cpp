@@ -118,7 +118,7 @@ void TextEditor::PushGroup(UndoGroup group) {
 
 void TextEditor::TrimUndo() {
     // The newest group stays even when it alone passes the limit.
-    while (undoBytes_ > kUndoLimitBytes && undo_.size() > 1) {
+    while (undoBytes_ > undoLimit_ && undo_.size() > 1) {
         undoBytes_ -= undo_.front().bytes;
         undo_.pop_front();
     }

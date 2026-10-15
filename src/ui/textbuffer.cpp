@@ -45,8 +45,8 @@ void TextBuffer::Reserve(size_t extra) {
     const size_t after = data_.size() - gapEnd_;
     const size_t capacity = std::max(size + extra + kMinGap, data_.size() * 2);
     std::vector<char> grown(capacity);
-    std::memcpy(grown.data(), data_.data(), gapStart_);
-    std::memcpy(grown.data() + capacity - after, data_.data() + gapEnd_, after);
+    if (gapStart_ > 0) std::memcpy(grown.data(), data_.data(), gapStart_);
+    if (after > 0) std::memcpy(grown.data() + capacity - after, data_.data() + gapEnd_, after);
     data_.swap(grown);
     gapEnd_ = capacity - after;
 }

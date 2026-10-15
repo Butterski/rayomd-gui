@@ -332,23 +332,28 @@ RGUI_TEST("ui.editor_undo_grouping") {
 RGUI_TEST("ui.editor_undo_limit") {
     TextEditor editor;
     Grid(editor, 40);
+    CHECK_EQ(TextEditor::kUndoLimitBytes, size_t(64) << 20);
+    editor.SetUndoLimit(1u << 20);
     std::string line(31, 'x');
     line += '\n';
     std::string block;
-    block.reserve(24u << 20);
-    while (block.size() < (24u << 20)) block += line;
+    while (block.size() < 400u * 1024) block += line;
     double now = 0;
     for (int i = 0; i < 3; i++) {
         editor.SetNow(now += 10);
         editor.PasteText(block);
     }
-    // 72 MiB of insertions: the oldest group goes.
+    // 1.2 MiB of insertions over a 1 MiB cap: the oldest group goes.
     CHECK_EQ(editor.UndoGroups(), size_t(2));
-    CHECK(editor.UndoBytes() <= TextEditor::kUndoLimitBytes);
+    CHECK(editor.UndoBytes() <= (1u << 20));
     CHECK(editor.Undo());
     CHECK(editor.Undo());
     CHECK(!editor.Undo());
     CHECK_EQ(editor.Buffer().Size(), block.size());
+    // Undone groups wait for redo within the same cap.
+    CHECK(editor.Redo());
+    CHECK(editor.Redo());
+    CHECK_EQ(editor.Buffer().Size(), 3 * block.size());
 }
 
 RGUI_TEST("ui.editor_word_motions") {
