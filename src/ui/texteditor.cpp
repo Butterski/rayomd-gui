@@ -785,32 +785,17 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
     const float textX = rect.x + kEditorPadX;
     const bool lastRowOfLine = r + 1 == wrap_.RowsOf(line);
 
-    // The selection behind the text; a selected line break shows as one more cell.
     const size_t selStart = SelectionStart();
     const size_t selEnd = SelectionEnd();
-    if (selStart != selEnd && selStart <= end && selEnd > start) {
-        const size_t a = std::max(selStart, start);
-        const size_t b = std::min(selEnd, end);
-        const int colA = ColumnOf(start, a);
-        const int colB = ColumnOf(start, b);
-        const bool lineBreak = lastRowOfLine && selEnd > end && line + 1 < buffer_.LineCount();
-        const float cells = static_cast<float>(colB - colA + (lineBreak ? 1 : 0));
-        if (cells > 0) {
-            ctx.FillRect({textX + static_cast<float>(colA) * colWidth_, y, cells * colWidth_, lineHeight_},
-                colors.selection);
-        }
-    }
-    if (!fonts || !fonts->IsLoaded()) return;
-
     const float scale = static_cast<float>(ctx.Scale());
     const float baseline = static_cast<float>(
         RayoMd::ExactMath::LlRound((y + (lineHeight_ - ascent_ - descent_) / 2 + ascent_) * scale));
-    const text::FontFace* main = &fonts->Face(false);
+    const text::FontFace* main = fonts && fonts->IsLoaded() ? &fonts->Face(false) : nullptr;
     glyphs_[0].clear();
     glyphs_[1].clear();
     int col = 0;
     auto place = [&](uint32_t cp, int w, bool selected) {
-        if (cp == ' ' || cp == '\t' || cp < 0x20 || cp == 0x7F) return;
+        if (!main || cp == ' ' || cp == '\t' || cp < 0x20 || cp == 0x7F) return;
         const text::FontSet::Resolved g = fonts->Resolve(cp, false);
         if (!g.face) return;
         float x = textX + static_cast<float>(col) * colWidth_;
@@ -841,16 +826,32 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
         preeditX1 = textX + static_cast<float>(col) * colWidth_;
     };
 
+    // The selected cells of the row, found on the way.
+    int selColA = -1, selColB = -1;
     for (size_t p = start; p < end;) {
         if (preeditHere && p == caret_) drawPreedit();
         size_t len;
         const uint32_t cp = buffer_.Decode(p, len);
         const int w = CellsAt(cp, col);
-        place(cp, w, p >= selStart && p < selEnd);
+        const bool selected = p >= selStart && p < selEnd;
+        if (selected && selColA < 0) selColA = col;
+        place(cp, w, selected);
         col += w;
+        if (selected) selColB = col;
         p += len;
     }
     if (preeditHere && caret_ == end) drawPreedit();
+
+    // The selection behind the text; a selected line break shows as one more cell.
+    const bool lineBreak = lastRowOfLine && selStart <= end && selEnd > end && line + 1 < buffer_.LineCount();
+    if (lineBreak) {
+        if (selColA < 0) selColA = col;
+        selColB = col + 1;
+    }
+    if (selColA >= 0 && selColB > selColA) {
+        ctx.FillRect({textX + static_cast<float>(selColA) * colWidth_, y,
+            static_cast<float>(selColB - selColA) * colWidth_, lineHeight_}, colors.selection);
+    }
 
     // Glyph ink stays near the row; a quarter line of slack for tall accents.
     const gfx::RectI ink = ctx.ToDevice({rect.x, y - lineHeight_ * 0.25f, rect.w, lineHeight_ * 1.5f});
