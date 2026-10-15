@@ -49,4 +49,12 @@ if(WIN32)
         target_link_options(rayomd_gui_win32 INTERFACE "-Wl,--wrap=${function}")
     endforeach()
     rgui_flags(rayomd_gui_win32)
+
+    # rayomd-gui.exe: a GUI-subsystem program (wWinMain), static, its icon and manifest from the
+    # resource script.
+    enable_language(RC)
+    add_executable(rayomd-gui WIN32 platform/win32/main_win32.cpp platform/win32/rayomd-gui.rc)
+    target_link_libraries(rayomd-gui PRIVATE rayomd_gui_win32)
+    target_link_options(rayomd-gui PRIVATE -municode -s -static -Wl,--gc-sections)
+    rgui_flags(rayomd-gui)
 endif()
