@@ -41,8 +41,66 @@ struct rgui_wl_connection {
     Object* server; /* indexed by id - RGUI_WL_SERVER_ID_START */
     size_t server_capacity;
     int depth; /* dispatch nesting: the input buffer is compacted only outside any dispatch */
+    int debug; /* WAYLAND_DEBUG=1 or client: every message printed to stderr, as libwayland does */
     char error[256];
 };
+
+static const Object* LookupConst(const rgui_wl_connection* c, uint32_t id);
+
+/* One message in libwayland's WAYLAND_DEBUG format: "[ms] -> wl_surface#3.attach(...)". */
+static void Trace(const rgui_wl_connection* c, int outgoing, const char* interface_name, uint32_t id,
+                  const rgui_wl_message* m, const rgui_wl_arg* args) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const unsigned long ms = (unsigned long)(ts.tv_sec % 100000) * 1000u + (unsigned long)(ts.tv_nsec / 1000000);
+    char line[1024];
+    size_t at = 0;
+#define APPEND(...)                                                                     \
+    do {                                                                                \
+        if (at < sizeof line) {                                                         \
+            const int w = snprintf(line + at, sizeof line - at, __VA_ARGS__);           \
+            if (w > 0) at += (size_t)w;                                                 \
+        }                                                                               \
+    } while (0)
+    APPEND("[%7lu.%03lu] %s%s#%u.%s(", ms / 1000, ms % 1000, outgoing ? " -> " : "", interface_name, id, m->name);
+    size_t arg = 0;
+    const char* bind_interface = NULL;
+    for (const char* s = m->signature; *s; ++s) {
+        if (*s == '?') continue;
+        const rgui_wl_arg* a = &args[arg];
+        if (arg) APPEND(", ");
+        switch (*s) {
+        case 'i': APPEND("%d", a->i); break;
+        case 'u': APPEND("%u", a->u); break;
+        case 'f': APPEND("%.3f", (double)a->f / 256.0); break;
+        case 's':
+            if (a->s) {
+                APPEND("\"%.200s\"", a->s);
+                bind_interface = a->s;
+            } else {
+                APPEND("nil");
+            }
+            break;
+        case 'o': {
+            const Object* o = LookupConst(c, a->o);
+            if (!a->o) APPEND("nil");
+            else APPEND("%s#%u", o && o->iface ? o->iface->name : "[unknown]", a->o);
+            break;
+        }
+        case 'n':
+            APPEND("new id %s#%u", m->new_interface ? m->new_interface->name : bind_interface ? bind_interface : "[unknown]",
+                   a->n);
+            break;
+        case 'a': APPEND("array[%u]", a->a.size); break;
+        case 'h': APPEND("fd %d", a->h); break;
+        default: break;
+        }
+        ++arg;
+    }
+    APPEND(")\n");
+#undef APPEND
+    fputs(line, stderr);
+}
 
 static void SetError(rgui_wl_connection* c, const char* format, ...) {
     va_list args;
@@ -123,6 +181,8 @@ static Object* Lookup(const rgui_wl_connection* c, uint32_t id) {
     }
     return id < c->client_count ? &c->client[id] : NULL;
 }
+
+static const Object* LookupConst(const rgui_wl_connection* c, uint32_t id) { return Lookup(c, id); }
 
 static int EnsureClientSlot(rgui_wl_connection* c, size_t count) {
     if (count <= c->client_capacity) return 0;
@@ -219,6 +279,8 @@ rgui_wl_connection* rgui_wl_connection_create(int fd, const rgui_wl_interface* d
     if (!c) return NULL;
     c->fd = fd;
     c->display = display_interface;
+    const char* debug = getenv("WAYLAND_DEBUG");
+    c->debug = debug && (strcmp(debug, "1") == 0 || strstr(debug, "client") != NULL);
     const int flags = fcntl(fd, F_GETFL);
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     c->client_count = 1; /* id 0 is null */
@@ -407,6 +469,7 @@ int rgui_wl_send(rgui_wl_connection* c, uint32_t id, uint16_t opcode, const rgui
         }
         c->fds_out[c->fds_out_count++] = copy;
     }
+    if (c->debug) Trace(c, 1, o->iface->name, id, m, args);
     memcpy(c->out + c->out_len, message, size);
     c->out_len += size;
     if (m->flags & RGUI_WL_DESTRUCTOR) Retire(c, id);
@@ -626,6 +689,7 @@ int rgui_wl_dispatch(rgui_wl_connection* c) {
             return -1;
         }
         o = Lookup(c, id);
+        if (c->debug) Trace(c, 0, o->iface->name, id, m, args);
         if (id == RGUI_WL_DISPLAY_ID) {
             HandleDisplay(c, opcode, args);
         } else if (o->state == kLive && o->dispatcher) {

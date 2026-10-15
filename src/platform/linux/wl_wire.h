@@ -89,7 +89,8 @@ int rgui_wl_connection_fd(const rgui_wl_connection* c);
 /* What failed last, for messages. */
 const char* rgui_wl_connection_error(const rgui_wl_connection* c);
 
-/* A new client object (the lowest free id from 2 on; ids return after wl_display.delete_id).
+/* A new client object: the most recently freed id (ids return after wl_display.delete_id), else
+ * the next unused one from 2 on.
  * 0 when the ids are exhausted. Send the request that creates it with the id as its 'n'. */
 uint32_t rgui_wl_new_object(rgui_wl_connection* c, const rgui_wl_interface* iface, uint32_t version,
                             rgui_wl_dispatcher dispatcher, void* user);
