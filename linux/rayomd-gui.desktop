@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=RayoMD
+GenericName=Markdown to PDF
+Comment=Write Markdown and export PDF in milliseconds
+Exec=rayomd-gui %f
+Icon=rayomd-gui
+Terminal=false
+Categories=Office;Utility;TextTools;
+MimeType=text/markdown;text/x-markdown;
+Keywords=markdown;pdf;export;writer;
+StartupWMClass=rayomd-gui
