@@ -4,7 +4,7 @@
 // 50-omarchy.conf is installed as /etc/fonts/conf.d/50-omarchy.conf.
 #include "text/fontchoice.h"
 
-#include "common/file_io.h"
+#include "app/safefile.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -182,7 +182,7 @@ void AddUnique(std::vector<std::string>& list, std::string value) {
 
 std::string ReadSmallFile(const std::string& path) {
     std::string content;
-    if (path.empty() || !RayoMd::File::ReadAll(std::filesystem::u8path(path), kMaxXmlBytes, content)) return {};
+    if (path.empty() || !ReadRegularFile(std::filesystem::u8path(path), kMaxXmlBytes, content, nullptr)) return {};
     return content;
 }
 

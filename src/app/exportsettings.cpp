@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app/exportsettings.h"
 
-#include "common/file_io.h"
+#include "app/safefile.h"
 #include "core/export_options.h"
 #include "ui/settingsfile.h"
 
@@ -100,7 +100,7 @@ bool ExportSettings::ReloadTheme() {
     if (themeFile.empty()) return true;
     const std::filesystem::path path = std::filesystem::u8path(themeFile);
     std::string text;
-    if (!RayoMd::File::ReadAll(path, kMaxThemeFileBytes, text)) {
+    if (!ReadRegularFile(path, kMaxThemeFileBytes, text, nullptr)) {
         themeError = "cannot read " + themeFile;
         return false;
     }

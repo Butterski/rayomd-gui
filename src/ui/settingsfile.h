@@ -14,13 +14,14 @@ public:
     static constexpr size_t kMaxBytes = 1024 * 1024;
 
     // Replaces the values with the file's. False (and no values) when the file is missing,
-    // unreadable, over kMaxBytes or not UTF-8. Lines without `=`, with an empty or invalid key
+    // not a regular file, unreadable, over kMaxBytes or not UTF-8. Lines without `=`, with an empty or invalid key
     // (whitespace, control characters) or with control characters in the value are ignored;
     // a later key wins. CR before LF is dropped.
     bool Load(const std::filesystem::path& path);
 
-    // Writes the values, sorted by key, to `<path>.tmp`, then renames it over `path`; creates
-    // the parent directories. False when any step fails (the `.tmp` is then removed).
+    // Writes the values, sorted by key, to a temporary file renamed over `path`
+    // (WriteFileAtomically, WriteMode::Output); creates the parent directories. False when any
+    // step fails (no temporary file is left).
     bool Save(const std::filesystem::path& path) const;
 
     bool Has(std::string_view key) const;

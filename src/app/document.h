@@ -29,13 +29,15 @@ public:
     // Opens `path` (UTF-8). A `.pdf` (any case) is a reversible RayoMD PDF: its embedded source
     // becomes the text, with no file path (saving asks for one) and the name `<pdf base>.md`.
     // Any other file is UTF-8 text, at most kMaxTextBytes; CRLF line ends are read as LF and
-    // remembered. Either way `status` is what to tell the user (empty after a plain open); on
+    // remembered. Only regular files are read (ReadRegularFile: a FIFO or device is refused at
+    // once). Either way `status` is what to tell the user (empty after a plain open); on
     // failure the document is kept as it was and false is returned.
     bool Open(const std::string& path, std::string& status);
 
-    // Writes the text to `path` (UTF-8), with CRLF line ends when `crlf`, through `<path>.tmp`
-    // renamed over it. On success the document lives at `path` and is unmodified; `status` is
-    // `Saved <name>`, else `Cannot save <name>` and the document is unchanged.
+    // Writes the text to `path` (UTF-8), with CRLF line ends when `crlf`, through a temporary
+    // file renamed over it (WriteFileAtomically, WriteMode::Document: flushed, permissions kept,
+    // written through a symlink). On success the document lives at `path` and is unmodified;
+    // `status` is `Saved <name>`, else `Cannot save <name>` and the document is unchanged.
     bool Save(const std::string& path, std::string& status);
 
     DocumentStats Stats() const { return ComputeStats(text); }

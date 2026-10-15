@@ -5,8 +5,8 @@
 // see third_party/omarchy/LICENSE. The tests compare every key with the script's --all output.
 #include "ui/theme.h"
 
+#include "app/safefile.h"
 #include "common/exact_math.h"
-#include "common/file_io.h"
 #include "gfx/surface.h"
 
 #include <cstdio>
@@ -253,7 +253,7 @@ bool ParseColorsToml(std::string_view text, Toml& out) {
 
 bool ReadTomlFile(const std::filesystem::path& path, Toml& out, bool sections) {
     std::string text;
-    if (!RayoMd::File::ReadAll(path, kMaxTomlBytes, text)) return false;
+    if (!ReadRegularFile(path, kMaxTomlBytes, text, nullptr)) return false;
     return sections ? ParseToml(text, out, true) : ParseColorsToml(text, out);
 }
 

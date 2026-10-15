@@ -2,13 +2,12 @@
 #include "app/buildworker.h"
 
 #include "app/platform.h"
-#include "common/file_io.h"
+#include "app/safefile.h"
 #include "pdf/reader.h"
 
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
-#include <system_error>
 #include <utility>
 
 namespace rgui {
@@ -165,16 +164,7 @@ void BuildWorker::RunExport(Job& job) {
     if (!result.Ok()) {
         finished.message = std::string("Export failed: ") + BuildErrorText(result.error);
     } else {
-        fs::path temp = output;
-        temp += ".tmp";
-        std::error_code error;
-        bool written = RayoMd::File::WriteAll(temp, bytes);
-        if (written) {
-            fs::rename(temp, output, error);
-            written = !error;
-        }
-        if (!written) {
-            fs::remove(temp, error);
+        if (!WriteFileAtomically(output, bytes, WriteMode::Output, nullptr)) {
             finished.message = "Export failed: cannot write " + job.outputPath;
         } else {
             finished.ok = true;

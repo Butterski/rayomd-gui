@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app/document.h"
 
-#include "common/file_io.h"
+#include "app/safefile.h"
 #include "core/rayomd_pdf_source.h"
 
 #include <filesystem>
@@ -75,7 +75,7 @@ bool Document::Open(const std::string& path, std::string& status) {
     if (IsPdfPath(file)) {
         namespace PdfSource = RayoMd::PdfSource;
         std::string bytes;
-        if (!RayoMd::File::ReadAll(file, PdfSource::kMaxPdfBytes, bytes)) {
+        if (!ReadRegularFile(file, PdfSource::kMaxPdfBytes, bytes, nullptr)) {
             status = FileLargerThan(file, PdfSource::kMaxPdfBytes)
                          ? PdfSource::StatusMessage(PdfSource::Status::LimitExceeded)
                          : "Cannot read " + name;
@@ -98,7 +98,7 @@ bool Document::Open(const std::string& path, std::string& status) {
     }
 
     std::string bytes;
-    if (!RayoMd::File::ReadAll(file, kMaxTextBytes, bytes)) {
+    if (!ReadRegularFile(file, kMaxTextBytes, bytes, nullptr)) {
         status = FileLargerThan(file, kMaxTextBytes) ? "Too large to open (over 128 MiB): " + name
                                                      : "Cannot read " + name;
         return false;
@@ -119,16 +119,9 @@ bool Document::Open(const std::string& path, std::string& status) {
 bool Document::Save(const std::string& path, std::string& status) {
     const fs::path file = fs::u8path(path);
     const std::string name = file.filename().u8string();
-    fs::path temp = file;
-    temp += ".tmp";
-    std::error_code error;
-    bool ok = crlf ? RayoMd::File::WriteAll(temp, ToCrlf(text)) : RayoMd::File::WriteAll(temp, text);
-    if (ok) {
-        fs::rename(temp, file, error);
-        ok = !error;
-    }
+    const bool ok = crlf ? WriteFileAtomically(file, ToCrlf(text), WriteMode::Document, nullptr)
+                         : WriteFileAtomically(file, text, WriteMode::Document, nullptr);
     if (!ok) {
-        fs::remove(temp, error);
         status = "Cannot save " + name;
         return false;
     }

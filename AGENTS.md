@@ -73,6 +73,12 @@ memory, so it is the PDF, not an approximation of it.
 - Our code throws no exceptions. No iostreams: C stdio, `RayoMd::File` and platform APIs.
 - Every reader of outside data checks its bounds and fails closed: fonts, PDFs, JPEG, keymaps,
   Compose files, TOML, XML, D-Bus, Wayland.
+- Files the app reads or writes on its own (documents, exports, settings, Omarchy and PDF theme
+  files, fonts.conf) go through `src/app/safefile.h`: `ReadRegularFile` (regular files only,
+  never blocks on a FIFO, size-capped) and `WriteFileAtomically` (a random, exclusively created
+  temporary file renamed over the destination; `WriteMode::Document` flushes, keeps the
+  permission bits and writes through a symlink, `WriteMode::Output` replaces a symlink). Never a
+  predictable `<path>.tmp` or `RayoMd::File::WriteAll` for them.
 - Threads: the UI thread (platform event loop, UI, presenting); a tile pool of
   `clamp(hardware_concurrency - 1, 1, 4)` threads; one build worker for the engine; a preview
   pool of `clamp(hardware_concurrency / 2, 1, 3)` threads. Workers hand results to the UI

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "ui/settingsfile.h"
 
-#include "common/file_io.h"
+#include "app/safefile.h"
 #include "core/rayomd_pdf_source.h"
 
 #include <charconv>
@@ -30,18 +30,12 @@ bool ValidValue(std::string_view value) {
     return RayoMd::PdfSource::IsValidUtf8(value);
 }
 
-std::filesystem::path TempPath(const std::filesystem::path& path) {
-    std::filesystem::path temp = path;
-    temp += ".tmp";
-    return temp;
-}
-
 } // namespace
 
 bool SettingsFile::Load(const std::filesystem::path& path) {
     values_.clear();
     std::string text;
-    if (!RayoMd::File::ReadAll(path, kMaxBytes, text)) return false;
+    if (!ReadRegularFile(path, kMaxBytes, text, nullptr)) return false;
     if (!RayoMd::PdfSource::IsValidUtf8(text)) return false;
     std::string_view rest = text;
     while (!rest.empty()) {
@@ -73,18 +67,7 @@ bool SettingsFile::Save(const std::filesystem::path& path) const {
         std::filesystem::create_directories(path.parent_path(), error);
         if (error) return false;
     }
-    const std::filesystem::path temp = TempPath(path);
-    if (!RayoMd::File::WriteAll(temp, text)) {
-        std::filesystem::remove(temp, error);
-        return false;
-    }
-    std::filesystem::rename(temp, path, error);
-    if (error) {
-        std::error_code ignored;
-        std::filesystem::remove(temp, ignored);
-        return false;
-    }
-    return true;
+    return WriteFileAtomically(path, text, WriteMode::Output, nullptr);
 }
 
 bool SettingsFile::Has(std::string_view key) const { return values_.find(key) != values_.end(); }

@@ -47,7 +47,8 @@ inline constexpr size_t kMaxTomlBytes = 256 * 1024;
 // reader); colors.toml has no sections. Text over kMaxTomlBytes is refused (false, `out` untouched).
 bool ParseToml(std::string_view text, Toml& out, bool sections = true);
 
-// A file through ParseToml; false when it is missing, unreadable or over kMaxTomlBytes.
+// A file through ParseToml; false when it is missing, not a regular file (ReadRegularFile: a
+// FIFO or device is refused at once), unreadable or over kMaxTomlBytes.
 bool ReadTomlFile(const std::filesystem::path& path, Toml& out, bool sections = true);
 
 // Parses colors.toml as the resolver does: `while read` skips a last line without a newline.
