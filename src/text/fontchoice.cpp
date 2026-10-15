@@ -276,6 +276,71 @@ std::vector<std::string> DefaultFallbackFamilies() {
 #endif
 }
 
+std::vector<KnownFontFiles> KnownInterfaceFontFiles() {
+    std::vector<KnownFontFiles> files;
+#ifdef _WIN32
+    struct Known {
+        const char* family;
+        const char* regular;
+        const char* bold;
+    };
+    static const Known known[] = {
+        {"Cascadia Mono", "CascadiaMono.ttf", ""},   // a variable font: one file, no bold face
+        {"Consolas", "consola.ttf", "consolab.ttf"},
+        {"Courier New", "cour.ttf", "courbd.ttf"},
+    };
+    const std::vector<std::string> dirs = FontIndex::DefaultDirectories();
+    for (const Known& k : known) {
+        for (const std::string& dir : dirs) {
+            files.push_back({k.family, dir + "\\" + k.regular, *k.bold != 0 ? dir + "\\" + k.bold : std::string()});
+        }
+    }
+#endif
+    return files;
+}
+
+std::unique_ptr<FontSet::Loaded> FontSet::OpenKnown(const std::string& path, const std::string& family, bool bold) {
+    auto loaded = std::make_unique<Loaded>();
+    if (!loaded->file.Open(path)) return nullptr;
+    FaceInfo info;
+    if (!ReadFaceInfo(loaded->file.Data(), loaded->file.Size(), 0, info)) return nullptr;
+    bool named = false;
+    for (const std::string& name : info.families) named = named || FamilyEquals(name, family);
+    if (!named || (bold && info.weight < 600)) return nullptr;
+    if (!loaded->face.Open(loaded->file.Data(), loaded->file.Size(), 0)) return nullptr;
+    return loaded;
+}
+
+void FontSet::Reset(const FontIndex& index) {
+    index_ = &index;
+    family_.clear();
+    status_.clear();
+    regular_.reset();
+    bold_.reset();
+    fallbacks_.clear();
+    cache_.clear();
+}
+
+void FontSet::AddFallbacks(const std::vector<std::string>& fallbacks) {
+    for (const std::string& family : fallbacks) {
+        if (!FamilyEquals(family, family_)) fallbacks_.push_back(Fallback{family, {}, {false, false}});
+    }
+}
+
+bool FontSet::LoadKnown(const FontIndex& index, const std::vector<KnownFontFiles>& files,
+    const std::vector<std::string>& fallbacks) {
+    Reset(index);
+    for (const KnownFontFiles& known : files) {
+        regular_ = OpenKnown(known.regular, known.family, false);
+        if (regular_ == nullptr) continue;
+        if (!known.bold.empty()) bold_ = OpenKnown(known.bold, known.family, true);
+        family_ = known.family;
+        AddFallbacks(fallbacks);
+        return true;
+    }
+    return false;
+}
+
 std::unique_ptr<FontSet::Loaded> FontSet::OpenEntry(const FontEntry& entry) {
     auto loaded = std::make_unique<Loaded>();
     if (!loaded->file.Open(entry.path) ||
@@ -287,13 +352,7 @@ std::unique_ptr<FontSet::Loaded> FontSet::OpenEntry(const FontEntry& entry) {
 
 bool FontSet::Load(const FontIndex& index, const std::vector<std::string>& candidates,
     const std::vector<std::string>& fallbacks) {
-    index_ = &index;
-    family_.clear();
-    status_.clear();
-    regular_.reset();
-    bold_.reset();
-    fallbacks_.clear();
-    cache_.clear();
+    Reset(index);
 
     for (const std::string& family : candidates) {
         const FontEntry* const entry = index.Find(family, 400, false);
@@ -324,9 +383,7 @@ bool FontSet::Load(const FontIndex& index, const std::vector<std::string>& candi
         status_ = "Interface font " + (candidates.empty() ? std::string("monospace") : candidates.front()) +
             " not found; using " + FileName(chosen->path);
     }
-    for (const std::string& family : fallbacks) {
-        if (!FamilyEquals(family, family_)) fallbacks_.push_back(Fallback{family, {}, {false, false}});
-    }
+    AddFallbacks(fallbacks);
     return true;
 }
 

@@ -615,6 +615,48 @@ RGUI_TEST("text.font_set") {
     CHECK(ShapeRun("abc", nothing, 12.0f).glyphs.empty());
 }
 
+// The interface font from its known files: the index is not scanned for it (startup does not
+// wait), and serves the fallbacks once it is.
+RGUI_TEST("text.font_set_known_files") {
+    const std::string dir = "/usr/share/fonts/TTF/";
+    MappedFile probe;
+    if (!probe.Open(dir + "DejaVuSansMono.ttf") || !MappedFile().Open(dir + "DejaVuSans.ttf")) {
+        std::printf("skip text.font_set_known_files: DejaVu not installed\n");
+        return;
+    }
+    FontIndex index;
+    index.SetDirectories({"/usr/share/fonts"});
+    FontSet fonts;
+    const std::vector<KnownFontFiles> files = {
+        {"No Such Mono", dir + "NoSuchMono.ttf", ""},
+        // The file does not name the family: skipped.
+        {"DejaVu Sans Mono", dir + "DejaVuSans.ttf", ""},
+        // The bold file is not bold: none.
+        {"DejaVu Sans Mono", dir + "DejaVuSansMono.ttf", dir + "DejaVuSansMono.ttf"},
+    };
+    CHECK(fonts.LoadKnown(index, files, {"DejaVu Sans"}));
+    CHECK(!index.Scanned());
+    CHECK_EQ(fonts.Family(), std::string("DejaVu Sans Mono"));
+    CHECK(fonts.Status().empty());
+    CHECK(fonts.Face(false).FixedPitch());
+    CHECK(&fonts.Face(true) == &fonts.Face(false));
+    CHECK(!index.Scanned());
+    // A code point the family lacks comes from a fallback, through the index.
+    const FontSet::Resolved resolved = fonts.Resolve(0x0D85, false);   // Sinhala: not in DejaVu Sans Mono
+    CHECK(index.Scanned());
+    (void)resolved;
+
+    FontSet withBold;
+    CHECK(withBold.LoadKnown(index, {{"DejaVu Sans Mono", dir + "DejaVuSansMono.ttf", dir + "DejaVuSansMono-Bold.ttf"}}, {}));
+    CHECK_EQ(withBold.Face(true).Weight(), 700);
+    FontSet none;
+    CHECK(!none.LoadKnown(index, {{"DejaVu Sans Mono", dir + "NoSuchMono.ttf", ""}}, {}));
+    // Linux takes its family from fontconfig: no known files.
+#ifndef _WIN32
+    CHECK(KnownInterfaceFontFiles().empty());
+#endif
+}
+
 RGUI_TEST("text.shape_run") {
     FontIndex index;
     index.SetDirectories({"/usr/share/fonts"});

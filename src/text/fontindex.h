@@ -47,6 +47,8 @@ public:
     // Waits for the scan, starting it on this thread when Start was never called. After it
     // returns, the index never changes, so any number of threads may read it at once.
     void Wait() const;
+    // Whether the scan has finished (never waits).
+    bool Scanned() const;
 
     // Every face found, in directory order, then by path within a directory (waits).
     const std::vector<FontEntry>& Entries() const;

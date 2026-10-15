@@ -111,6 +111,11 @@ void FontIndex::Wait() const {
     done_.wait(lock, [this] { return finished_; });
 }
 
+bool FontIndex::Scanned() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return finished_;
+}
+
 void FontIndex::Scan() const {
     const auto begin = std::chrono::steady_clock::now();
     std::vector<std::string> files;
