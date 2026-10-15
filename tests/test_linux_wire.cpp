@@ -389,3 +389,62 @@ RGUI_TEST("linux.wire.fds_and_id_reuse") {
     CHECK_EQ(rgui_wl_dispatch(p.client), 1);
     CHECK_EQ(rgui_wl_new_object(p.client, &kThing, 1, nullptr, nullptr), a);
 }
+
+RGUI_TEST("linux.wire.random_mutations") {
+    // Valid messages of every shape, then thousands of copies with a few bytes changed or the tail
+    // cut: each is dispatched or refused, never read past (run under linux-asan).
+    std::vector<uint8_t> stream;
+    Header(stream, 2, 8 + 4 + 8 + 4 + 8, 1);
+    Put32(stream, 6);
+    PutBytes(stream, "hello\0\0\0", 8);
+    Put32(stream, 5);
+    PutBytes(stream, "\1\2\3\4\5\0\0\0", 8);
+    Header(stream, 2, 8 + 4 * 3 + 8 + 4 * 2 + 4 + 4 + 4, 0);
+    for (uint32_t v : {1u, 2u, 3u}) Put32(stream, v);
+    Put32(stream, 2);
+    PutBytes(stream, "x\0\0\0", 4);
+    Put32(stream, 2);
+    Put32(stream, RGUI_WL_SERVER_ID_START + 1);
+    Put32(stream, 0);
+    Put32(stream, 0);
+    Put32(stream, 0);
+    Header(stream, 2, 12, 9);
+    Put32(stream, 7);
+    Header(stream, 2, 8, 2);
+    uint32_t seed = 12345;
+    const auto next = [&seed] {
+        seed = seed * 1103515245u + 12345u;
+        return seed >> 8;
+    };
+    int dispatched = 0;
+    int refused = 0;
+    for (int iteration = 0; iteration < 4000; ++iteration) {
+        std::vector<uint8_t> bytes = stream;
+        const int changes = 1 + static_cast<int>(next() % 3);
+        for (int i = 0; i < changes; ++i) bytes[next() % bytes.size()] = static_cast<uint8_t>(next());
+        if (next() % 4 == 0) bytes.resize(next() % bytes.size());
+        // A message to wl_display would be a protocol error, which exits: skip those.
+        bool display = false;
+        for (size_t at = 0; at + 8 <= bytes.size();) {
+            uint32_t id, word;
+            std::memcpy(&id, &bytes[at], 4);
+            std::memcpy(&word, &bytes[at + 4], 4);
+            if (id == RGUI_WL_DISPLAY_ID) display = true;
+            const size_t size = word >> 16;
+            if (size < 8 || (size & 3) != 0) break;
+            at += size;
+        }
+        if (display) continue;
+        RawPeer peer;
+        if (!peer.connection) return;
+        if (!bytes.empty()) peer.Write(bytes);
+        const int r = bytes.empty() ? 0 : peer.ReadAndDispatch();
+        CHECK(r >= -1 && r <= 4);
+        if (r < 0) ++refused;
+        else dispatched += r;
+        for (int fd : peer.received.fds) close(fd);
+        if (peer.received.fd >= 0 && peer.received.fds.empty()) close(peer.received.fd);
+    }
+    CHECK(dispatched > 0);
+    CHECK(refused > 0);
+}
