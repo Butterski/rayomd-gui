@@ -89,8 +89,9 @@ int HexValue(char c) {
     return -1;
 }
 
-// The path of the first file:// URI of a text/uri-list, percent-decoded; empty when none.
-std::string FirstFileUri(const std::string& list) {
+} // namespace
+
+std::string PathFromUriList(const std::string& list) {
     size_t at = 0;
     while (at < list.size()) {
         size_t end = list.find('\n', at);
@@ -129,6 +130,8 @@ std::string FirstFileUri(const std::string& list) {
     }
     return {};
 }
+
+namespace {
 
 // Cuts UTF-8 text to at most `limit` bytes without splitting a character.
 std::string TruncateUtf8(std::string_view text, size_t limit) {
@@ -385,6 +388,7 @@ private:
     uint32_t frameCallback_ = 0;
     uint64_t frameTimer_ = 0;
     uint64_t lastFrameMs_ = 0;
+    bool presentedSinceFrame_ = true;  // the last OnFrame presented: the frame callback paces
 
     // Pointer.
     uint32_t pointer_ = 0;
@@ -831,11 +835,13 @@ void WaylandWindowImpl::UpdateGeometry() {
     if (!configured_) return;
     int integerScale = preferredBufferScale_;
     if (integerScale == 0) {
+        // The largest scale of the outputs the surface is on; before it is on any (the first
+        // frame), of every output, so a single HiDPI screen does not start blurry.
         integerScale = 1;
         for (const Output& output : outputs_) {
-            if (std::find(enteredOutputs_.begin(), enteredOutputs_.end(), output.id) != enteredOutputs_.end()) {
-                integerScale = std::max(integerScale, output.scale);
-            }
+            const bool entered =
+                std::find(enteredOutputs_.begin(), enteredOutputs_.end(), output.id) != enteredOutputs_.end();
+            if (entered || enteredOutputs_.empty()) integerScale = std::max(integerScale, output.scale);
         }
     }
     int w, h, bufferScale;
@@ -1039,6 +1045,7 @@ void WaylandWindowImpl::Present(const gfx::Surface& frame, const std::vector<gfx
     b.busy = true;
     mapped_ = true;
     fullDamage_ = false;
+    presentedSinceFrame_ = true;
 }
 
 void WaylandWindowImpl::OnFrameDone(uint32_t, uint16_t, const rgui_wl_arg*) {
@@ -1051,13 +1058,12 @@ void WaylandWindowImpl::RequestFrame() {
     ScheduleFrame();
 }
 
-// OnFrame runs from a timer: after the frame callback when a commit is in flight, else at most
+// OnFrame runs from a timer: right after the frame callback of the last commit, else at most
 // every 16 ms, so a client that asks for frames without presenting does not spin.
 void WaylandWindowImpl::ScheduleFrame() {
     if (!frameRequested_ || !configured_ || frameCallback_ || frameTimer_ || lost_) return;
-    const uint64_t now = rgui_loop_now_ms();
-    const uint64_t since = now - lastFrameMs_;
-    const uint32_t delay = since >= 16 ? 0 : static_cast<uint32_t>(16 - since);
+    const uint64_t since = rgui_loop_now_ms() - lastFrameMs_;
+    const uint32_t delay = presentedSinceFrame_ || since >= 16 ? 0 : static_cast<uint32_t>(16 - since);
     frameTimer_ = rgui_loop_add_timer(delay, 0, OnFrameTimer, this);
 }
 
@@ -1067,6 +1073,7 @@ void WaylandWindowImpl::OnFrameTimer(uint64_t, void* user) {
     if (!self->frameRequested_ || self->frameCallback_ || self->lost_) return;
     self->frameRequested_ = false;
     self->lastFrameMs_ = rgui_loop_now_ms();
+    self->presentedSinceFrame_ = false;
     if (self->client_) self->client_->OnFrame();
 }
 
@@ -1604,7 +1611,7 @@ void WaylandWindowImpl::OnDataDevice(uint32_t, uint16_t opcode, const rgui_wl_ar
                 }
                 DestroyOffer(id);
             }
-            std::string path = FirstFileUri(list);
+            std::string path = PathFromUriList(list);
             if (!path.empty() && client_) client_->OnDropFile(std::move(path));
         });
         break;

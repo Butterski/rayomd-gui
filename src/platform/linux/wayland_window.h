@@ -69,4 +69,8 @@ std::filesystem::path XdgConfigDir();
 std::filesystem::path XdgImageCacheDir();
 std::filesystem::path XdgDocumentsDir();
 
+// The path of the first file:// URI of a text/uri-list (a drop), percent-decoded, from a local
+// host; empty when there is none.
+std::string PathFromUriList(const std::string& list);
+
 } // namespace rgui::wl

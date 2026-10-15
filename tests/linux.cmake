@@ -2,6 +2,7 @@
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND RGUI_TEST_SOURCES
         test_linux_loop.cpp
+        test_linux_window.cpp
         test_linux_wire.cpp
         test_linux_xkb.cpp)
     # The keymap reader against libxkbcommon's answers (tests/data/xkb, made by
