@@ -34,7 +34,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(rayomd_gui_linux PRIVATE _GNU_SOURCE)
         rgui_flags(rayomd_gui_linux)
 
-        # rayomd-gui: libc.so.6 is its only NEEDED entry (libstdc++ and libgcc linked in).
+        # rayomd-gui: glibc only, libstdc++ and libgcc linked in. NEEDED holds libc.so.6 and
+        # ld-linux-x86-64.so.2, which libstdc++.a's TLS code references (see AGENTS.md).
         add_executable(rayomd-gui platform/linux/main_linux.cpp)
         target_link_libraries(rayomd-gui PRIVATE rayomd_gui_linux)
         target_compile_definitions(rayomd-gui PRIVATE _GNU_SOURCE)
