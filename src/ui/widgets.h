@@ -83,8 +83,10 @@ std::vector<std::string_view> WrapText(Context& ctx, std::string_view text, floa
 // (content y = viewport.y - offset) and clips to the viewport until EndScrollArea, which takes
 // the content's height. Wheel notches move 120 px eased (SmoothScroll), touchpad pixels
 // directly; the thumb is 6 px wide (8 hovered or dragged), visible while scrolling or hovered
-// and 600 ms after, and can be dragged.
-float BeginScrollArea(Context& ctx, std::string_view id, RectF viewport);
+// and 600 ms after, and can be dragged. `contentHeight` >= 0 is the content's height when it is
+// known before drawing (the scroll range then follows it in this frame, so a jump to a
+// position beyond the last frame's content holds); else the last EndScrollArea's is used.
+float BeginScrollArea(Context& ctx, std::string_view id, RectF viewport, float contentHeight = -1);
 void EndScrollArea(Context& ctx, float contentHeight);
 // The scroll position of the area `id` (in the same id scope as its BeginScrollArea), to jump.
 SmoothScroll& ScrollAreaScroll(Context& ctx, std::string_view id);

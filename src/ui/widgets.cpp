@@ -900,9 +900,10 @@ SmoothScroll& ScrollAreaScroll(Context& ctx, std::string_view idLabel) {
     return ctx.State<ScrollAreaState>(ctx.MakeId(idLabel)).scroll;
 }
 
-float BeginScrollArea(Context& ctx, std::string_view idLabel, RectF viewport) {
+float BeginScrollArea(Context& ctx, std::string_view idLabel, RectF viewport, float contentHeight) {
     const Id id = ctx.MakeId(idLabel);
     ScrollAreaState& st = ctx.State<ScrollAreaState>(id);
+    if (contentHeight >= 0) st.content = contentHeight;
     st.scroll.SetMax(st.content - viewport.h);
     const double now = ctx.NowMs();
     if (st.scroll.Animating(now)) {
