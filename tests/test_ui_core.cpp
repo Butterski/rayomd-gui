@@ -496,29 +496,37 @@ RGUI_TEST("ui.disabled_ignores_input") {
     Harness h(false);
     bool value = false;
     bool clicked = false;
+    auto disabledFrame = [&] {
+        h.Frame([&] {
+            h.ctx.BeginDisabled();
+            clicked = Button(h.ctx, "Go", {10, 10, 80, 28}) || clicked;
+            Checkbox(h.ctx, "Check", value, {10, 60, 200, 28});
+            h.ctx.EndDisabled();
+        });
+    };
     h.Click(20, 20);
+    disabledFrame();
     h.Click(20, 70);
     h.KeyDown(Key::Tab);
-    h.Frame([&] {
-        h.ctx.BeginDisabled();
-        clicked = Button(h.ctx, "Go", {10, 10, 80, 28});
-        Checkbox(h.ctx, "Check", value, {10, 60, 200, 28});
-        h.ctx.EndDisabled();
-    });
+    disabledFrame();
     CHECK(!clicked);
     CHECK(!value);
     CHECK_EQ(h.ctx.FocusedId(), 0u);
     // Enabled, the same input works, and the opacity of disabled drawing is 40 %.
+    auto enabledFrame = [&] {
+        h.Frame([&] {
+            clicked = Button(h.ctx, "Go", {10, 10, 80, 28}) || clicked;
+            Checkbox(h.ctx, "Check", value, {10, 60, 200, 28});
+            h.ctx.BeginDisabled();
+            CHECK_NEAR(h.ctx.Opacity(), 0.4, 1e-6);
+            h.ctx.EndDisabled();
+            CHECK_NEAR(h.ctx.Opacity(), 1.0, 1e-6);
+        });
+    };
     h.Click(20, 20);
+    enabledFrame();
     h.Click(20, 70);
-    h.Frame([&] {
-        clicked = Button(h.ctx, "Go", {10, 10, 80, 28});
-        Checkbox(h.ctx, "Check", value, {10, 60, 200, 28});
-        h.ctx.BeginDisabled();
-        CHECK_NEAR(h.ctx.Opacity(), 0.4, 1e-6);
-        h.ctx.EndDisabled();
-        CHECK_NEAR(h.ctx.Opacity(), 1.0, 1e-6);
-    });
+    enabledFrame();
     CHECK(clicked);
     CHECK(value);
 }
@@ -681,7 +689,9 @@ RGUI_TEST("ui.number_field") {
     h.Frame(build);
     h.Type("0.1");
     h.Frame(build);
-    h.KeyDown(Key::Tab);
+    h.Click(500, 500);
+    const FrameOutput& lost = h.Frame(build);
+    CHECK(lost.wantsFrame);   // the field commits in the frame that follows
     h.Frame(build);
     CHECK_NEAR(value, 0.25, 1e-9);
     h.Wheel(50, 20, -2);

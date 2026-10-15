@@ -253,6 +253,7 @@ void Context::BeginFrame(int widthPx, int heightPx, double scale, double nowMs) 
 }
 
 const FrameOutput& Context::EndFrame() {
+    const Id focusBefore = focused_;
     // Tab and Shift+Tab nobody took move focus through this frame's focusable widgets of the
     // top layer that holds the keyboard (a modal's, else all).
     const int minLayer = std::max(0, std::max(modalLayer_, lastModalLayer_));
@@ -278,6 +279,8 @@ const FrameOutput& Context::EndFrame() {
     // A press nothing took clears focus; an active widget that vanished lets go.
     if (pointer_.pressed[0] && !anyPressTaken_) focused_ = 0;
     if (active_ != 0 && !activeSeen_) active_ = 0;
+    // Widgets learn of a focus change (focus rings, commits on focus loss) in the next frame.
+    if (focused_ != focusBefore) wantsFrame_ = true;
     if (hot_ != lastHot_) {
         lastHot_ = hot_;
         hotSince_ = now_;
@@ -395,11 +398,12 @@ Interaction Context::Interact(Id id, RectF rect, uint32_t flags) {
         if ((flags & kInteractFocusable) && !(flags & kInteractNoFocusOnPress)) focused_ = id;
     }
     if (active_ == id) {
-        r.held = true;
-        if (pointer_.released[0] || !pointer_.down[0]) {
+        if (!pointer_.down[0]) {
             r.released = true;
             r.clicked = rect.Contains(pointer_.x, pointer_.y) && !Blocked(pointer_.x, pointer_.y, CurrentLayer());
             active_ = 0;
+        } else {
+            r.held = true;
         }
     }
     return r;
