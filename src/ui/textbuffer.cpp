@@ -27,16 +27,26 @@ size_t SequenceLength(const unsigned char* p, size_t avail, uint32_t& cp) {
 
 void TextBuffer::SetText(std::string text) {
     const size_t size = text.size();
-    data_.assign(text.begin(), text.end());
+    // Exact sizes: a document of N bytes and L lines holds N + kMinGap bytes and L starts, not
+    // the doubled capacity of growing vectors.
+    std::vector<char> data(size + kMinGap);
+    if (size > 0) std::memcpy(data.data(), text.data(), size);
     std::string().swap(text);
-    data_.resize(size + kMinGap);
+    data_.swap(data);
+    std::vector<char>().swap(data);
     gapStart_ = size;
     gapEnd_ = data_.size();
-    lineStarts_.assign(1, 0);
     const char* p = data_.data();
+    const size_t lines = 1 + static_cast<size_t>(std::count(p, p + size, '\n'));
+    std::vector<uint32_t> starts;
+    starts.reserve(lines);
+    starts.push_back(0);
     for (const char* q = p; (q = static_cast<const char*>(std::memchr(q, '\n', size - (q - p)))) != nullptr; q++) {
-        lineStarts_.push_back(static_cast<uint32_t>(q - p + 1));
+        starts.push_back(static_cast<uint32_t>(q - p + 1));
     }
+    lineStarts_.swap(starts);
+    shiftFrom_ = lineStarts_.size();
+    shift_ = 0;
 }
 
 void TextBuffer::Reserve(size_t extra) {
@@ -65,6 +75,24 @@ void TextBuffer::MoveGap(size_t pos) {
     }
 }
 
+void TextBuffer::MoveShift(size_t line) {
+    if (shift_ != 0) {
+        for (size_t i = shiftFrom_; i < line; i++) lineStarts_[i] += shift_;
+        for (size_t i = line; i < shiftFrom_; i++) lineStarts_[i] -= shift_;
+    }
+    shiftFrom_ = line;
+}
+
+size_t TextBuffer::FirstLineAfter(size_t pos) const {
+    size_t lo = 0, hi = lineStarts_.size();
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (StartOf(mid) <= pos) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
 void TextBuffer::Insert(size_t pos, std::string_view bytes) {
     if (bytes.empty()) return;
     pos = std::min(pos, Size());
@@ -73,14 +101,16 @@ void TextBuffer::Insert(size_t pos, std::string_view bytes) {
     std::memcpy(data_.data() + gapStart_, bytes.data(), bytes.size());
     gapStart_ += bytes.size();
 
+    // The starts after the line of `pos` move by the inserted size; the new ones go after it,
+    // stored without the shift they are read with.
     const size_t line = LineOf(pos);
-    const uint32_t delta = static_cast<uint32_t>(bytes.size());
-    for (size_t i = line + 1; i < lineStarts_.size(); i++) lineStarts_[i] += delta;
+    MoveShift(line + 1);
+    shift_ += static_cast<uint32_t>(bytes.size());
     std::vector<uint32_t> added;
     for (size_t i = 0; i < bytes.size(); i++) {
-        if (bytes[i] == '\n') added.push_back(static_cast<uint32_t>(pos + i + 1));
+        if (bytes[i] == '\n') added.push_back(static_cast<uint32_t>(pos + i + 1) - shift_);
     }
-    if (!added.empty()) lineStarts_.insert(lineStarts_.begin() + line + 1, added.begin(), added.end());
+    if (!added.empty()) lineStarts_.insert(lineStarts_.begin() + static_cast<long>(line + 1), added.begin(), added.end());
 }
 
 void TextBuffer::Erase(size_t pos, size_t len) {
@@ -91,12 +121,12 @@ void TextBuffer::Erase(size_t pos, size_t len) {
     MoveGap(pos);
     gapEnd_ += len;
 
-    // Line starts in (pos, pos + len] were inside the erased bytes.
-    auto first = std::upper_bound(lineStarts_.begin(), lineStarts_.end(), static_cast<uint32_t>(pos));
-    auto last = std::upper_bound(first, lineStarts_.end(), static_cast<uint32_t>(pos + len));
-    auto rest = lineStarts_.erase(first, last);
-    const uint32_t delta = static_cast<uint32_t>(len);
-    for (; rest != lineStarts_.end(); ++rest) *rest -= delta;
+    // Line starts in (pos, pos + len] were inside the erased bytes; the ones after move back.
+    const size_t first = FirstLineAfter(pos);
+    const size_t last = FirstLineAfter(pos + len);
+    MoveShift(first);
+    lineStarts_.erase(lineStarts_.begin() + static_cast<long>(first), lineStarts_.begin() + static_cast<long>(last));
+    shift_ -= static_cast<uint32_t>(len);
 }
 
 std::string TextBuffer::Copy(size_t pos, size_t len) const {
@@ -123,14 +153,29 @@ std::string_view TextBuffer::Range(size_t pos, size_t len, std::string& scratch)
     return scratch;
 }
 
+void TextBuffer::Pieces(size_t pos, size_t len, std::string_view& head, std::string_view& tail) const {
+    head = tail = {};
+    const size_t size = Size();
+    if (pos >= size) return;
+    len = std::min(len, size - pos);
+    const size_t end = pos + len;
+    if (end <= gapStart_) {
+        head = std::string_view(data_.data() + pos, len);
+    } else if (pos >= gapStart_) {
+        head = std::string_view(data_.data() + gapEnd_ + (pos - gapStart_), len);
+    } else {
+        head = std::string_view(data_.data() + pos, gapStart_ - pos);
+        tail = std::string_view(data_.data() + gapEnd_, end - gapStart_);
+    }
+}
+
 std::string_view TextBuffer::View() {
     MoveGap(Size());
     return std::string_view(data_.data(), gapStart_);
 }
 
 size_t TextBuffer::LineOf(size_t pos) const {
-    auto it = std::upper_bound(lineStarts_.begin(), lineStarts_.end(), static_cast<uint32_t>(pos));
-    return static_cast<size_t>(it - lineStarts_.begin()) - 1;
+    return FirstLineAfter(pos) - 1;
 }
 
 uint32_t TextBuffer::Decode(size_t pos, size_t& len) const {

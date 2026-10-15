@@ -33,18 +33,24 @@ public:
     // The bytes [pos, pos + len) (clamped): in place when they do not straddle the gap, else
     // copied into `scratch`. The view lives until the next edit (or the next use of scratch).
     std::string_view Range(size_t pos, size_t len, std::string& scratch) const;
+    // The bytes [pos, pos + len) (clamped) in place, without copying: `head` before the gap and
+    // `tail` after it (`tail` is empty when the range does not straddle the gap). Valid until
+    // the next edit.
+    void Pieces(size_t pos, size_t len, std::string_view& head, std::string_view& tail) const;
     // The whole text in place, moving the gap to the end first (a memmove of the bytes after
     // the gap). Valid until the next edit.
     std::string_view View();
 
     size_t LineCount() const { return lineStarts_.size(); }
-    size_t LineStart(size_t line) const { return lineStarts_[line]; }
+    size_t LineStart(size_t line) const { return StartOf(line); }
     // The end of `line`, before its '\n' (or the end of the text for the last line).
     size_t LineEnd(size_t line) const {
-        return line + 1 < lineStarts_.size() ? lineStarts_[line + 1] - 1 : Size();
+        return line + 1 < lineStarts_.size() ? StartOf(line + 1) - 1 : Size();
     }
     // The line holding byte `pos` (a '\n' belongs to the line it ends).
     size_t LineOf(size_t pos) const;
+    // The bytes the line index holds (capacity included): 4 per line.
+    size_t LineIndexBytes() const { return lineStarts_.capacity() * sizeof(uint32_t); }
 
     // The code point starting at `pos` and its length; a byte that does not start well-formed
     // UTF-8 decodes as U+FFFD of length 1. `pos` must be < Size().
@@ -56,11 +62,22 @@ public:
 private:
     void MoveGap(size_t pos);
     void Reserve(size_t extra);
+    uint32_t StartOf(size_t line) const { return lineStarts_[line] + (line >= shiftFrom_ ? shift_ : 0); }
+    // The first line whose start is above `pos`.
+    size_t FirstLineAfter(size_t pos) const;
+    // Applies the pending shift to the entries between shiftFrom_ and `line`, so it holds from
+    // `line` on.
+    void MoveShift(size_t line);
 
     std::vector<char> data_;
     size_t gapStart_ = 0;
     size_t gapEnd_ = 0;
+    // Line starts. The entries from shiftFrom_ on lack shift_ (modulo 2^32): an edit moves the
+    // starts after it by changing shift_, touching only the entries between its line and the
+    // previous edit's, so typing costs O(1) in the number of lines, not O(lines below).
     std::vector<uint32_t> lineStarts_{0};
+    size_t shiftFrom_ = 1;
+    uint32_t shift_ = 0;
 };
 
 // `text` with CRLF and lone CR turned into LF and bytes that are not well-formed UTF-8 into
