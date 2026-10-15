@@ -346,13 +346,22 @@ void App::SnapshotFrame() {
         exitCode_ = 1;
         exitStderr_ = "snapshot: cannot write " + args_.snapshotPath + "\n";
     } else {
-        // Where startup's time went: the preview's build (and parse), and the font index scan,
-        // which runs beside startup and is never waited for here.
+        // Where startup's time went: the file's text arriving, the preview build requested, its
+        // result back (each since the process started; build = build and parse), and the font
+        // index scan, which runs beside startup and is never waited for here.
+        const MainWindow::Trace& trace = window_->StartupTrace();
+        const auto since = [this](std::chrono::steady_clock::time_point at) {
+            return at == std::chrono::steady_clock::time_point() ? -1.0
+                : std::chrono::duration<double, std::milli>(at - processStart_).count();
+        };
         char index[48] = "font index still scanning";
         if (fontIndex_->Scanned()) std::snprintf(index, sizeof index, "font index %.0f ms", fontIndex_->ScanMilliseconds());
-        char line[192];
-        std::snprintf(line, sizeof line, "snapshot: first frame %.0f ms, preview ready %.0f ms, build %.0f ms, %s\n",
-                      firstFrameMs_, readyMs, window_->ShownBuildMs(), index);
+        char line[256];
+        std::snprintf(line, sizeof line,
+                      "snapshot: first frame %.0f ms, preview ready %.0f ms (opened %.0f, build requested %.0f, "
+                      "built %.0f in %.0f ms), %s\n",
+                      firstFrameMs_, readyMs, since(trace.opened), since(trace.buildRequested), since(trace.shown),
+                      window_->ShownBuildMs(), index);
         exitCode_ = 0;
         exitStdout_ = line;
     }

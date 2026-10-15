@@ -687,6 +687,7 @@ void MainWindow::OnLoaded(DocumentLoaded loaded) {
         if (hooks_.requestFrame) hooks_.requestFrame();
         return;
     }
+    trace_.opened = std::chrono::steady_clock::now();
     doc_ = std::move(loaded.document);
     editor_.SetText(doc_.text);
     syncedRevision_ = editor_.Revision();
@@ -816,6 +817,7 @@ void MainWindow::MaybeStartPreview() {
     TinyPdf::PdfOptions options = export_.ToPdfOptions(doc_.filePath, true);
     if (export_.themeFile.empty()) options.theme = TinyPdf::PdfTheme();
     const int generation = ++requestedGeneration_;
+    requestedAt_ = std::chrono::steady_clock::now();
     worker_->RequestPreview(std::move(text), doc_.filePath, std::move(options), generation, export_.themeFile);
     if (budgetTimer_ != 0) platform_.CancelTimer(budgetTimer_);
     budgetTimer_ = platform_.StartTimer(kPreviewBudgetMs, [link = link_, generation] {
@@ -900,6 +902,8 @@ void MainWindow::OnPreview(PreviewReady ready) {
     }
     shownGeneration_ = ready.generation;
     shownBuildMs_ = ready.ms;
+    if (ready.generation == requestedGeneration_) trace_.buildRequested = requestedAt_;
+    trace_.shown = std::chrono::steady_clock::now();
     stats_ = ready.stats;
     if (ready.themeFile == export_.themeFile) export_.themeError = std::move(ready.themeError);
     if (ready.pdf) {

@@ -32,6 +32,7 @@
 #include "ui/texteditor.h"
 #include "ui/ui.h"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -130,6 +131,12 @@ public:
     int ShownGeneration() const { return shownGeneration_; }
     // Build and parse time of the preview shown, ms (0 before the first).
     double ShownBuildMs() const { return shownBuildMs_; }
+    // When the last opened file's text arrived, when the shown preview's build was requested and
+    // when its result came back (snapshot mode's account of startup; default before each).
+    struct Trace {
+        std::chrono::steady_clock::time_point opened, buildRequested, shown;
+    };
+    const Trace& StartupTrace() const { return trace_; }
     const DocumentStats& Stats() const { return stats_; }
 
     Document& Doc() { return doc_; }
@@ -251,6 +258,8 @@ private:
     int requestedGeneration_ = 0;
     int shownGeneration_ = 0;
     double shownBuildMs_ = 0;
+    Trace trace_;
+    std::chrono::steady_clock::time_point requestedAt_;   // when requestedGeneration_ was asked for
     std::optional<Anchor> anchor_;
     std::vector<float> pageTops_;     // the last frame's layout, logical px from the content top
     std::vector<float> pageHeights_;
