@@ -1,0 +1,12 @@
+# The linux.compose fixture: the locale's file through include "%L", then lines of its own.
+include "%L"
+<Multi_key> <a> <e>		: "æ"	ae # replaces the included line
+<Multi_key> <s> <s>		: "\303\237"	# octal escapes: ß
+<Multi_key> <x> <x>		: "\x41"	# a hex escape: A
+<dead_grave> <a>		: agrave	# a keysym only: à
+<Multi_key> <o>			: "o"	# a prefix of an included sequence: skipped
+<Multi_key> <c> <o> <o> <l>	: "cool"
+<Multi_key> <bad		: "x"	# malformed: ignored
+<Multi_key> <q> <q>		: "\377\376"	# not UTF-8: ignored
+<Multi_key> <U20AC> <e>	: "€e"	# a Unicode keysym name
+include "%S/self.Compose"
