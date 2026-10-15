@@ -331,8 +331,13 @@ void App::SnapshotFrame() {
         exitCode_ = 1;
         exitStderr_ = "snapshot: cannot write " + args_.snapshotPath + "\n";
     } else {
-        char line[128];
-        std::snprintf(line, sizeof line, "snapshot: first frame %.0f ms, preview ready %.0f ms\n", firstFrameMs_, readyMs);
+        // The font index scan runs beside startup; its time tells a slow font folder from a
+        // slow build. Never waited for here.
+        char index[48] = "font index still scanning";
+        if (fontIndex_->Scanned()) std::snprintf(index, sizeof index, "font index %.0f ms", fontIndex_->ScanMilliseconds());
+        char line[160];
+        std::snprintf(line, sizeof line, "snapshot: first frame %.0f ms, preview ready %.0f ms, %s\n", firstFrameMs_,
+                      readyMs, index);
         exitCode_ = 0;
         exitStdout_ = line;
     }
