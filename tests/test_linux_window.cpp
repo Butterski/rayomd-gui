@@ -9,14 +9,18 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -41,6 +45,29 @@ private:
     bool hadOld_ = false;
     std::string old_;
 };
+
+// The milliseconds `call` takes with a FIFO (no writer) at `path`; -1 when it cannot be made. A
+// reader that blocks on the FIFO is let go after 3 s (a writer opens it), so a regression fails
+// the time bound instead of hanging the test.
+template <typename Call>
+double MillisecondsWithFifo(const std::string& path, Call call) {
+    unlink(path.c_str());
+    if (mkfifo(path.c_str(), 0600) != 0) return -1;
+    std::atomic<bool> done{false};
+    std::thread watchdog([&] {
+        for (int i = 0; i < 300 && !done; i++) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (done) return;
+        const int fd = open(path.c_str(), O_WRONLY | O_NONBLOCK);
+        if (fd >= 0) close(fd);
+    });
+    const auto start = std::chrono::steady_clock::now();
+    call();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    done = true;
+    watchdog.join();
+    unlink(path.c_str());
+    return ms;
+}
 
 } // namespace
 
@@ -86,6 +113,12 @@ RGUI_TEST("linux.window.xdg_dirs") {
     CHECK(rgui::wl::XdgDocumentsDir() == std::filesystem::path("/srv/docs"));
     write("XDG_DOCUMENTS_DIR=\"unterminated\n");
     CHECK(rgui::wl::XdgDocumentsDir() == root / "home" / "Documents");
+    // A FIFO as user-dirs.dirs is not waited on (the UI thread asks): the default folder at once.
+    std::filesystem::path documents;
+    const double ms = MillisecondsWithFifo((root / "config" / "user-dirs.dirs").string(),
+                                           [&] { documents = rgui::wl::XdgDocumentsDir(); });
+    CHECK(ms >= 0 && ms < 1000);
+    CHECK(documents == root / "home" / "Documents");
     std::filesystem::remove_all(root, ec);
 }
 

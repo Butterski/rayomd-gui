@@ -7,13 +7,19 @@
 #include "platform/linux/compose.h"
 #include "platform/linux/xkb_keymap.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
@@ -32,6 +38,29 @@ constexpr uint32_t kMod5 = 0x80;
 
 std::string DataPath(const std::string& name) {
     return std::string(rgui::test::SourceDir()) + "/tests/data/xkb/" + name;
+}
+
+// The milliseconds `call` takes with a FIFO (no writer) at `path`; -1 when it cannot be made. A
+// reader that blocks on the FIFO is let go after 3 s (a writer opens it), so a regression fails
+// the time bound instead of hanging the test.
+template <typename Call>
+double MillisecondsWithFifo(const std::string& path, Call call) {
+    unlink(path.c_str());
+    if (mkfifo(path.c_str(), 0600) != 0) return -1;
+    std::atomic<bool> done{false};
+    std::thread watchdog([&] {
+        for (int i = 0; i < 300 && !done; i++) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (done) return;
+        const int fd = open(path.c_str(), O_WRONLY | O_NONBLOCK);
+        if (fd >= 0) close(fd);
+    });
+    const auto start = std::chrono::steady_clock::now();
+    call();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    done = true;
+    watchdog.join();
+    unlink(path.c_str());
+    return ms;
 }
 
 std::string ReadText(const std::string& path) {
@@ -466,6 +495,15 @@ RGUI_TEST("linux.compose") {
     Compose missing;
     CHECK(!missing.Load(dir + "/no-such-file", dir + "/locale"));
     CHECK(missing.Feed(KeysymFromName("Multi_key"), text) == Compose::Result::Ignored);
+
+    // A FIFO where the Compose file should be (or one it includes) is refused at once, not waited
+    // on: the UI thread reads Compose files.
+    const std::string fifo = std::string(rgui::test::BuildDir()) + "/compose-fifo";
+    Compose blocked;
+    bool loaded = true;
+    const double ms = MillisecondsWithFifo(fifo, [&] { loaded = blocked.Load(fifo, dir + "/locale"); });
+    CHECK(ms >= 0 && ms < 1000);
+    CHECK(!loaded);
 }
 
 RGUI_TEST("linux.compose.default_file") {

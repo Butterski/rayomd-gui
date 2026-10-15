@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "platform/linux/wayland_window.h"
 
+#include "app/safefile.h"
 #include "gfx/canvas.h"
 #include "platform/linux/compose.h"
 #include "platform/linux/data_transfer.h"
@@ -161,13 +162,9 @@ std::filesystem::path XdgImageCacheDir() { return XdgBase("XDG_CACHE_HOME", ".ca
 
 std::filesystem::path XdgDocumentsDir() {
     const std::filesystem::path file = XdgBase("XDG_CONFIG_HOME", ".config") / "user-dirs.dirs";
+    // A regular file of at most 64 KiB, read without blocking on a FIFO at the path; else none.
     std::string text;
-    if (FILE* f = fopen(file.c_str(), "rb")) {
-        char buffer[4096];
-        size_t n;
-        while ((n = fread(buffer, 1, sizeof buffer, f)) > 0 && text.size() < 65536) text.append(buffer, n);
-        fclose(f);
-    }
+    ReadRegularFile(file, 65536, text, nullptr);
     size_t at = 0;
     while (at < text.size()) {
         size_t end = text.find('\n', at);

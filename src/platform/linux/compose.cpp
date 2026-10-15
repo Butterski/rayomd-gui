@@ -4,9 +4,9 @@
 // is a prefix of an existing one is skipped; a repeated sequence replaces the earlier result).
 #include "platform/linux/compose.h"
 
+#include "app/safefile.h"
 #include "platform/linux/xkb_keymap.h"
 
-#include <cstdio>
 #include <cstdlib>
 #include <string_view>
 
@@ -35,25 +35,11 @@ bool IsDeadKeysym(uint32_t keysym) {
     return keysym >= 0xfe50 && keysym <= 0xfe93;
 }
 
+// A Compose file (or one it includes, or compose.dir): a regular file of at most `limit` bytes,
+// read without blocking on a FIFO or device at the path; `out` empty when it is not.
 bool ReadFile(const std::string& path, size_t limit, std::string& out) {
     out.clear();
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return false;
-    char buffer[65536];
-    bool ok = true;
-    for (;;) {
-        const size_t n = std::fread(buffer, 1, sizeof(buffer), f);
-        if (n == 0) break;
-        if (out.size() + n > limit) {
-            ok = false;
-            break;
-        }
-        out.append(buffer, n);
-    }
-    if (std::ferror(f)) ok = false;
-    std::fclose(f);
-    if (!ok) out.clear();
-    return ok;
+    return ReadRegularFile(path, limit, out, nullptr);
 }
 
 std::string Env(const char* name) {
