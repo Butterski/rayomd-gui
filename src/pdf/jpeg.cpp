@@ -22,8 +22,13 @@ constexpr uint8_t kNaturalOrder[64] = {
 constexpr int kMaxDimension = 65535;
 constexpr uint64_t kMaxPixels = uint64_t(1) << 28;
 // More scans than any encoder writes (a fully successive-approximated progressive image has a
-// few dozen); bounds the work of a hostile file.
+// few dozen).
 constexpr int kMaxScans = 1000;
+// The scans of a frame together visit at most this many times each of its coefficients (a
+// sequential frame visits each once, libjpeg's progressive script about 4 times): progressive
+// scans cost their band in every block whatever their data size, which bounds the work of a
+// hostile file.
+constexpr int kMaxPasses = 32;
 constexpr int kLookupBits = 9;
 
 int16_t Saturate16(int32_t v) {
@@ -181,9 +186,11 @@ struct Component {
     int acTable = 0;
     int dcPredictor = 0;
     std::vector<int16_t> coefficients;  // progressive: blocksW * blocksH blocks of 64
-    std::vector<uint8_t> plane;         // blocksW * 8 by blocksH * 8 samples
+    std::vector<uint8_t> plane;         // blocksW * side by blocksH * side samples
+    int shift = 0;                      // each block keeps side = 8 >> shift samples per axis
 
-    size_t PlaneStride() const { return static_cast<size_t>(blocksW) * 8; }
+    int Side() const { return 8 >> shift; }
+    size_t PlaneStride() const { return static_cast<size_t>(blocksW) * static_cast<size_t>(Side()); }
 };
 
 enum class ScanMode { Sequential, DcFirst, DcRefine, AcFirst, AcRefine };
@@ -192,7 +199,8 @@ class Decoder {
 public:
     enum class Goal { Header, Color, Gray };
 
-    Decoder(const uint8_t* data, size_t size, Goal goal) : data_(data), size_(size), goal_(goal) {
+    Decoder(const uint8_t* data, size_t size, Goal goal, int shift = 0)
+        : data_(data), size_(size), goal_(goal), shift_(shift) {
         bits_.data = data;
         bits_.size = size;
     }
@@ -233,6 +241,8 @@ private:
     bool DecodeAcFirst(const Component& c, int16_t* block);
     bool DecodeAcRefine(const Component& c, int16_t* block);
     void InverseTransformAll();
+    // The dequantized block at (bx, by) of `c` transformed into its plane, reduced by c.shift.
+    static void Store(Component& c, const int16_t* block, int bx, int by);
 
     const uint8_t* data_;
     size_t size_;
@@ -252,6 +262,11 @@ private:
     Component components_[4];
     bool allocated_ = false;
     int scans_ = 0;
+    // Coefficients the scans visit, each scan its blocks times its band (Se - Ss + 1), and the
+    // most allowed: kMaxPasses passes over every coefficient of the frame.
+    uint64_t work_ = 0;
+    uint64_t maxWork_ = 0;
+    int shift_ = 0;  // samples kept: one per 2^shift x 2^shift block of the frame (their mean)
 
     bool adobe_ = false;
     int adobeTransform_ = -1;
@@ -515,12 +530,14 @@ bool Decoder::Allocate() {
     if (blocks > 8 * static_cast<uint64_t>(size_ - pos_)) return Fail("jpeg-truncated");
     for (int i = 0; i < componentCount_; i++) {
         Component& c = components_[i];
+        c.shift = shift_;
         const size_t count = static_cast<size_t>(c.blocksW) * static_cast<size_t>(c.blocksH);
         if (progressive_) {
             c.coefficients.assign(count * 64, 0);
         } else {
-            c.plane.assign(count * 64, 128);
+            c.plane.assign(count * static_cast<size_t>(c.Side() * c.Side()), 128);
         }
+        maxWork_ += static_cast<uint64_t>(kMaxPasses) * 64 * count;
     }
     allocated_ = true;
     return true;
@@ -534,6 +551,17 @@ bool Decoder::DecodeScan() {
         mcusX = c.widthBlocks;
         mcusY = c.heightBlocks;
     }
+    // The coefficients this scan visits. A progressive scan costs its band in every block whatever
+    // its data says (an end-of-band run of 32767 blocks is a few bits), so the sum over the scans is
+    // what bounds the work, not the data size.
+    uint64_t blocks = static_cast<uint64_t>(mcusX) * static_cast<uint64_t>(mcusY);
+    if (scanCount_ > 1) {
+        uint64_t perMcu = 0;
+        for (int i = 0; i < scanCount_; i++) perMcu += static_cast<uint64_t>(components_[scanComponents_[i]].h * components_[scanComponents_[i]].v);
+        blocks *= perMcu;
+    }
+    work_ += blocks * static_cast<uint64_t>(se_ - ss_ + 1);
+    if (work_ > maxWork_) return Fail("jpeg-too-much-work");
     for (int i = 0; i < scanCount_; i++) components_[scanComponents_[i]].dcPredictor = 0;
     eobRun_ = 0;
     nextRestart_ = 0;
@@ -633,8 +661,7 @@ bool Decoder::DecodeSequential(Component& c, int bx, int by) {
         const int natural = kNaturalOrder[k];
         block[natural] = Saturate16(Extend(bits_.Bits(size), size) * static_cast<int32_t>(c.quant[natural]));
     }
-    uint8_t* out = c.plane.data() + static_cast<size_t>(by) * 8 * c.PlaneStride() + static_cast<size_t>(bx) * 8;
-    gfx::IdctBlock(block, out, c.PlaneStride());
+    Store(c, block, bx, by);
     return true;
 }
 
@@ -733,11 +760,36 @@ bool Decoder::DecodeAcRefine(const Component& c, int16_t* block) {
     return true;
 }
 
+void Decoder::Store(Component& c, const int16_t* block, int bx, int by) {
+    const size_t stride = c.PlaneStride();
+    const int side = c.Side();
+    uint8_t* out = c.plane.data() + static_cast<size_t>(by) * static_cast<size_t>(side) * stride +
+                   static_cast<size_t>(bx) * static_cast<size_t>(side);
+    if (c.shift == 0) {
+        gfx::IdctBlock(block, out, stride);
+        return;
+    }
+    // The block at full size, then the mean of each 2^shift square, rounded.
+    uint8_t full[64];
+    gfx::IdctBlock(block, full, 8);
+    const int f = 1 << c.shift;
+    const int half = (f * f) / 2;
+    for (int y = 0; y < side; y++) {
+        for (int x = 0; x < side; x++) {
+            int sum = 0;
+            for (int v = 0; v < f; v++) {
+                for (int u = 0; u < f; u++) sum += full[(y * f + v) * 8 + x * f + u];
+            }
+            out[static_cast<size_t>(y) * stride + static_cast<size_t>(x)] = static_cast<uint8_t>((sum + half) >> (2 * c.shift));
+        }
+    }
+}
+
 void Decoder::InverseTransformAll() {
     for (int i = 0; i < componentCount_; i++) {
         Component& c = components_[i];
         const size_t stride = c.PlaneStride();
-        c.plane.assign(stride * static_cast<size_t>(c.blocksH) * 8, 0);
+        c.plane.assign(stride * static_cast<size_t>(c.blocksH) * static_cast<size_t>(c.Side()), 0);
         if (c.coefficients.empty()) continue;  // allocated with the first scan, always there
         int16_t block[64];
         for (int by = 0; by < c.blocksH; by++) {
@@ -745,7 +797,7 @@ void Decoder::InverseTransformAll() {
                 const int16_t* in = c.coefficients.data() +
                                     (static_cast<size_t>(by) * static_cast<size_t>(c.blocksW) + static_cast<size_t>(bx)) * 64;
                 for (int k = 0; k < 64; k++) block[k] = Saturate16(in[k] * static_cast<int32_t>(c.quant[k]));
-                gfx::IdctBlock(block, c.plane.data() + static_cast<size_t>(by) * 8 * stride + static_cast<size_t>(bx) * 8, stride);
+                Store(c, block, bx, by);
             }
         }
         std::vector<int16_t>().swap(c.coefficients);
@@ -753,8 +805,11 @@ void Decoder::InverseTransformAll() {
 }
 
 bool Decoder::ToImage(gfx::Image& out) {
-    const size_t width = static_cast<size_t>(width_);
-    std::vector<uint32_t> pixels(width * static_cast<size_t>(height_));
+    // The output: ceil(size / 2^shift) per axis.
+    const int outWidth = (width_ + (1 << shift_) - 1) >> shift_;
+    const int outHeight = (height_ + (1 << shift_) - 1) >> shift_;
+    const size_t width = static_cast<size_t>(outWidth);
+    std::vector<uint32_t> pixels(width * static_cast<size_t>(outHeight));
     // Rows of the components at full width: the plane row itself, or a replicated copy.
     std::vector<uint8_t> expanded[4];
     for (int i = 0; i < componentCount_; i++) {
@@ -766,7 +821,7 @@ bool Decoder::ToImage(gfx::Image& out) {
     // Adobe writes CMYK inverted (255 - ink); plain CMYK stores the ink.
     const uint32_t ink = model == Model::Cmyk && !adobe_ ? 255 : 0;
     const gfx::Kernels& kernels = gfx::ActiveKernels();
-    for (int y = 0; y < height_; y++) {
+    for (int y = 0; y < outHeight; y++) {
         const uint8_t* rows[4] = {};
         for (int i = 0; i < componentCount_; i++) {
             const Component& c = components_[i];
@@ -811,8 +866,8 @@ bool Decoder::ToImage(gfx::Image& out) {
             break;
         }
     }
-    out.width = width_;
-    out.height = height_;
+    out.width = outWidth;
+    out.height = outHeight;
     out.pixels = std::move(pixels);
     out.opaque = true;
     return true;
@@ -841,8 +896,9 @@ bool ReadJpegInfo(const uint8_t* data, size_t size, JpegInfo& info, std::string*
     return true;
 }
 
-bool DecodeJpeg(const uint8_t* data, size_t size, gfx::Image& out, std::string* reason) {
-    Decoder decoder(data, size, Decoder::Goal::Color);
+bool DecodeJpeg(const uint8_t* data, size_t size, gfx::Image& out, std::string* reason, int scaleShift) {
+    if (scaleShift < 0 || scaleShift > 3) scaleShift = 0;
+    Decoder decoder(data, size, Decoder::Goal::Color, scaleShift);
     if (!decoder.Run()) {
         if (reason) *reason = decoder.Reason();
         return false;

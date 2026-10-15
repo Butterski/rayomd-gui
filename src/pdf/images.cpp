@@ -184,9 +184,16 @@ bool DecodeMask(const PdfFile& file, const PdfValue& mask, int width, int height
     int mw = 0, mh = 0;
     std::vector<uint8_t> gray;
     if (filter == Filter::Dct) {
-        if (!DecodeJpegGray(reinterpret_cast<const uint8_t*>(raw.data.data()), raw.data.size(), mw, mh, gray, reason)) {
+        // The pixel limit holds for masks too: checked on the header before the decoder sizes
+        // its planes.
+        const uint8_t* data = reinterpret_cast<const uint8_t*>(raw.data.data());
+        JpegInfo info;
+        if (!ReadJpegInfo(data, raw.data.size(), info, reason)) return false;
+        if (static_cast<uint64_t>(info.width) * static_cast<uint64_t>(info.height) > kMaxImagePixels) {
+            SetReason(reason, "size");
             return false;
         }
+        if (!DecodeJpegGray(data, raw.data.size(), mw, mh, gray, reason)) return false;
     } else {
         int bpc = 8;
         if (!ReadSize(file, mask, mw, mh, reason) || !ReadBpc(file, mask, bpc, reason)) return false;
@@ -212,9 +219,94 @@ bool DecodeMask(const PdfFile& file, const PdfValue& mask, int width, int height
     return true;
 }
 
+// Width times height of the image or mask `dict` (resolved), from its JPEG header for DCT; 0
+// when it cannot be read.
+uint64_t PixelCount(const PdfFile& file, const PdfValue& dict) {
+    PdfRawStream raw;
+    if (!file.RawStream(dict, raw)) return 0;
+    Filter filter;
+    const PdfValue* parms = nullptr;
+    if (!ReadFilter(file, raw, filter, parms, nullptr)) return 0;
+    if (filter == Filter::Dct) {
+        JpegInfo info;
+        if (!ReadJpegInfo(reinterpret_cast<const uint8_t*>(raw.data.data()), raw.data.size(), info, nullptr)) return 0;
+        return static_cast<uint64_t>(info.width) * static_cast<uint64_t>(info.height);
+    }
+    const int64_t w = file.Get(dict, "Width").Int(0);
+    const int64_t h = file.Get(dict, "Height").Int(0);
+    if (w <= 0 || h <= 0 || w > 65535 || h > 65535) return 0;
+    return static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+}
+
 } // namespace
 
-bool DecodeImage(const PdfFile& file, const PdfValue& stream, gfx::Image& out, std::string* reason) {
+int ImageLevel(int width, int height, double deviceWidth, double deviceHeight) {
+    if (width <= 0 || height <= 0 || !(deviceWidth >= 0 && deviceWidth < 1e9) ||
+        !(deviceHeight >= 0 && deviceHeight < 1e9)) {
+        return 0;
+    }
+    int level = 0;
+    while (level < kMaxImageLevel) {
+        const int next = level + 1;
+        const int64_t w = (static_cast<int64_t>(width) + (int64_t(1) << next) - 1) >> next;
+        const int64_t h = (static_cast<int64_t>(height) + (int64_t(1) << next) - 1) >> next;
+        if (static_cast<double>(w) < deviceWidth || static_cast<double>(h) < deviceHeight) break;
+        level = next;
+    }
+    return level;
+}
+
+gfx::Image ReduceImage(const gfx::Image& image, int shift) {
+    if (shift <= 0 || image.width <= 0 || image.height <= 0) return image;
+    const int f = 1 << shift;
+    gfx::Image out;
+    out.width = (image.width + f - 1) >> shift;
+    out.height = (image.height + f - 1) >> shift;
+    out.opaque = image.opaque;
+    out.pixels.resize(static_cast<size_t>(out.width) * static_cast<size_t>(out.height));
+    // Channel sums of each output column over the rows of one output row, at most 64 x 64 x 255.
+    std::vector<uint32_t> sums(static_cast<size_t>(out.width) * 4);
+    const size_t iw = static_cast<size_t>(image.width);
+    for (int oy = 0; oy < out.height; oy++) {
+        std::fill(sums.begin(), sums.end(), 0u);
+        const int y0 = oy << shift;
+        const int y1 = std::min(image.height, y0 + f);
+        for (int y = y0; y < y1; y++) {
+            const uint32_t* row = image.pixels.data() + static_cast<size_t>(y) * iw;
+            for (size_t x = 0; x < iw; x++) {
+                const uint32_t p = row[x];
+                uint32_t* s = &sums[(x >> shift) * 4];
+                s[0] += p & 0xFF;
+                s[1] += (p >> 8) & 0xFF;
+                s[2] += (p >> 16) & 0xFF;
+                s[3] += p >> 24;
+            }
+        }
+        uint32_t* dst = out.pixels.data() + static_cast<size_t>(oy) * static_cast<size_t>(out.width);
+        for (int ox = 0; ox < out.width; ox++) {
+            const int x0 = ox << shift;
+            const uint32_t count = static_cast<uint32_t>((std::min(image.width, x0 + f) - x0) * (y1 - y0));
+            const uint32_t* s = &sums[static_cast<size_t>(ox) * 4];
+            uint32_t p = 0;
+            for (int c = 0; c < 4; c++) p |= ((s[c] + count / 2) / count) << (8 * c);
+            dst[ox] = p;
+        }
+    }
+    return out;
+}
+
+uint64_t ImageDecodeCost(const PdfFile& file, const PdfValue& stream) {
+    const PdfValue& dict = file.Resolve(stream);
+    const uint64_t pixels = PixelCount(file, dict);
+    if (pixels == 0) return 0;
+    uint64_t cost = 4 * pixels;
+    const PdfValue& mask = file.Get(dict, "SMask");
+    if (mask.IsStream()) cost += PixelCount(file, mask);
+    return cost;
+}
+
+bool DecodeImage(const PdfFile& file, const PdfValue& stream, gfx::Image& out, std::string* reason, int level,
+                 uint64_t* budget) {
     const PdfValue& dict = file.Resolve(stream);
     PdfRawStream raw;
     if (!file.RawStream(dict, raw)) {
@@ -228,7 +320,18 @@ bool DecodeImage(const PdfFile& file, const PdfValue& stream, gfx::Image& out, s
     Filter filter;
     const PdfValue* parms = nullptr;
     if (!ReadFilter(file, raw, filter, parms, reason)) return false;
+    level = std::clamp(level, 0, kMaxImageLevel);
+    if (budget) {
+        const uint64_t cost = ImageDecodeCost(file, dict);
+        if (cost > *budget) {
+            SetReason(reason, "budget");
+            return false;
+        }
+        *budget -= cost;
+    }
+    const PdfValue& mask = file.Get(dict, "SMask");
     gfx::Image image;
+    int reduced = 0;  // the levels the decoder already applied
     if (filter == Filter::Dct) {
         JpegInfo info;
         const uint8_t* data = reinterpret_cast<const uint8_t*>(raw.data.data());
@@ -237,7 +340,9 @@ bool DecodeImage(const PdfFile& file, const PdfValue& stream, gfx::Image& out, s
             SetReason(reason, "size");
             return false;
         }
-        if (!DecodeJpeg(data, raw.data.size(), image, reason)) return false;
+        // With a soft mask the image is premultiplied at full size first, then reduced.
+        if (!mask.IsStream()) reduced = std::min(level, 3);
+        if (!DecodeJpeg(data, raw.data.size(), image, reason, reduced)) return false;
     } else {
         int width = 0, height = 0, bpc = 8;
         if (!ReadSize(file, dict, width, height, reason) || !ReadBpc(file, dict, bpc, reason)) return false;
@@ -264,7 +369,6 @@ bool DecodeImage(const PdfFile& file, const PdfValue& stream, gfx::Image& out, s
         }
         image.opaque = true;
     }
-    const PdfValue& mask = file.Get(dict, "SMask");
     if (mask.IsStream()) {
         std::vector<uint8_t> alpha;
         if (!DecodeMask(file, mask, image.width, image.height, alpha, reason)) return false;
@@ -281,42 +385,57 @@ bool DecodeImage(const PdfFile& file, const PdfValue& stream, gfx::Image& out, s
         SetReason(reason, "smask");
         return false;
     }
-    out = std::move(image);
+    out = level > reduced ? ReduceImage(image, level - reduced) : std::move(image);
     return true;
 }
 
-std::shared_ptr<const gfx::Image> ImageCache::Load(const PdfFile& file, const PdfValue& entry, std::string* reason) {
-    const uint64_t key = file.ValueHash(entry);
-    if (auto found = Find(key)) return found;
-    auto image = std::make_shared<gfx::Image>();
-    if (!DecodeImage(file, entry, *image, reason)) return nullptr;
-    image->id = key;
-    Insert(key, image);
+std::shared_ptr<const gfx::Image> ImageCache::Load(const PdfFile& file, const PdfValue& entry, std::string* reason,
+                                                   int level, uint64_t* budget, bool* kept) {
+    level = std::clamp(level, 0, kMaxImageLevel);
+    const PdfHash key = file.ValueHash(entry);
+    if (auto found = Find(key, level)) {
+        if (kept) *kept = true;
+        return found;
+    }
+    std::shared_ptr<gfx::Image> image;
+    // A finer level kept: reduced from it, no decoding.
+    for (int finer = level - 1; finer >= 0 && !image; finer--) {
+        if (auto source = Find(key, finer)) image = std::make_shared<gfx::Image>(ReduceImage(*source, level - finer));
+    }
+    if (!image) {
+        image = std::make_shared<gfx::Image>();
+        if (!DecodeImage(file, entry, *image, reason, level, budget)) return nullptr;
+    }
+    image->id = key.lo ^ (static_cast<uint64_t>(level) << 56);
+    const bool inserted = Insert(key, level, image);
+    if (kept) *kept = inserted;
     return image;
 }
 
-std::shared_ptr<const gfx::Image> ImageCache::Find(uint64_t key) {
+std::shared_ptr<const gfx::Image> ImageCache::Find(const PdfHash& key, int level) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = map_.find(key);
+    const auto found = map_.find(Key{key, level});
     if (found == map_.end()) return nullptr;
     lru_.splice(lru_.begin(), lru_, found->second);
     return found->second->image;
 }
 
-void ImageCache::Insert(uint64_t key, std::shared_ptr<const gfx::Image> image) {
-    if (!image) return;
+bool ImageCache::Insert(const PdfHash& key, int level, std::shared_ptr<const gfx::Image> image) {
+    if (!image) return false;
     const size_t bytes = image->pixels.size() * sizeof(uint32_t) + sizeof(gfx::Image) + 64;
-    if (bytes > budget_) return;
+    if (bytes > budget_) return false;
+    const Key k{key, level};
     std::lock_guard<std::mutex> lock(mutex_);
-    if (map_.count(key)) return;
-    lru_.push_front(Entry{key, std::move(image), bytes});
-    map_.emplace(key, lru_.begin());
+    if (map_.count(k)) return false;  // another thread was first; the caller's copy is not the kept one
+    lru_.push_front(Entry{k, std::move(image), bytes});
+    map_.emplace(k, lru_.begin());
     bytes_ += bytes;
-    while (bytes_ > budget_ && !lru_.empty()) {
+    while (bytes_ > budget_ && lru_.size() > 1) {
         bytes_ -= lru_.back().bytes;
         map_.erase(lru_.back().key);
         lru_.pop_back();
     }
+    return true;
 }
 
 size_t ImageCache::Bytes() const {

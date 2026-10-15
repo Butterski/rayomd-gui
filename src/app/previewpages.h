@@ -7,7 +7,9 @@
 #pragma once
 
 #include "gfx/surface.h"
+#include "pdf/reader.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -17,7 +19,6 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace rgui {
@@ -44,7 +45,8 @@ public:
     // (through Platform::PostToUi) after a page got a new image: request a frame there.
     PreviewPages(Platform& platform, const text::FontIndex* fontIndex, std::function<void()> onPageReady,
                  int threads = 0);
-    // Drops the queued pages, waits for the ones being drawn; their results are not delivered.
+    // Drops the queued pages and abandons the ones being drawn (they stop within about a
+    // millisecond), then joins the threads; no result is delivered.
     ~PreviewPages();
     PreviewPages(const PreviewPages&) = delete;
     PreviewPages& operator=(const PreviewPages&) = delete;
@@ -63,7 +65,9 @@ public:
     // Wants `pages` (indices, the most urgent first) at `widthPx` device pixels across. Pages
     // whose image is in the cache get it now; the others are queued for the preview threads in
     // this order, replacing whatever was queued before (pages no longer wanted are dropped
-    // before they start).
+    // before they start). Renders of an older build whose page and width are not wanted now
+    // are abandoned (pdf::RenderEnvironment::cancel): typing never waits behind a page no
+    // longer shown.
     void Request(const std::vector<int>& pages, int widthPx);
 
     // What to draw for `page`: its image, or while that renders the one it showed before;
@@ -72,18 +76,20 @@ public:
     // True when `page` shows this build's page at `widthPx` (or its render failed for good).
     bool Current(int page, int widthPx) const;
 
-    // Bytes of images in the cache, and pages rendered since the start (tests).
+    // Bytes of images in the cache, pages rendered since the start, and renders abandoned
+    // (tests).
     size_t CacheBytes() const;
     uint64_t RenderedCount() const;
+    uint64_t CancelledCount() const;
 
 private:
     struct PageSlot {
         double widthPt = 612;
         double heightPt = 792;
-        uint64_t key = 0;     // PdfFile::PageKey, computed when first wanted
+        pdf::PdfHash key;     // PdfFile::PageKey, computed when first wanted
         bool keyKnown = false;
         std::shared_ptr<const gfx::Image> image;
-        uint64_t imageKey = 0;   // the PageKey and width the image shows
+        pdf::PdfHash imageKey;   // the PageKey and width the image shows
         int imageWidth = 0;
         bool failed = false;     // the render of (key, failedWidth) failed
         int failedWidth = 0;
@@ -92,22 +98,30 @@ private:
         std::shared_ptr<const pdf::PdfFile> pdf;
         int page = 0;
         int widthPx = 0;
-        uint64_t key = 0;
+        pdf::PdfHash key;
+        int generation = 0;
     };
     struct CacheKey {
-        uint64_t pageKey = 0;
+        pdf::PdfHash pageKey;
         int widthPx = 0;
         bool operator==(const CacheKey& o) const { return pageKey == o.pageKey && widthPx == o.widthPx; }
     };
     struct CacheKeyHash {
         size_t operator()(const CacheKey& k) const {
-            return static_cast<size_t>(k.pageKey ^ (static_cast<uint64_t>(static_cast<uint32_t>(k.widthPx)) * 0x9E3779B97F4A7C15ull));
+            return pdf::PdfHashHasher()(k.pageKey) ^
+                   static_cast<size_t>(static_cast<uint64_t>(static_cast<uint32_t>(k.widthPx)) * 0x9E3779B97F4A7C15ull);
         }
     };
     struct CacheEntry {
         CacheKey key;
         std::shared_ptr<const gfx::Image> image;   // nullptr: the render failed
         size_t bytes = 0;
+    };
+    // A render being drawn, and the flag that abandons it.
+    struct InFlight {
+        CacheKey key;
+        int generation = 0;
+        std::shared_ptr<std::atomic<bool>> cancel;
     };
     // Shared with tasks posted to the UI thread, which may run after this is gone.
     struct Link {
@@ -138,11 +152,12 @@ private:
     std::condition_variable wake_;
     bool stop_ = false;
     std::vector<Job> queue_;   // the most urgent first
-    std::unordered_set<CacheKey, CacheKeyHash> inFlight_;
+    std::vector<InFlight> inFlight_;
     std::list<CacheEntry> lru_;   // most recent first
     std::unordered_map<CacheKey, std::list<CacheEntry>::iterator, CacheKeyHash> cache_;
     size_t cacheBytes_ = 0;
     uint64_t rendered_ = 0;
+    uint64_t cancelled_ = 0;
     std::vector<std::thread> threads_;
 };
 

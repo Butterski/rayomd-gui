@@ -5,6 +5,7 @@
 #include "gfx/stroke.h"
 
 #include "common/exact_math.h"
+#include "gfx/budget.h"
 
 namespace rgui::gfx {
 
@@ -114,9 +115,26 @@ public:
     void SetDash(std::vector<double> dash, double phase) {
         dash_ = std::move(dash);
         phase_ = phase;
+        period_ = 0;
+        for (double v : dash_) period_ += v;
+    }
+
+    // Leaves out what lies outside `clip` (device pixels, under `m`), a stroke reaching `reach`
+    // device pixels around its line; spends `budget` (either may be absent).
+    void SetLimits(const Matrix& m, const RectI* clip, double reach, WorkBudget* budget) {
+        m_ = m;
+        budget_ = budget;
+        clipped_ = clip != nullptr;
+        if (clip) {
+            // Polygons: the clip itself with a pixel of slack; segments: grown by the reach.
+            ex0_ = clip->x0 - 1.0, ey0_ = clip->y0 - 1.0, ex1_ = clip->x1 + 1.0, ey1_ = clip->y1 + 1.0;
+            gx0_ = ex0_ - reach, gy0_ = ey0_ - reach, gx1_ = ex1_ + reach, gy1_ = ey1_ + reach;
+        }
     }
 
     void Polyline(const PointF* points, size_t count, bool closed) override {
+        // Every flattened point is work whether or not its polygons show.
+        if (budget_ && (!budget_->Poll() || !budget_->Take(budget_->geometry, count, WorkBudget::Stop::Geometry))) return;
         pts_.clear();
         for (size_t i = 0; i < count; ++i) {
             const V p{points[i].x, points[i].y};
@@ -151,6 +169,53 @@ private:
     Step step_{};
     double arcScale_ = 1;
     Path& out_;
+    Matrix m_;
+    WorkBudget* budget_ = nullptr;
+    bool clipped_ = false;
+    double ex0_ = 0, ey0_ = 0, ex1_ = 0, ey1_ = 0;  // polygons: the clip, a pixel of slack
+    double gx0_ = 0, gy0_ = 0, gx1_ = 0, gy1_ = 0;  // segments: grown by the reach
+    double period_ = 0;
+    uint32_t dashCount_ = 0;
+
+    // True when the n user-space points, in device space, all lie beyond one edge of the
+    // rectangle [x0, x1] x [y0, y1].
+    bool Beyond(const V* p, size_t n, double x0, double y0, double x1, double y1) const {
+        bool left = true, right = true, above = true, below = true;
+        for (size_t i = 0; i < n; ++i) {
+            const double x = m_.a * p[i].x + m_.c * p[i].y + m_.e;
+            const double y = m_.b * p[i].x + m_.d * p[i].y + m_.f;
+            left = left && x < x0;
+            right = right && x > x1;
+            above = above && y < y0;
+            below = below && y > y1;
+        }
+        return left || right || above || below;
+    }
+
+    // The parameters [t0, t1] of the part of segment a-b (user space) within the clip grown by
+    // the stroke's reach (Liang-Barsky in device space); false when none of it is. Outside that
+    // part the stroke, its joins and caps do not show.
+    bool VisibleRange(V a, V b, double& t0, double& t1) const {
+        t0 = 0;
+        t1 = 1;
+        if (!clipped_) return true;
+        const double ax = m_.a * a.x + m_.c * a.y + m_.e, ay = m_.b * a.x + m_.d * a.y + m_.f;
+        const double dx = m_.a * (b.x - a.x) + m_.c * (b.y - a.y), dy = m_.b * (b.x - a.x) + m_.d * (b.y - a.y);
+        // Each edge: the points with p * t <= q are inside.
+        auto edge = [&](double p, double q) {
+            if (p == 0) return q >= 0;
+            const double r = q / p;
+            if (p < 0) {
+                if (r > t1) return false;
+                if (r > t0) t0 = r;
+            } else {
+                if (r < t0) return false;
+                if (r < t1) t1 = r;
+            }
+            return true;
+        };
+        return edge(-dx, ax - gx0_) && edge(dx, gx1_ - ax) && edge(-dy, ay - gy0_) && edge(dy, gy1_ - ay) && t0 < t1;
+    }
     std::vector<double> dash_;
     double phase_ = 0;
     std::vector<V> pts_;
@@ -158,10 +223,13 @@ private:
     std::vector<V> dirs_;
     std::vector<V> poly_;
 
-    // Emits poly_ as a closed polygon wound positively; nothing when it has no area.
+    // Emits poly_ as a closed polygon wound positively; nothing when it has no area or lies
+    // wholly outside the clip, and nothing more once the budget is spent.
     void Emit() {
         const size_t n = poly_.size();
         if (n < 3) return;
+        if (clipped_ && Beyond(poly_.data(), n, ex0_, ey0_, ex1_, ey1_)) return;
+        if (budget_ && !budget_->Take(budget_->geometry, n, WorkBudget::Stop::Geometry)) return;
         double twice = 0;
         for (size_t i = 0; i < n; ++i) twice += Cross(poly_[i], poly_[(i + 1) % n]);
         if (!(twice > 0 || twice < 0)) return;
@@ -276,6 +344,10 @@ private:
 
     // Ends the dash in piece_ (direction `d` where it has no length).
     void FlushPiece(V d) {
+        if (budget_) {
+            if (!budget_->Take(budget_->dashes, 1, WorkBudget::Stop::Dashes)) return;
+            if ((++dashCount_ & 255) == 0 && !budget_->Poll()) return;
+        }
         size_t w = 0;
         for (size_t i = 0; i < piece_.size(); ++i) {
             if (w > 0) {
@@ -293,11 +365,32 @@ private:
         piece_.clear();
     }
 
+    // Moves the dash state (idx, on, remain) along `len` without drawing: whole periods at once,
+    // then at most one step per pattern entry.
+    void SkipDashes(double len, size_t& idx, bool& on, double& remain) const {
+        const size_t k = dash_.size();
+        if (len > remain) {
+            len -= remain;
+            idx = (idx + 1) % k;
+            on = !on;
+            remain = dash_[idx];
+            // A whole period (an even number of entries) comes back to the same entry.
+            if (len > period_) len -= ExactMath::Floor(len / period_) * period_;
+            for (size_t steps = 0; len > remain && steps <= k; ++steps) {
+                len -= remain;
+                idx = (idx + 1) % k;
+                on = !on;
+                remain = dash_[idx];
+            }
+        }
+        remain -= len;
+        if (remain < 0) remain = 0;
+    }
+
     void Dash(bool closed) {
         const size_t n = pts_.size();
         const size_t k = dash_.size();
-        double period = 0;
-        for (double v : dash_) period += v;
+        const double period = period_;
         // Where the phase falls in the pattern.
         double phase = ExactMath::Fmod(phase_, period);
         if (phase < 0) phase += period;
@@ -313,16 +406,39 @@ private:
         if (on) piece_.push_back(pts_[0]);
         const size_t segments = closed ? n : n - 1;
         V d{1, 0};
+        bool hiddenEnd = false;  // the path ends in a part that does not show
+        // Ends the dash in progress at a point that does not show (its cap there does not
+        // either) and moves the pattern along `skip` without making dashes; the dash, if on,
+        // goes on from `to`.
+        auto hide = [&](double skip, V to) {
+            if (on && piece_.size() > 1) FlushPiece(d);
+            piece_.clear();
+            SkipDashes(skip, idx, on, remain);
+            if (on) piece_.push_back(to);
+        };
         for (size_t i = 0; i < segments; ++i) {
+            if (budget_ && budget_->Stopped()) return;
             const V a = pts_[i];
             const V b = pts_[(i + 1) % n];
             const V e = b - a;
             const double len = ExactMath::Sqrt(e.x * e.x + e.y * e.y);
             d = e * (1 / len);
+            // Only the part of the segment within the stroke's reach of the clip makes dashes.
+            double t0 = 0, t1 = 1;
+            if (!VisibleRange(a, b, t0, t1)) {
+                hide(len, b);
+                hiddenEnd = true;
+                continue;
+            }
+            hiddenEnd = false;
+            const V start = t0 > 0 ? a + d * (t0 * len) : a;
+            if (t0 > 0) hide(t0 * len, start);
+            const double visible = (t1 - t0) * len;
             double pos = 0;
-            while (len - pos > remain) {
+            while (visible - pos > remain) {
+                if (budget_ && budget_->Stopped()) return;
                 pos += remain;
-                const V q = a + d * pos;
+                const V q = start + d * pos;
                 if (on) {
                     piece_.push_back(q);
                     FlushPiece(d);
@@ -334,16 +450,23 @@ private:
                 idx = (idx + 1) % k;
                 remain = dash_[idx];
             }
-            remain -= len - pos;
-            if (on) piece_.push_back(b);
+            remain -= visible - pos;
+            if (t1 < 1) {
+                if (on) piece_.push_back(start + d * visible);
+                hide((1 - t1) * len, b);
+                hiddenEnd = true;
+            } else if (on) {
+                piece_.push_back(b);
+            }
         }
-        if (on) FlushPiece(d);
+        if (on && !(hiddenEnd && piece_.size() <= 1)) FlushPiece(d);
     }
 };
 
 } // namespace
 
-void StrokeOutline(const Path& path, const Matrix& m, const StrokeStyle& style, Path& outline) {
+void StrokeOutline(const Path& path, const Matrix& m, const StrokeStyle& style, Path& outline,
+                   const StrokeLimits* limits) {
     outline.Clear();
     double s = ExactMath::Sqrt(m.a * m.d - m.b * m.c > 0 ? m.a * m.d - m.b * m.c : m.b * m.c - m.a * m.d);
     if (!(s >= 1e-6)) s = 1e-6;  // NaN too
@@ -358,6 +481,30 @@ void StrokeOutline(const Path& path, const Matrix& m, const StrokeStyle& style, 
     const float tolerance = static_cast<float>(kFlattenTolerance / s);
 
     Stroker stroker(style, hw, steps, outline);
+    // How far from its line the stroke reaches in device pixels: half the width (through the
+    // Frobenius norm of m, at least its largest stretch) times the miter limit for miter joins,
+    // or 1.5 for square caps and round joins, plus the flattening tolerance.
+    FlattenCull cull;
+    const FlattenCull* cullPtr = nullptr;
+    if (limits) {
+        const RectI* clip = nullptr;
+        double reach = 0;
+        if (!limits->clip.Empty()) {
+            const double norm = ExactMath::Sqrt(m.a * m.a + m.b * m.b + m.c * m.c + m.d * m.d);
+            const double factor = style.join == LineJoin::Miter && style.miterLimit > 1.5 ? style.miterLimit : 1.5;
+            reach = hw * norm * factor + 1.0;
+            if (reach < 1e9) {
+                clip = &limits->clip;
+                cull.toDevice = m;
+                cull.x0 = clip->x0 - 1.0 - reach;
+                cull.y0 = clip->y0 - 1.0 - reach;
+                cull.x1 = clip->x1 + 1.0 + reach;
+                cull.y1 = clip->y1 + 1.0 + reach;
+                cullPtr = &cull;
+            }
+        }
+        stroker.SetLimits(m, clip, reach, limits->budget);
+    }
 
     // The dash pattern: an odd count repeats twice; negative, non-finite or all-zero ones are solid.
     if (!style.dash.empty()) {
@@ -383,13 +530,13 @@ void StrokeOutline(const Path& path, const Matrix& m, const StrokeStyle& style, 
                 }
             } measure;
             std::vector<PointF> scratch;
-            FlattenPolylines(path, {}, tolerance, scratch, measure);
+            FlattenPolylines(path, {}, tolerance, scratch, measure, cullPtr);
             if (measure.length / period <= kMaxDashes) stroker.SetDash(std::move(dash), phase);
         }
     }
 
     std::vector<PointF> scratch;
-    FlattenPolylines(path, {}, tolerance, scratch, stroker);
+    FlattenPolylines(path, {}, tolerance, scratch, stroker, cullPtr);
 }
 
 } // namespace rgui::gfx

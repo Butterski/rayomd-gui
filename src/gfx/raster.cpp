@@ -13,6 +13,7 @@
 #include "gfx/raster.h"
 
 #include "common/exact_math.h"
+#include "gfx/budget.h"
 #include "gfx/kernels.h"
 
 #include <algorithm>
@@ -58,6 +59,8 @@ struct Rasterizer::Impl {
     std::vector<Segment> segments;
     int32_t minX = 0, minY = 0, maxX = -1, maxY = -1;  // subpixels; empty while maxX < minX
     bool rightDropped = false;
+    WorkBudget* budget = nullptr;
+    uint32_t added = 0;  // segments taken since the start, to poll the cancel flag now and then
 
     std::vector<int32_t> cells;   // kBandRows rows of `width` {cover, area}; all zero between bands
     std::vector<uint8_t> alpha;
@@ -276,6 +279,10 @@ void Rasterizer::Reset(RectI clip) {
 void Rasterizer::AddLine(PointF from, PointF to) {
     Impl& r = *impl_;
     if (r.width <= 0) return;
+    if (r.budget) {
+        if (!r.budget->Take(r.budget->geometry, 1, WorkBudget::Stop::Geometry)) return;
+        if ((++r.added & 4095) == 0 && !r.budget->Poll()) return;
+    }
     const double x0 = from.x, y0 = from.y, x1 = to.x, y1 = to.y;
     // NaN and infinities fail these comparisons; floats are finite below 3.5e38.
     if (!(x0 > -1e300 && x0 < 1e300 && y0 > -1e300 && y0 < 1e300 && x1 > -1e300 && x1 < 1e300 &&
@@ -296,9 +303,34 @@ struct RasterLineSink final : LineSink {
 } // namespace
 
 void Rasterizer::AddPath(const Path& path, const Matrix& m, float tolerance) {
-    if (impl_->width <= 0) return;
+    Impl& r = *impl_;
+    if (r.width <= 0) return;
     RasterLineSink sink(*this);
-    Flatten(path, m, tolerance, sink);
+    FlattenCull cull;
+    cull.x0 = r.clip.x0 - 1.0;
+    cull.y0 = r.clip.y0 - 1.0;
+    cull.x1 = r.clip.x1 + 1.0;
+    cull.y1 = r.clip.y1 + 1.0;
+    Flatten(path, m, tolerance, sink, &cull);
+}
+
+void Rasterizer::SetBudget(WorkBudget* budget) {
+    impl_->budget = budget;
+}
+
+template <typename T>
+static void TrimVector(std::vector<T>& v, size_t bytes) {
+    if (v.capacity() * sizeof(T) > bytes) std::vector<T>().swap(v);
+}
+
+void Rasterizer::Trim(size_t bytes) {
+    Impl& r = *impl_;
+    TrimVector(r.segments, bytes);
+    TrimVector(r.order, bytes);
+    TrimVector(r.bandStart, bytes);
+    TrimVector(r.active, bytes);
+    TrimVector(r.cells, bytes);  // all zero between sweeps: dropping it keeps that
+    TrimVector(r.alpha, bytes);
 }
 
 RectI Rasterizer::Bounds() const {
@@ -343,6 +375,7 @@ void Rasterizer::Sweep(FillRule rule, SpanSink& sink) {
     for (int band = firstBand; band <= lastBand; ++band) {
         for (uint32_t i = r.bandStart[band]; i < r.bandStart[band + 1]; ++i) r.active.push_back(r.order[i]);
         if (r.active.empty()) continue;
+        if (r.budget && !r.budget->Poll()) return;
         const int bandTop = band * kBandRows;
         const int rowsInBand = std::min(kBandRows, r.height - bandTop);
         for (int i = 0; i < rowsInBand; ++i) r.rows[i] = {INT32_MAX, -1, 0};
@@ -354,6 +387,19 @@ void Rasterizer::Sweep(FillRule rule, SpanSink& sink) {
                 r.active.pop_back();
             } else {
                 ++i;
+            }
+        }
+        if (r.budget) {
+            // The band's pixels are paid before any row is accumulated; when they cannot be, the
+            // band's cells are cleared for the next sweep and the sweep ends.
+            uint64_t pixels = 0;
+            for (int i = 0; i < rowsInBand; ++i) {
+                const RowStat& st = r.rows[i];
+                if (st.maxCell >= st.minCell) pixels += static_cast<uint64_t>((st.coverSum == 0 ? st.maxCell + 1 : r.width) - st.minCell);
+            }
+            if (!r.budget->Take(r.budget->pixels, pixels, WorkBudget::Stop::Pixels)) {
+                std::fill_n(r.cells.data(), 2 * static_cast<size_t>(rowsInBand) * w, 0);
+                return;
             }
         }
         for (int i = 0; i < rowsInBand; ++i) {

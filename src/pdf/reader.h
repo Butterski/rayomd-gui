@@ -39,6 +39,22 @@ struct PdfRawStream {
     const PdfValue* decodeParms = nullptr;  // /DecodeParms resolved; nullptr when absent
 };
 
+// A content hash of 128 bits: keyed SipHash-1-3-128, the key drawn once per process. Caches
+// that hold what a hash names (page images, decoded images, fonts) take equal hashes for equal
+// content: 128 keyed bits make a collision, which would show the wrong image or font, out of
+// reach of a crafted document. Not stable across processes.
+struct PdfHash {
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+
+    bool operator==(const PdfHash& o) const { return lo == o.lo && hi == o.hi; }
+    bool operator!=(const PdfHash& o) const { return !(*this == o); }
+};
+
+struct PdfHashHasher {
+    size_t operator()(const PdfHash& h) const { return static_cast<size_t>(h.lo ^ (h.hi >> 7)); }
+};
+
 class PdfFile {
 public:
     // Reads the cross-reference table from `startxref` and the page tree. Nullptr, with
@@ -76,10 +92,10 @@ public:
     // A stream's data as stored with its /Filter and /DecodeParms. False when it is no stream.
     bool RawStream(const PdfValue& stream, PdfRawStream& out) const;
 
-    // FNV-1a-64 of a value: its type, contents and stream data, with every reference replaced by
+    // The hash of a value: its type, contents and stream data, with every reference replaced by
     // the hash of the object it names (each object hashed once per file) and the /Parent entry
     // of dictionaries left out. Object numbers never enter it.
-    uint64_t ValueHash(const PdfValue& value) const;
+    PdfHash ValueHash(const PdfValue& value) const;
 
     int PageCount() const { return pageCount_; }
     // The page's dictionary.
@@ -92,14 +108,15 @@ public:
     // joined with a newline (kept after the first call). False, with `error` as StreamData sets
     // it (or "contents" for a /Contents that is neither), when a stream cannot be read.
     bool PageContent(int page, std::string_view& content, std::string* error) const;
-    // FNV-1a-64 of the page's MediaBox, its content streams as stored and ValueHash of its
+    // The hash of the page's MediaBox, its content streams as stored and ValueHash of its
     // resources: equal for pages that look the same in two builds, whatever their object numbers.
-    uint64_t PageKey(int page) const;
+    PdfHash PageKey(int page) const;
 
 private:
     struct Slot;
     struct Page;
     struct HashContext;
+    class Hasher;
 
     PdfFile();
     bool ReadXref(std::string* error);
@@ -107,8 +124,8 @@ private:
     bool ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out) const;
     bool StreamEnd(size_t start, size_t& end) const;
     bool GenerationMatches(const PdfValue& ref) const;
-    uint64_t ObjectHash(uint32_t num, HashContext& context) const;
-    void HashInto(const PdfValue& value, uint64_t& hash, HashContext& context) const;
+    PdfHash ObjectHash(uint32_t num, HashContext& context) const;
+    void HashInto(const PdfValue& value, Hasher& hash, HashContext& context) const;
 
     std::string bytes_;
     PdfValue trailer_;

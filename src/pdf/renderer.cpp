@@ -2,11 +2,13 @@
 #include "pdf/renderer.h"
 
 #include "common/exact_math.h"
+#include "gfx/budget.h"
 #include "gfx/canvas.h"
 #include "pdf/content.h"
 #include "text/glyphcache.h"
 
 #include <algorithm>
+#include <list>
 #include <memory>
 #include <unordered_map>
 
@@ -24,11 +26,12 @@ namespace {
 using gfx::Matrix;
 using RayoMd::ExactMath::Floor;
 using RayoMd::ExactMath::LRound;
+using RayoMd::ExactMath::Sqrt;
 
 constexpr size_t kMaxSaves = 64;
 constexpr int kMaxFormDepth = 16;
-// Operators one page may run, its forms' included: a page of any content ends in bounded time.
-constexpr uint32_t kMaxOperators = 1u << 21;
+// Scratch buffers a rendering thread keeps between pages; bigger ones are freed after the page.
+constexpr size_t kKeptScratchBytes = 8u << 20;
 
 bool Finite(double v) {
     return v == v && v - v == 0;
@@ -95,6 +98,20 @@ struct GState {
     int mode = 0;
 };
 
+// An image resampled for its place on a page (gfx::Canvas::SampleImage).
+struct SampledImage {
+    std::weak_ptr<const gfx::Image> image;  // expired once the image is gone: no stale match
+    Matrix m;
+    int surfaceWidth = 0;
+    int surfaceHeight = 0;
+    gfx::ImageSamples samples;
+
+    size_t Bytes() const { return samples.pixels.size() * sizeof(uint32_t) + sizeof(SampledImage); }
+};
+
+// Resampled images a rendering thread keeps (an image page re-renders by blending only).
+constexpr size_t kSampledBytes = 32u << 20;
+
 // What each rendering thread keeps from page to page.
 struct Scratch {
     text::GlyphCache glyphs;
@@ -102,6 +119,8 @@ struct Scratch {
     gfx::Path glyphPath;
     gfx::Path userPath;
     gfx::Path region;
+    std::list<SampledImage> sampled;  // most recently used first, at most kSampledBytes
+    size_t sampledBytes = 0;
 };
 
 Scratch& ThreadScratch() {
@@ -114,8 +133,9 @@ class Interpreter {
 
 public:
     Interpreter(const PdfFile& file, const RenderEnvironment& env, RenderStats& stats, Scratch& scratch,
-                const Matrix& base)
-        : file_(file), env_(env), stats_(stats), s_(scratch), canvas_(scratch.canvas) {
+                gfx::WorkBudget& budget, const Matrix& base, uint64_t maskLimit)
+        : file_(file), env_(env), stats_(stats), s_(scratch), canvas_(scratch.canvas), budget_(budget),
+          maskLimit_(maskLimit) {
         gs_.ctm = base;
     }
 
@@ -124,12 +144,18 @@ public:
         std::string_view op;
         std::vector<PdfValue> operands;
         while (!stopped_ && lexer.Next(op, operands)) {
-            if (++stats_.operators > kMaxOperators) {
+            if (++stats_.operators > RenderLimits::kOperators) {
                 stats_.AddUnknown("operators");
                 stopped_ = true;
                 break;
             }
+            if ((stats_.operators & 63) == 0 && !budget_.Poll()) {
+                stopped_ = true;
+                break;
+            }
             Operator(op, operands, resources, depth);
+            // A limit of the canvas, the rasterizer or the stroker ran out (RenderPage names it).
+            if (budget_.Stopped()) stopped_ = true;
         }
     }
 
@@ -185,16 +211,35 @@ private:
         }
     }
 
-    // Intersects the clip with `path` (user space) under the CTM.
+    // Intersects the clip with `path` (user space) under the CTM. A clip set again at the same
+    // save level (no q since the last one) is intersected into the top clip in place: Q drops
+    // both at once anyway. Past kClipDepth clips or the page's mask bytes, every clip is.
     void Clip(const gfx::Path& path, gfx::FillRule rule) {
-        RectI rect;
-        if (PixelRect(path, rect)) {
-            canvas_.PushClipRect(rect);
-        } else {
-            canvas_.PushClipPath(path, gs_.ctm, rule);
+        const size_t levelClips = stack_.empty() ? 0 : stack_.back().clips;
+        bool inPlace = clipDepth_ > levelClips;
+        if (!inPlace && clipDepth_ > 0 &&
+            (clipDepth_ >= RenderLimits::kClipDepth || canvas_.MaskBytes() > maskLimit_)) {
+            stats_.AddUnknown("clip-depth");
+            inPlace = true;
         }
-        clipDepth_++;
+        RectI rect;
+        const bool isRect = PixelRect(path, rect);
+        if (inPlace) {
+            if (isRect) {
+                canvas_.IntersectClipRect(rect);
+            } else {
+                canvas_.IntersectClipPath(path, gs_.ctm, rule);
+            }
+        } else {
+            if (isRect) {
+                canvas_.PushClipRect(rect);
+            } else {
+                canvas_.PushClipPath(path, gs_.ctm, rule);
+            }
+            clipDepth_++;
+        }
         gs_.clips = clipDepth_;
+        stats_.maskBytes = std::max<uint64_t>(stats_.maskBytes, canvas_.MaskBytes());
     }
 
     // A rectangle path whose device corners fall on whole pixels: a rectangle clip, no mask.
@@ -418,13 +463,44 @@ private:
         return (m.b < 0 ? -m.b : m.b) <= eps && (m.c < 0 ? -m.c : m.c) <= eps && (m.a + m.d < 0 ? -(m.a + m.d) : m.a + m.d) <= eps;
     }
 
+    // Whether a glyph drawn with `trm` (glyph space in ems to device) can touch the clip: its em
+    // box grown to [-2, 3] em, mapped, grown by 32 px (what RasterizeGlyph keeps of a glyph lies
+    // within 1.5 em + 32 px of its origin).
+    bool GlyphVisible(const Matrix& trm) const {
+        double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        for (int i = 0; i < 4; i++) {
+            double x = 0, y = 0;
+            trm.Apply(i & 1 ? 3.0 : -2.0, i & 2 ? 3.0 : -2.0, x, y);
+            if (!Finite(x) || !Finite(y)) return false;
+            if (i == 0 || x < x0) x0 = x;
+            if (i == 0 || x > x1) x1 = x;
+            if (i == 0 || y < y0) y0 = y;
+            if (i == 0 || y > y1) y1 = y;
+        }
+        const RectI clip = canvas_.ClipBounds();
+        return x1 + 32 >= clip.x0 && x0 - 32 <= clip.x1 && y1 + 32 >= clip.y0 && y0 - 32 <= clip.y1;
+    }
+
     void DrawGlyph(const text::GlyphSource& source, uint16_t glyph, const Matrix& fontToText, bool fill, bool stroke) {
         const Matrix trm = fontToText.Multiply(tm_).Multiply(gs_.ctm);
-        stats_.glyphs++;
-        if (fill && !stroke && Upright(trm) && trm.a <= text::GlyphCache::kMaxSize && trm.e > -1e8 && trm.e < 1e8 &&
-            trm.f > -1e8 && trm.f < 1e8) {
+        if (++stats_.glyphs > RenderLimits::kGlyphs) {
+            stats_.AddUnknown("budget");
+            stopped_ = true;
+            return;
+        }
+        if (!budget_.Poll()) {
+            stopped_ = true;
+            return;
+        }
+        // A stroke reaches past the em box by its width: the stroker leaves out what is outside.
+        if (!stroke && !GlyphVisible(trm)) {
+            stats_.glyphsCulled++;
+            return;
+        }
+        if (fill && !stroke && Upright(trm) && trm.a <= RenderLimits::kMaxCachedGlyphSize && trm.e > -1e8 &&
+            trm.e < 1e8 && trm.f > -1e8 && trm.f < 1e8) {
             const text::GlyphKey key = text::GlyphCache::KeyFor(source, glyph, static_cast<float>(trm.a), static_cast<float>(trm.e));
-            const text::GlyphBitmap* bitmap = s_.glyphs.Get(source, key);
+            const text::GlyphBitmap* bitmap = s_.glyphs.Get(source, key, &budget_);
             if (bitmap && bitmap->width > 0 && bitmap->height > 0) {
                 const int x0 = static_cast<int>(Floor(trm.e)) + bitmap->left;
                 const int y0 = static_cast<int>(LRound(trm.f)) + bitmap->top;
@@ -458,7 +534,7 @@ private:
         const bool stroke = (mode == 1 || mode == 2) && CanStroke();
         size_t at = 0;
         PdfGlyph g;
-        while (font->Next(bytes, at, g)) {
+        while (!stopped_ && font->Next(bytes, at, g)) {
             if ((fill || stroke) && source) DrawGlyph(*source, g.glyph, fontToText, fill, stroke);
             const double tx = (g.width / 1000.0 * size + gs_.charSpacing + (g.wordSpace ? gs_.wordSpacing : 0)) * th;
             tm_ = Matrix::Translate(tx, 0).Multiply(tm_);
@@ -532,24 +608,88 @@ private:
     // ---- XObjects ------------------------------------------------------------------------
 
     void DrawImage(const PdfValue& image, const PdfValue& entry) {
-        auto found = images_.find(&image);
-        if (found == images_.end()) {
-            std::string reason;
-            std::shared_ptr<const gfx::Image> decoded;
-            if (env_.images) {
-                decoded = env_.images->Load(file_, entry, &reason);
-            } else {
-                auto own = std::make_shared<gfx::Image>();
-                if (DecodeImage(file_, image, *own, &reason)) decoded = std::move(own);
-            }
-            if (!decoded) stats_.AddUnknown("image:" + (reason.empty() ? std::string("unreadable") : reason));
-            found = images_.emplace(&image, std::move(decoded)).first;
-        }
-        if (!found->second || !(gs_.fillAlpha > 0)) return;
+        if (!(gs_.fillAlpha > 0)) return;
         // Image space: row 0 at the top of the unit square, (0, 1) in user space.
         const Matrix flip{1, 0, 0, -1, 0, 1};
-        canvas_.DrawImage(*found->second, flip.Multiply(gs_.ctm), ToByte(gs_.fillAlpha), true);
+        const Matrix m = flip.Multiply(gs_.ctm);
+        // The level whose pixels are still at least as many as the device pixels it covers.
+        const int64_t w = file_.Get(image, "Width").Int(0), h = file_.Get(image, "Height").Int(0);
+        const int level = w > 0 && h > 0 && w <= 65535 && h <= 65535
+                              ? ImageLevel(static_cast<int>(w), static_cast<int>(h), Sqrt(m.a * m.a + m.b * m.b),
+                                           Sqrt(m.c * m.c + m.d * m.d))
+                              : 0;
+        static_assert(kMaxImageLevel < 8, "levels fit the low bits of an aligned address");
+        const uintptr_t memo = reinterpret_cast<uintptr_t>(&image) | static_cast<uintptr_t>(level);
+        std::shared_ptr<const gfx::Image> decoded;
+        auto found = images_.find(memo);
+        if (found != images_.end()) {
+            decoded = found->second;
+        } else {
+            std::string reason;
+            bool kept = false;
+            if (env_.images) {
+                decoded = env_.images->Load(file_, entry, &reason, level, &imageBudget_, &kept);
+            } else {
+                auto own = std::make_shared<gfx::Image>();
+                if (DecodeImage(file_, image, *own, &reason, level, &imageBudget_)) decoded = std::move(own);
+            }
+            stats_.imageBytes = RenderLimits::kImageBytes - imageBudget_;
+            if (reason == "budget") {
+                stats_.AddUnknown("budget");
+                stopped_ = true;
+                return;
+            }
+            if (!decoded) stats_.AddUnknown("image:" + (reason.empty() ? std::string("unreadable") : reason));
+            // Kept for later uses on this page when the cache keeps it anyway, or while the page
+            // holds little of its own.
+            const uint64_t bytes = decoded ? decoded->pixels.size() * sizeof(uint32_t) : 0;
+            if (kept || heldImageBytes_ + bytes <= RenderLimits::kHeldImageBytes) {
+                if (!kept) heldImageBytes_ += bytes;
+                images_.emplace(memo, decoded);
+            }
+        }
+        if (!decoded) return;
+        DrawSampled(decoded, m, ToByte(gs_.fillAlpha));
         stats_.images++;
+    }
+
+    // Draws `image` through the thread's resampled copies: the samples of the same image at the
+    // same matrix on a page of the same size from an earlier render (an edit elsewhere on the
+    // page), or new ones kept for the next render.
+    void DrawSampled(const std::shared_ptr<const gfx::Image>& image, const Matrix& m, uint8_t opacity) {
+        const gfx::Surface& target = canvas_.Target();
+        auto& list = s_.sampled;
+        for (auto it = list.begin(); it != list.end(); ++it) {
+            if (it->surfaceWidth != target.width || it->surfaceHeight != target.height || !SameMatrix(it->m, m)) continue;
+            const std::shared_ptr<const gfx::Image> held = it->image.lock();
+            if (held != image) continue;
+            list.splice(list.begin(), list, it);
+            canvas_.DrawSamples(list.front().samples, m, opacity);
+            stats_.imagesReused++;
+            return;
+        }
+        // What the image covers, roughly: too big a copy is not worth keeping.
+        const double area = (m.a < 0 ? -m.a : m.a) * (m.d < 0 ? -m.d : m.d) + (m.b < 0 ? -m.b : m.b) * (m.c < 0 ? -m.c : m.c);
+        SampledImage entry;
+        if (!(area < static_cast<double>(kSampledBytes / 4)) || !canvas_.SampleImage(*image, m, true, entry.samples)) {
+            canvas_.DrawImage(*image, m, opacity, true);
+            return;
+        }
+        canvas_.DrawSamples(entry.samples, m, opacity);
+        entry.image = image;
+        entry.m = m;
+        entry.surfaceWidth = target.width;
+        entry.surfaceHeight = target.height;
+        list.push_front(std::move(entry));
+        s_.sampledBytes += list.front().Bytes();
+        while (s_.sampledBytes > kSampledBytes && !list.empty()) {
+            s_.sampledBytes -= list.back().Bytes();
+            list.pop_back();
+        }
+    }
+
+    static bool SameMatrix(const Matrix& x, const Matrix& y) {
+        return x.a == y.a && x.b == y.b && x.c == y.c && x.d == y.d && x.e == y.e && x.f == y.f;
     }
 
     void DrawForm(const PdfValue& form, const PdfValue& resources, int depth) {
@@ -961,6 +1101,10 @@ private:
     RenderStats& stats_;
     Scratch& s_;
     gfx::Canvas& canvas_;
+    gfx::WorkBudget& budget_;
+    uint64_t maskLimit_;
+    uint64_t imageBudget_ = RenderLimits::kImageBytes;
+    uint64_t heldImageBytes_ = 0;  // memoized images the image cache does not keep
     GState gs_;
     std::vector<GState> stack_;
     size_t floor_ = 0;          // saves a Q may not restore past (the running form's)
@@ -975,7 +1119,8 @@ private:
     Matrix tm_;
     Matrix tlm_;
     std::unordered_map<const PdfValue*, std::shared_ptr<const PdfFont>> fonts_;
-    std::unordered_map<const PdfValue*, std::shared_ptr<const gfx::Image>> images_;
+    // Decoded images by dictionary address with the level in its low bits (values are aligned).
+    std::unordered_map<uintptr_t, std::shared_ptr<const gfx::Image>> images_;
 };
 
 } // namespace
@@ -1005,16 +1150,26 @@ bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, Ren
     const double h = box.Height() * s;
     if (!(h < kMaxRenderSide + 0.5)) return false;
     const int heightPx = std::max(1, static_cast<int>(LRound(h)));
-    if (heightPx > kMaxRenderSide ||
-        static_cast<uint64_t>(widthPx) * static_cast<uint64_t>(heightPx) > kMaxRenderPixels) {
+    const uint64_t pagePixels = static_cast<uint64_t>(widthPx) * static_cast<uint64_t>(heightPx);
+    if (heightPx > kMaxRenderSide || pagePixels > kMaxRenderPixels) return false;
+    gfx::WorkBudget budget;
+    budget.cancel = environment.cancel;
+    budget.geometry = RenderLimits::kGeometry;
+    budget.pixels = RenderLimits::kPixelsPerPagePixel * pagePixels + RenderLimits::kPixelsBase;
+    budget.dashes = RenderLimits::kDashes;
+    if (!budget.Poll()) {
+        st.cancelled = true;
         return false;
     }
-    std::vector<uint32_t> pixels(static_cast<size_t>(widthPx) * static_cast<size_t>(heightPx), 0xFFFFFFFFu);
+    const uint64_t pixelBudget = budget.pixels;
+    std::vector<uint32_t> pixels(static_cast<size_t>(pagePixels), 0xFFFFFFFFu);
     Scratch& scratch = ThreadScratch();
     scratch.glyphs.BeginFrame();
     scratch.canvas.SetTarget(gfx::Surface{pixels.data(), widthPx, heightPx, widthPx});
+    scratch.canvas.SetBudget(&budget);
     {
-        Interpreter interpreter(file, environment, st, scratch, Matrix{s, 0, 0, -s, -box.x0 * s, box.y1 * s});
+        Interpreter interpreter(file, environment, st, scratch, budget, Matrix{s, 0, 0, -s, -box.x0 * s, box.y1 * s},
+                                RenderLimits::kMaskPerPagePixel * pagePixels + RenderLimits::kMaskBase);
         std::string_view content;
         std::string error;
         if (file.PageContent(page, content, &error)) {
@@ -1023,7 +1178,24 @@ bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, Ren
             st.AddUnknown(error.empty() ? "contents" : error);
         }
     }
+    scratch.canvas.SetBudget(nullptr);
     scratch.canvas.SetTarget(gfx::Surface{});
+    // A page with unusually large paths, masks or outlines leaves no big buffers behind.
+    scratch.canvas.Trim(kKeptScratchBytes);
+    for (gfx::Path* path : {&scratch.glyphPath, &scratch.userPath, &scratch.region}) {
+        if (path->Points().capacity() * sizeof(gfx::PointF) > kKeptScratchBytes) *path = gfx::Path();
+    }
+    st.geometry = RenderLimits::kGeometry - budget.geometry;
+    st.pixels = pixelBudget - budget.pixels;
+    st.dashes = RenderLimits::kDashes - budget.dashes;
+    st.glyphCacheBytes = scratch.glyphs.Bytes();
+    switch (budget.stop) {
+    case gfx::WorkBudget::Stop::None: break;
+    case gfx::WorkBudget::Stop::Cancelled: st.cancelled = true; return false;
+    case gfx::WorkBudget::Stop::Geometry: st.AddUnknown("geometry"); break;
+    case gfx::WorkBudget::Stop::Pixels:
+    case gfx::WorkBudget::Stop::Dashes: st.AddUnknown("budget"); break;
+    }
     out.width = widthPx;
     out.height = heightPx;
     out.pixels = std::move(pixels);

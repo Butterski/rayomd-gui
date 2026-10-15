@@ -11,6 +11,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace rgui::gfx {
+struct WorkBudget;
+}
+
 namespace rgui::text {
 
 struct GlyphKey {
@@ -59,7 +63,13 @@ public:
     // outline through UnitsToEm, scaled to the size, y flipped and shifted by the phase). A
     // glyph whose outline cannot be read is cached empty. The pointer stays valid until a Get
     // after the next BeginFrame evicts it, or Clear.
-    const GlyphBitmap* Get(const GlyphSource& source, const GlyphKey& key);
+    //
+    // The cache never holds more than twice its budget: a miss that would pass that ceiling (the
+    // current frame's entries cannot be evicted) is rasterized into a scratch bitmap of its own
+    // and not kept, the pointer then valid until the next Get. `budget` (nullptr: unlimited) pays
+    // for the rasterization; a glyph left incomplete because the budget stopped is not kept
+    // either.
+    const GlyphBitmap* Get(const GlyphSource& source, const GlyphKey& key, gfx::WorkBudget* budget = nullptr);
     const GlyphBitmap* Get(const GlyphSource& source, uint16_t glyph, float sizePx, float penX) {
         return Get(source, KeyFor(source, glyph, sizePx, penX));
     }
@@ -67,12 +77,14 @@ public:
     const GlyphBitmap* Find(const GlyphKey& key) const;
 
     // Starts a frame: entries used since the previous BeginFrame become evictable. Entries used
-    // in the current frame are never evicted, so the cache may exceed its budget for one frame.
+    // in the current frame are not evicted, so the cache may exceed its budget for one frame, up
+    // to the ceiling of twice the budget.
     void BeginFrame() { frame_++; }
     void Clear();
 
     size_t Bytes() const { return bytes_; }
     size_t Count() const { return map_.size(); }
+    size_t Budget() const { return budget_; }
 
 private:
     struct Entry {
@@ -86,13 +98,16 @@ private:
     void Evict();
 
     size_t budget_;
+    GlyphBitmap scratch_;  // a glyph not kept (over the ceiling)
     size_t bytes_ = 0;
     uint64_t frame_ = 1;
     List lru_;   // most recent first
     std::unordered_map<GlyphKey, List::iterator, GlyphKeyHash> map_;
 };
 
-// Rasterizes one glyph (what GlyphCache::Get does on a miss).
-void RasterizeGlyph(const GlyphSource& source, uint16_t glyph, float sizePx, float phasePx, GlyphBitmap& out);
+// Rasterizes one glyph (what GlyphCache::Get does on a miss), paying `budget` (nullptr: free):
+// the bitmap's pixels, the segments and the swept pixels.
+void RasterizeGlyph(const GlyphSource& source, uint16_t glyph, float sizePx, float phasePx, GlyphBitmap& out,
+                    gfx::WorkBudget* budget = nullptr);
 
 } // namespace rgui::text

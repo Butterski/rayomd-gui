@@ -4,6 +4,7 @@
 
 #include "common/file_io.h"
 #include "core/inflate.h"
+#include "gfx/budget.h"
 #include "gfx/canvas.h"
 #include "gfx/crc32.h"
 #include "gfx/kernels.h"
@@ -13,7 +14,10 @@
 #include "gfx/stroke.h"
 #include "gfx/svgpath.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -853,4 +857,181 @@ RGUI_TEST("gfx.raster_random_triangles") {
     }
     CHECK(areas);
     CHECK(mirrors);
+}
+
+namespace {
+
+// Segments of a flattening, and the rasterizer fed segment by segment: no culling.
+struct CountLines final : LineSink {
+    Rasterizer* raster = nullptr;
+    size_t lines = 0;
+    void Line(PointF from, PointF to) override {
+        lines++;
+        if (raster) raster->AddLine(from, to);
+    }
+};
+
+} // namespace
+
+// Curves beyond one edge of the clip are flattened as chords: the same coverage, a fraction of
+// the segments.
+RGUI_TEST("gfx.flatten_cull") {
+    Path p;
+    AddCircle(p, -30, 32, 40);  // its left half lies wholly left of the clip, its cover still counts
+    for (int i = 0; i < 1000; ++i) {
+        // Far right, above and below: wiggly curves that would take 256 pieces each.
+        const float o = static_cast<float>(i % 50);
+        p.MoveTo(100 + o, 10);
+        p.CubicTo(5000, -3000, 3000, 9000, 100 + o, 50);
+        p.Close();
+        p.MoveTo(10 + o, -100);
+        p.CubicTo(4000, -5000, -4000, -6000, 20 + o, -120);
+        p.Close();
+    }
+    const RectI clip{0, 0, 64, 64};
+    WorkBudget budget;
+    Rasterizer culled;
+    culled.SetBudget(&budget);
+    culled.Reset(clip);
+    culled.AddPath(p, {});
+    Grid a(clip);
+    culled.Sweep(FillRule::NonZero, a);
+    const uint64_t used = WorkBudget::kUnlimited - budget.geometry;
+
+    Rasterizer plain;
+    plain.Reset(clip);
+    CountLines all;
+    all.raster = &plain;
+    Flatten(p, {}, kFlattenTolerance, all);
+    Grid b(clip);
+    plain.Sweep(FillRule::NonZero, b);
+
+    int worst = 0;
+    for (size_t i = 0; i < a.a.size(); ++i) worst = std::max(worst, std::abs(int(a.a[i]) - int(b.a[i])));
+    CHECK(worst <= 1);
+    CHECK(a.At(5, 32) == 255);  // inside the circle, right of the clip's edge
+    CHECK(all.lines > 400000);
+    CHECK(used < 5000);
+}
+
+// A stroke leaves out what lies outside the clip: polygons, curves and dashes there, with the
+// same pixels inside.
+RGUI_TEST("gfx.stroke_cull") {
+    Path p;
+    p.MoveTo(10, 50);
+    p.LineTo(50000, 50);
+    p.LineTo(50000, 60);
+    p.CubicTo(90000, 60, 90000, 90, 50000, 90);
+    p.LineTo(10, 90);
+    p.LineTo(10, 70);
+    StrokeStyle style;
+    style.width = 4;
+    style.dash = {3, 2};
+    style.dashPhase = 1;
+    style.join = LineJoin::Round;
+    style.cap = LineCap::Round;
+
+    Pixels culled(100, 100, 0xFFFFFFFFu);
+    WorkBudget budget;
+    {
+        Canvas canvas(culled.surface);
+        canvas.SetBudget(&budget);
+        canvas.StrokePath(p, {}, style, Paint::Solid(0xFF000000u));
+    }
+    Pixels whole(100, 100, 0xFFFFFFFFu);
+    {
+        Path outline;
+        StrokeOutline(p, {}, style, outline);
+        Canvas canvas(whole.surface);
+        canvas.FillPath(outline, {}, FillRule::NonZero, Paint::Solid(0xFF000000u));
+    }
+    int worst = 0;
+    size_t dark = 0;
+    for (size_t i = 0; i < culled.data.size(); ++i) {
+        worst = std::max(worst, std::abs(int(culled.data[i] & 255) - int(whole.data[i] & 255)));
+        dark += (culled.data[i] & 255) < 128;
+    }
+    CHECK(worst <= 2);
+    CHECK(dark > 500);
+    // The two long runs make about 20,000 dashes each; only those near the clip are made.
+    CHECK(WorkBudget::kUnlimited - budget.dashes < 200);
+    CHECK(WorkBudget::kUnlimited - budget.geometry < 20000);
+}
+
+// A clip set again in place multiplies into the top clip's own mask; the result is the
+// pushed one's.
+RGUI_TEST("gfx.canvas_clip_in_place") {
+    Path a, b, square;
+    a.AddRect(4.5f, 2.25f, 20, 20);
+    b.AddRect(10.25f, 6.5f, 18, 20);
+    square.AddRect(0, 0, 32, 32);
+    Pixels pushed(32, 32, 0xFF000000u), merged(32, 32, 0xFF000000u);
+    {
+        Canvas canvas(pushed.surface);
+        canvas.PushClipRect({1, 1, 31, 31});
+        canvas.PushClipPath(a, {}, FillRule::NonZero);
+        canvas.PushClipPath(b, {}, FillRule::NonZero);
+        canvas.FillPath(square, {}, FillRule::NonZero, Paint::Solid(0xFFFFFFFFu));
+    }
+    {
+        Canvas canvas(merged.surface);
+        canvas.PushClipRect({1, 1, 31, 31});
+        canvas.PushClipPath(a, {}, FillRule::NonZero);
+        const size_t one = canvas.MaskBytes();
+        for (int i = 0; i < 100; ++i) canvas.IntersectClipPath(b, {}, FillRule::NonZero);  // b * b * ... rounds alike
+        CHECK_EQ(canvas.ClipDepth(), size_t(2));
+        CHECK(canvas.MaskBytes() <= one);
+        canvas.IntersectClipRect({0, 0, 32, 32});
+        canvas.FillPath(square, {}, FillRule::NonZero, Paint::Solid(0xFFFFFFFFu));
+        canvas.PopClip();
+        CHECK(canvas.ClipBounds() == (RectI{1, 1, 31, 31}));
+    }
+    // Full coverage of b multiplies to itself; the partial edge rows of b compound, so compare
+    // where b covers fully or not at all.
+    for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            if (y == 6 || y == 26 || x == 10 || x == 28) continue;
+            CHECK_EQ(pushed.At(x, y), merged.At(x, y));
+        }
+    }
+}
+
+// Once the budget is spent the canvas draws nothing more.
+RGUI_TEST("gfx.canvas_budget") {
+    Pixels px(64, 64, 0xFF000000u);
+    Canvas canvas(px.surface);
+    WorkBudget budget;
+    budget.pixels = 64 * 64 + 10;
+    canvas.SetBudget(&budget);
+    canvas.FillRect({0, 0, 64, 64}, 0xFF0000FFu);
+    CHECK(!budget.Stopped());
+    canvas.FillRect({0, 0, 64, 64}, 0xFFFF0000u);
+    CHECK(budget.stop == WorkBudget::Stop::Pixels);
+    CHECK_EQ(px.At(5, 5), 0xFF0000FFu);
+    Path p;
+    AddCircle(p, 32, 32, 20);
+    canvas.FillPath(p, {}, FillRule::NonZero, Paint::Solid(0xFF00FF00u));
+    CHECK_EQ(px.At(32, 32), 0xFF0000FFu);
+    // A cancel flag stops it too.
+    std::atomic<bool> cancel{true};
+    WorkBudget cancelled;
+    cancelled.cancel = &cancel;
+    CHECK(!cancelled.Poll());
+    CHECK(cancelled.stop == WorkBudget::Stop::Cancelled);
+    // The rasterizer's cells stay clean after a sweep cut short: the next one is exact.
+    Rasterizer r;
+    WorkBudget tight;
+    tight.pixels = 100;
+    r.SetBudget(&tight);
+    r.Reset({0, 0, 64, 64});
+    r.AddPath(p, {});
+    Grid cut({0, 0, 64, 64});
+    r.Sweep(FillRule::NonZero, cut);
+    CHECK(tight.Stopped());
+    r.SetBudget(nullptr);
+    r.Reset({0, 0, 64, 64});
+    r.AddPath(p, {});
+    Grid again({0, 0, 64, 64});
+    r.Sweep(FillRule::NonZero, again);
+    CHECK(again.a == Fill(p, {0, 0, 64, 64}, FillRule::NonZero).a);
 }

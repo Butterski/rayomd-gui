@@ -4,16 +4,19 @@
 #include "pdf/syntax.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <unordered_map>
+
+#if defined(__linux__)
+#include <sys/random.h>
+#endif
 
 namespace rgui::pdf {
 namespace {
 
 using syntax::Cursor;
 
-constexpr uint64_t kFnvOffset = 0xcbf29ce484222325ull;
-constexpr uint64_t kFnvPrime = 0x100000001b3ull;
 // What a hash holds where a reference cannot be followed: a missing object, a cycle, a chain
 // too deep.
 constexpr uint64_t kMissingObject = 0x6d697373696e6721ull;
@@ -27,29 +30,151 @@ constexpr int kMaxReferenceChain = 32;
 constexpr size_t kMaxXrefSections = 64;
 constexpr size_t kMaxPages = 1u << 20;
 
-void MixByte(uint64_t& hash, uint8_t byte) {
-    hash ^= byte;
-    hash *= kFnvPrime;
+inline uint64_t Rotl(uint64_t v, int n) {
+    return (v << n) | (v >> (64 - n));
 }
 
-void MixBytes(uint64_t& hash, std::string_view bytes) {
-    uint64_t h = hash;
-    for (unsigned char byte : bytes) {
-        h ^= byte;
-        h *= kFnvPrime;
+uint64_t SplitMix(uint64_t& state) {
+    uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+// The key of every hash in this process, drawn once: the kernel's random bytes on Linux, mixed
+// with the clocks and where the process was loaded (ASLR) everywhere. Documents are made before
+// the process exists and never see a hash, so they cannot be made to collide.
+struct HashKey {
+    uint64_t k0;
+    uint64_t k1;
+};
+
+const HashKey& ProcessKey() {
+    static const HashKey key = [] {
+        uint64_t seed[2] = {0, 0};
+#if defined(__linux__)
+        if (getrandom(seed, sizeof seed, 0) != static_cast<ssize_t>(sizeof seed)) seed[0] = seed[1] = 0;
+#endif
+        static int anchor = 0;
+        uint64_t state = seed[0] ^ static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&anchor));
+        state ^= static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) * 0x9E3779B97F4A7C15ull;
+        state ^= Rotl(static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()), 29);
+        state ^= Rotl(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&state)), 47);
+        HashKey k;
+        k.k0 = SplitMix(state);
+        k.k1 = SplitMix(state) ^ seed[1];
+        return k;
+    }();
+    return key;
+}
+
+} // namespace
+
+// SipHash-1-3 with 128-bit output (Aumasson and Bernstein), keyed with ProcessKey(): fed bytes
+// and words as a stream, finished into a PdfHash.
+class PdfFile::Hasher {
+public:
+    Hasher() {
+        const HashKey& k = ProcessKey();
+        v0_ = k.k0 ^ 0x736f6d6570736575ull;
+        v1_ = k.k1 ^ 0x646f72616e646f6dull ^ 0xee;
+        v2_ = k.k0 ^ 0x6c7967656e657261ull;
+        v3_ = k.k1 ^ 0x7465646279746573ull;
     }
-    hash = h;
-}
 
-void MixU64(uint64_t& hash, uint64_t value) {
-    for (int i = 0; i < 8; i++) MixByte(hash, static_cast<uint8_t>(value >> (8 * i)));
-}
+    void Byte(uint8_t b) {
+        tail_ |= static_cast<uint64_t>(b) << (8 * tailBytes_);
+        length_++;
+        if (++tailBytes_ == 8) {
+            Word(tail_);
+            tail_ = 0;
+            tailBytes_ = 0;
+        }
+    }
 
-void MixDouble(uint64_t& hash, double value) {
-    uint64_t bits = 0;
-    std::memcpy(&bits, &value, sizeof bits);
-    MixU64(hash, bits);
-}
+    void Bytes(std::string_view bytes) {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(bytes.data());
+        size_t n = bytes.size();
+        while (n > 0 && tailBytes_ != 0) {
+            Byte(*p++);
+            n--;
+        }
+        length_ += n & ~size_t(7);
+        for (; n >= 8; n -= 8, p += 8) {
+            uint64_t w = 0;
+            for (int i = 0; i < 8; i++) w |= static_cast<uint64_t>(p[i]) << (8 * i);
+            Word(w);
+        }
+        while (n-- > 0) Byte(*p++);
+    }
+
+    void U64(uint64_t value) {
+        if (tailBytes_ == 0) {
+            Word(value);
+            length_ += 8;
+            return;
+        }
+        for (int i = 0; i < 8; i++) Byte(static_cast<uint8_t>(value >> (8 * i)));
+    }
+
+    void Double(double value) {
+        uint64_t bits = 0;
+        std::memcpy(&bits, &value, sizeof bits);
+        U64(bits);
+    }
+
+    void Hash(const PdfHash& h) {
+        U64(h.lo);
+        U64(h.hi);
+    }
+
+    PdfHash Finish() const {
+        uint64_t v0 = v0_, v1 = v1_, v2 = v2_, v3 = v3_;
+        const uint64_t b = (static_cast<uint64_t>(length_) << 56) | tail_;
+        v3 ^= b;
+        Round(v0, v1, v2, v3);
+        v0 ^= b;
+        v2 ^= 0xee;
+        for (int i = 0; i < 3; i++) Round(v0, v1, v2, v3);
+        PdfHash out;
+        out.lo = v0 ^ v1 ^ v2 ^ v3;
+        v1 ^= 0xdd;
+        for (int i = 0; i < 3; i++) Round(v0, v1, v2, v3);
+        out.hi = v0 ^ v1 ^ v2 ^ v3;
+        return out;
+    }
+
+private:
+    static void Round(uint64_t& v0, uint64_t& v1, uint64_t& v2, uint64_t& v3) {
+        v0 += v1;
+        v1 = Rotl(v1, 13);
+        v1 ^= v0;
+        v0 = Rotl(v0, 32);
+        v2 += v3;
+        v3 = Rotl(v3, 16);
+        v3 ^= v2;
+        v0 += v3;
+        v3 = Rotl(v3, 21);
+        v3 ^= v0;
+        v2 += v1;
+        v1 = Rotl(v1, 17);
+        v1 ^= v2;
+        v2 = Rotl(v2, 32);
+    }
+
+    void Word(uint64_t m) {
+        v3_ ^= m;
+        Round(v0_, v1_, v2_, v3_);
+        v0_ ^= m;
+    }
+
+    uint64_t v0_, v1_, v2_, v3_;
+    uint64_t tail_ = 0;
+    int tailBytes_ = 0;
+    uint64_t length_ = 0;
+};
+
+namespace {
 
 const PdfValue& Null() {
     static const PdfValue kNull;
@@ -81,7 +206,10 @@ struct PdfFile::Slot {
     bool assigned = false;  // set by the newest cross-reference section naming the object
     bool used = false;      // an in-use entry ('n') within the file
     std::atomic<const PdfValue*> value{nullptr};
-    std::atomic<uint64_t> hash{0};  // ObjectHash once known; 0 before
+    // ObjectHash once known (`hashed` set after both halves).
+    std::atomic<uint64_t> hashLo{0};
+    std::atomic<uint64_t> hashHi{0};
+    std::atomic<bool> hashed{false};
 };
 
 struct PdfFile::Page {
@@ -93,10 +221,11 @@ struct PdfFile::Page {
 
 struct PdfFile::HashContext {
     std::vector<uint32_t> stack;
-    // Set while hashing an object when a reference below it was cut (a cycle or too deep): its
-    // hash then depends on where the walk entered, so it is only kept for this walk.
+    // Set while hashing an object when a reference below it was cut (a cycle or too deep), or
+    // when it met an object hashed so earlier in this walk: its hash then depends on where the
+    // walk entered, so it is only kept for this walk.
     bool incomplete = false;
-    std::unordered_map<uint32_t, uint64_t> local;
+    std::unordered_map<uint32_t, PdfHash> local;
 };
 
 PdfFile::PdfFile() = default;
@@ -442,75 +571,84 @@ bool PdfFile::RawStream(const PdfValue& stream, PdfRawStream& out) const {
     return true;
 }
 
-void PdfFile::HashInto(const PdfValue& value, uint64_t& hash, HashContext& context) const {
-    MixByte(hash, static_cast<uint8_t>(value.type));
+void PdfFile::HashInto(const PdfValue& value, Hasher& hash, HashContext& context) const {
+    hash.Byte(static_cast<uint8_t>(value.type));
     switch (value.type) {
         case PdfValue::Type::Null: break;
-        case PdfValue::Type::Bool: MixByte(hash, value.boolean ? 1 : 0); break;
-        case PdfValue::Type::Int: MixU64(hash, static_cast<uint64_t>(value.integer)); break;
-        case PdfValue::Type::Real: MixDouble(hash, value.real); break;
+        case PdfValue::Type::Bool: hash.Byte(value.boolean ? 1 : 0); break;
+        case PdfValue::Type::Int: hash.U64(static_cast<uint64_t>(value.integer)); break;
+        case PdfValue::Type::Real: hash.Double(value.real); break;
         case PdfValue::Type::String:
         case PdfValue::Type::Name:
-            MixU64(hash, value.text.size());
-            MixBytes(hash, value.text);
+            hash.U64(value.text.size());
+            hash.Bytes(value.text);
             break;
         case PdfValue::Type::Array:
-            MixU64(hash, value.items.size());
+            hash.U64(value.items.size());
             for (const PdfValue& item : value.items) HashInto(item, hash, context);
             break;
         case PdfValue::Type::Dict:
         case PdfValue::Type::Stream:
-            MixU64(hash, value.entries.size());
+            hash.U64(value.entries.size());
             for (const PdfDictEntry& entry : value.entries) {
-                MixU64(hash, entry.key.size());
-                MixBytes(hash, entry.key);
+                hash.U64(entry.key.size());
+                hash.Bytes(entry.key);
                 // /Parent leads up a tree (pages, outlines) to everything else in it.
                 if (entry.key == "Parent") continue;
                 HashInto(entry.value, hash, context);
             }
             if (value.type == PdfValue::Type::Stream) {
-                MixU64(hash, value.streamLength);
-                MixBytes(hash, std::string_view(bytes_).substr(value.streamOffset, value.streamLength));
+                hash.U64(value.streamLength);
+                hash.Bytes(std::string_view(bytes_).substr(value.streamOffset, value.streamLength));
             }
             break;
         case PdfValue::Type::Ref:
-            MixU64(hash, GenerationMatches(value) ? ObjectHash(value.refNum, context) : kMissingObject);
+            hash.Hash(GenerationMatches(value) ? ObjectHash(value.refNum, context)
+                                               : PdfHash{kMissingObject, kMissingObject});
             break;
     }
 }
 
-uint64_t PdfFile::ObjectHash(uint32_t num, HashContext& context) const {
+PdfHash PdfFile::ObjectHash(uint32_t num, HashContext& context) const {
     Slot& slot = slots_[num];
-    const uint64_t known = slot.hash.load(std::memory_order_relaxed);
-    if (known != 0) return known;
+    if (slot.hashed.load(std::memory_order_acquire)) {
+        return PdfHash{slot.hashLo.load(std::memory_order_relaxed), slot.hashHi.load(std::memory_order_relaxed)};
+    }
     const auto local = context.local.find(num);
-    if (local != context.local.end()) return local->second;
+    if (local != context.local.end()) {
+        // A hash cut somewhere in this walk: whatever holds it depends on the walk too.
+        context.incomplete = true;
+        return local->second;
+    }
     if (context.stack.size() >= kMaxHashStack ||
         std::find(context.stack.begin(), context.stack.end(), num) != context.stack.end()) {
         context.incomplete = true;
-        return kCutObject;
+        return PdfHash{kCutObject, kCutObject};
     }
     const bool outerIncomplete = context.incomplete;
     context.incomplete = false;
     context.stack.push_back(num);
-    uint64_t hash = kFnvOffset;
-    HashInto(Object(num), hash, context);
+    Hasher hasher;
+    HashInto(Object(num), hasher, context);
     context.stack.pop_back();
-    if (hash == 0) hash = 1;
+    const PdfHash hash = hasher.Finish();
     if (context.incomplete) {
         context.local.emplace(num, hash);
     } else {
-        slot.hash.store(hash, std::memory_order_relaxed);
+        // Racing threads store the same halves.
+        slot.hashLo.store(hash.lo, std::memory_order_relaxed);
+        slot.hashHi.store(hash.hi, std::memory_order_relaxed);
+        slot.hashed.store(true, std::memory_order_release);
     }
     context.incomplete = context.incomplete || outerIncomplete;
     return hash;
 }
 
-uint64_t PdfFile::ValueHash(const PdfValue& value) const {
+PdfHash PdfFile::ValueHash(const PdfValue& value) const {
     HashContext context;
-    uint64_t hash = kFnvOffset;
+    Hasher hash;
     HashInto(value, hash, context);
-    return hash;
+    return hash.Finish();
 }
 
 const PdfValue& PdfFile::PageDict(int page) const {
@@ -562,26 +700,26 @@ bool PdfFile::PageContent(int page, std::string_view& content, std::string* erro
     return true;
 }
 
-uint64_t PdfFile::PageKey(int page) const {
-    if (page < 0 || page >= pageCount_) return 0;
+PdfHash PdfFile::PageKey(int page) const {
+    if (page < 0 || page >= pageCount_) return PdfHash{};
     const Page& entry = pages_[page];
-    uint64_t hash = kFnvOffset;
-    MixDouble(hash, entry.mediaBox.x0);
-    MixDouble(hash, entry.mediaBox.y0);
-    MixDouble(hash, entry.mediaBox.x1);
-    MixDouble(hash, entry.mediaBox.y1);
+    Hasher hash;
+    hash.Double(entry.mediaBox.x0);
+    hash.Double(entry.mediaBox.y0);
+    hash.Double(entry.mediaBox.x1);
+    hash.Double(entry.mediaBox.y1);
     auto mixStream = [&](const PdfValue& stream) {
         if (!stream.IsStream()) {
-            MixByte(hash, 0);
+            hash.Byte(0);
             return;
         }
-        MixByte(hash, 1);
-        MixU64(hash, stream.streamLength);
-        MixBytes(hash, std::string_view(bytes_).substr(stream.streamOffset, stream.streamLength));
+        hash.Byte(1);
+        hash.U64(stream.streamLength);
+        hash.Bytes(std::string_view(bytes_).substr(stream.streamOffset, stream.streamLength));
     };
     const PdfValue& contents = Get(*entry.dict, "Contents");
     if (contents.IsArray()) {
-        MixU64(hash, contents.items.size());
+        hash.U64(contents.items.size());
         for (const PdfValue& item : contents.items) mixStream(Resolve(item));
     } else {
         mixStream(contents);
@@ -590,9 +728,9 @@ uint64_t PdfFile::PageKey(int page) const {
     if (entry.resources) {
         HashInto(*entry.resources, hash, context);
     } else {
-        MixByte(hash, 0);
+        hash.Byte(0);
     }
-    return hash;
+    return hash.Finish();
 }
 
 } // namespace rgui::pdf

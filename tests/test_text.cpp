@@ -3,6 +3,7 @@
 
 #include "common/file_io.h"
 #include "core/cff.h"
+#include "gfx/budget.h"
 #include "gfx/path.h"
 #include "text/cff_outlines.h"
 #include "text/fontchoice.h"
@@ -466,6 +467,32 @@ RGUI_TEST("text.glyph_cache") {
     CHECK(small.Bytes() <= 16 * 1024);
     CHECK(small.Find(GlyphCache::KeyFor(font.face, font.face.GlyphForCodePoint('A'), 48.0f, 0.0f)) == nullptr);
     CHECK(small.Find(GlyphCache::KeyFor(font.face, font.face.GlyphForCodePoint('a'), 48.0f, 0.0f)) != nullptr);
+}
+
+// Within one frame nothing is evicted, but the cache never passes twice its budget: a page of
+// thousands of distinct glyph sizes stays bounded (the rest are rasterized and handed out
+// without being kept).
+RGUI_TEST("text.glyph_cache_ceiling") {
+    TestFont font;
+    if (!font.Load(kSans, "text.glyph_cache_ceiling")) return;
+    const uint16_t g = font.face.GlyphForCodePoint('W');
+    GlyphCache cache(256 * 1024);
+    const GlyphBitmap* last = nullptr;
+    for (int i = 0; i < 2000; i++) {
+        last = cache.Get(font.face, g, 40.0f + i * 0.05f, 0.0f);
+        CHECK(cache.Bytes() <= 2 * cache.Budget());
+    }
+    // The last ones were not kept, yet handed out whole.
+    CHECK(last != nullptr && last->width > 100 && last->height > 100);
+    CHECK(cache.Find(GlyphCache::KeyFor(font.face, g, 40.0f + 1999 * 0.05f, 0.0f)) == nullptr);
+    CHECK(cache.Count() < 2000);
+    // A budget that runs out leaves the glyph out of the cache.
+    gfx::WorkBudget budget;
+    budget.pixels = 10;
+    const GlyphBitmap* starved = cache.Get(font.face, GlyphCache::KeyFor(font.face, g, 300.0f, 0.0f), &budget);
+    CHECK(budget.Stopped());
+    CHECK(starved != nullptr && starved->width == 0);
+    CHECK(cache.Find(GlyphCache::KeyFor(font.face, g, 300.0f, 0.0f)) == nullptr);
 }
 
 RGUI_TEST("text.fontconfig_user") {

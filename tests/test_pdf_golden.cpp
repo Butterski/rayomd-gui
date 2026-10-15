@@ -14,6 +14,7 @@
 #include "pdf/reader.h"
 #include "pdf/renderer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -271,5 +272,24 @@ RGUI_TEST("pdf.golden") {
             std::printf("golden timing (%s): tester.md build %.2f ms, parse %.2f ms, page 1 at 1200 px %.2f ms\n", run,
                         build, parse, render);
         }
+        // Re-renders of every page at 1200 px with warm caches (what scrolling and an edit that
+        // changed a page cost): the best of 5 per page.
+        std::string pdf = rgui::pdftest::BuildPreview(markdown, options);
+        const auto file = PdfFile::Parse(std::move(pdf), nullptr);
+        if (!file) return;
+        std::string line;
+        for (int page = 0; page < file->PageCount(); page++) {
+            double best = 1e9;
+            for (int i = 0; i < 5; i++) {
+                rgui::gfx::Image image;
+                const auto start = std::chrono::steady_clock::now();
+                rgui::pdf::RenderPage(*file, page, 1200, image, nullptr, environment);
+                best = std::min(best, MsSince(start));
+            }
+            char item[32];
+            std::snprintf(item, sizeof item, " %d:%.2f", page + 1, best);
+            line += item;
+        }
+        std::printf("golden timing (warm): tester.md pages at 1200 px, ms:%s\n", line.c_str());
     }).join();
 }

@@ -2,6 +2,7 @@
 #include "text/glyphcache.h"
 
 #include "common/exact_math.h"
+#include "gfx/budget.h"
 #include "gfx/raster.h"
 
 #include <algorithm>
@@ -54,7 +55,8 @@ GlyphKey GlyphCache::KeyFor(const GlyphSource& source, uint16_t glyph, float siz
     return key;
 }
 
-void RasterizeGlyph(const GlyphSource& source, uint16_t glyph, float sizePx, float phasePx, GlyphBitmap& out) {
+void RasterizeGlyph(const GlyphSource& source, uint16_t glyph, float sizePx, float phasePx, GlyphBitmap& out,
+                    gfx::WorkBudget* budget) {
     out = GlyphBitmap();
     if (!(sizePx > 0)) return;
     gfx::Path path;
@@ -88,15 +90,21 @@ void RasterizeGlyph(const GlyphSource& source, uint16_t glyph, float sizePx, flo
     out.top = box.y0;
     out.width = box.Width();
     out.height = box.Height();
-    out.alpha.assign(static_cast<size_t>(out.width) * static_cast<size_t>(out.height), 0);
+    const size_t pixels = static_cast<size_t>(out.width) * static_cast<size_t>(out.height);
+    if (budget && !budget->Take(budget->pixels, pixels, gfx::WorkBudget::Stop::Pixels)) {
+        out = GlyphBitmap();
+        return;
+    }
+    out.alpha.assign(pixels, 0);
     gfx::Rasterizer rasterizer;
+    rasterizer.SetBudget(budget);
     rasterizer.Reset(box);
     rasterizer.AddPath(path, m);
     BitmapSink sink(out, box);
     rasterizer.Sweep(gfx::FillRule::NonZero, sink);
 }
 
-const GlyphBitmap* GlyphCache::Get(const GlyphSource& source, const GlyphKey& key) {
+const GlyphBitmap* GlyphCache::Get(const GlyphSource& source, const GlyphKey& key, gfx::WorkBudget* budget) {
     const auto found = map_.find(key);
     if (found != map_.end()) {
         found->second->frame = frame_;
@@ -107,11 +115,20 @@ const GlyphBitmap* GlyphCache::Get(const GlyphSource& source, const GlyphKey& ke
     entry.key = key;
     entry.frame = frame_;
     RasterizeGlyph(source, key.glyph, static_cast<float>(key.size64 / 64.0), static_cast<float>(key.phase / 4.0),
-        entry.bitmap);
+        entry.bitmap, budget);
+    const size_t cost = Cost(entry.bitmap);
+    if (bytes_ + cost > budget_) {
+        bytes_ += cost;  // what Evict must free for this entry to fit
+        Evict();
+        bytes_ -= cost;
+    }
+    if ((budget && budget->Stopped()) || bytes_ + cost > 2 * budget_) {
+        scratch_ = std::move(entry.bitmap);
+        return &scratch_;
+    }
     lru_.push_front(std::move(entry));
     map_.emplace(key, lru_.begin());
-    bytes_ += Cost(lru_.front().bitmap);
-    Evict();
+    bytes_ += cost;
     return &lru_.front().bitmap;
 }
 
