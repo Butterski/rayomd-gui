@@ -7,6 +7,7 @@
 #include "platform/linux/dbus_wire.h"
 #include "platform/linux/portal.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -637,6 +638,7 @@ struct FakeBus {
     int listener = -1;
     std::string authLine;
     std::thread thread;
+    int okDelayMs = 0;  // a slow bus: OK comes this late
 
     bool Start(std::function<void(int fd)> script) {
         char temp[] = "/tmp/rgui-fakebus-XXXXXX";
@@ -662,6 +664,7 @@ struct FakeBus {
                 if (line.size() >= 2 && line.compare(line.size() - 2, 2, "\r\n") == 0) break;
             }
             authLine = line;
+            if (okDelayMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(okDelayMs));
             static const char ok[] = "OK 0123456789abcdef0123456789abcdef\r\n";
             send(fd, ok, sizeof ok - 1, MSG_NOSIGNAL);
             line.clear();
@@ -813,6 +816,146 @@ RGUI_TEST("linux.dbus_fake_bus") {
     rgui_dbus_close(conn);
 }
 
+namespace {
+
+// A signal of `bodyBytes` bytes (an 'ay'), from the fake bus.
+std::vector<uint8_t> BigSignal(size_t bodyBytes) {
+    rgui_dbus_buf body{};
+    rgui_dbus_array bytes = rgui_dbus_open_array(&body, 'y');
+    for (size_t i = 0; i + 4 < bodyBytes; ++i) rgui_dbus_put_byte(&body, static_cast<uint8_t>(i));
+    rgui_dbus_close_array(&body, bytes);
+    rgui_dbus_message m{};
+    m.type = RGUI_DBUS_SIGNAL;
+    m.serial = 77;
+    m.path = "/org/example";
+    m.interface = "org.example.Big";
+    m.member = "Big";
+    m.signature = "ay";
+    m.body = body.data;
+    m.body_size = static_cast<uint32_t>(body.size);
+    rgui_dbus_buf out{};
+    rgui_dbus_encode_message(&out, &m);
+    std::vector<uint8_t> message(out.data, out.data + out.size);
+    rgui_dbus_buf_free(&out);
+    rgui_dbus_buf_free(&body);
+    return message;
+}
+
+bool SendAllBytes(int fd, const std::vector<uint8_t>& bytes) {
+    size_t sent = 0;
+    while (sent < bytes.size()) {
+        ssize_t n = send(fd, bytes.data() + sent, bytes.size() - sent, MSG_NOSIGNAL);
+        if (n <= 0) return false;
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+} // namespace
+
+RGUI_TEST("linux.dbus_big_messages") {
+    // A 2 MiB message is skipped as it arrives, never buffered; an unwanted 512 KiB signal is
+    // dropped by its header; the reply after them still arrives, and the input buffer gives its
+    // memory back once drained.
+    FakeBus bus;
+    CHECK(bus.Start([](int fd) {
+        std::vector<uint8_t> bytes;
+        rgui_dbus_message m;
+        if (!ReadMessage(fd, bytes, m) || std::strcmp(m.member, "Hello") != 0) return;
+        rgui_dbus_buf name{};
+        rgui_dbus_put_string(&name, ":1.9");
+        SendReply(fd, m.serial, "s", &name);
+        rgui_dbus_buf_free(&name);
+        if (!ReadMessage(fd, bytes, m)) return;
+        if (!SendAllBytes(fd, BigSignal(2u << 20)) || !SendAllBytes(fd, BigSignal(512u << 10))) return;
+        rgui_dbus_buf answer{};
+        rgui_dbus_put_string(&answer, "after");
+        SendReply(fd, m.serial, "s", &answer);
+        rgui_dbus_buf_free(&answer);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }));
+    std::string address = "unix:path=" + bus.socketPath;
+    rgui_dbus_conn* conn = rgui_dbus_open(address.c_str(), 3000);
+    CHECK(conn != nullptr);
+    if (!conn) return;
+    size_t biggest = 0;
+    CallResult r;
+    rgui_dbus_message c = Call("Wait");
+    CHECK(rgui_dbus_call(conn, &c, 5000, RecordReply, &r) != 0);
+    int64_t start = Ms();
+    while (r.calls == 0 && Ms() - start < 4000) {
+        rgui_dbus_wait(conn, 50);
+        biggest = std::max(biggest, rgui_dbus_input_capacity(conn));
+    }
+    CHECK_EQ(r.calls, 1);
+    CHECK_EQ(r.body, std::string("\"after\""));
+    CHECK(rgui_dbus_connected(conn));
+    CHECK(biggest <= size_t(RGUI_DBUS_MAX_INCOMING) + (64u << 10));  // the 2 MiB one never was held
+    CHECK(rgui_dbus_input_capacity(conn) <= size_t(64u << 10));
+    rgui_dbus_close(conn);
+}
+
+RGUI_TEST("linux.dbus_async_open") {
+    // A slow bus: opening returns at once, calls queue behind Hello and are answered once the
+    // handshake ends on the loop.
+    {
+        FakeBus bus;
+        bus.okDelayMs = 400;
+        CHECK(bus.Start([](int fd) {
+            std::vector<uint8_t> bytes;
+            rgui_dbus_message m;
+            if (!ReadMessage(fd, bytes, m) || std::strcmp(m.member, "Hello") != 0) return;
+            rgui_dbus_buf name{};
+            rgui_dbus_put_string(&name, ":1.5");
+            SendReply(fd, m.serial, "s", &name);
+            rgui_dbus_buf_free(&name);
+            if (!ReadMessage(fd, bytes, m)) return;
+            rgui_dbus_buf answer{};
+            rgui_dbus_put_string(&answer, m.member);
+            SendReply(fd, m.serial, "s", &answer);
+            rgui_dbus_buf_free(&answer);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }));
+        std::string address = "unix:path=" + bus.socketPath;
+        int64_t start = Ms();
+        rgui_dbus_conn* conn = rgui_dbus_open_async(address.c_str(), 3000);
+        CHECK(conn != nullptr);
+        CHECK(Ms() - start < 100);
+        if (!conn) return;
+        CHECK(!rgui_dbus_ready(conn));
+        CHECK_EQ(std::string(rgui_dbus_unique_name(conn)), std::string());
+        CallResult r;
+        rgui_dbus_message c = Call("Early");
+        CHECK(rgui_dbus_call(conn, &c, 5000, RecordReply, &r) != 0);
+        while (r.calls == 0 && Ms() - start < 4000) rgui_dbus_wait(conn, 50);
+        CHECK(rgui_dbus_ready(conn));
+        CHECK_EQ(std::string(rgui_dbus_unique_name(conn)), std::string(":1.5"));
+        CHECK_EQ(r.body, std::string("\"Early\""));
+        CHECK(Ms() - start >= 350);
+        rgui_dbus_close(conn);
+    }
+    {
+        // A bus that never finishes the handshake: closed after the timeout, calls get NULL.
+        FakeBus bus;
+        bus.okDelayMs = 1500;
+        CHECK(bus.Start([](int) {}));
+        std::string address = "unix:path=" + bus.socketPath;
+        int64_t start = Ms();
+        rgui_dbus_conn* conn = rgui_dbus_open_async(address.c_str(), 300);
+        CHECK(conn != nullptr);
+        if (!conn) return;
+        CallResult r;
+        rgui_dbus_message c = Call("Never");
+        CHECK(rgui_dbus_call(conn, &c, 5000, RecordReply, &r) != 0);
+        while (rgui_dbus_connected(conn) && Ms() - start < 3000) rgui_dbus_wait(conn, 50);
+        CHECK(!rgui_dbus_connected(conn));
+        CHECK(Ms() - start < 1000);
+        CHECK_EQ(r.calls, 1);
+        CHECK(r.gotNull);
+        rgui_dbus_close(conn);
+    }
+}
+
 // ---- A real bus (dbus-run-session) with a fake portal ------------------------------------------
 
 namespace {
@@ -854,7 +997,45 @@ struct FakePortal {
     std::string title;
     std::string options;
     std::string token;
+    std::string caller;  // the unique name of the last caller
+    // Hold the Response until SendDeferred (a forger gets to speak first).
+    bool defer = false;
+    std::string deferredHandle;
+    std::vector<uint8_t> deferredBody;
 };
+
+void SendResponse(rgui_dbus_conn* conn, const std::string& handle, const std::string& destination,
+                  const uint8_t* body, size_t size) {
+    rgui_dbus_message signal{};
+    signal.type = RGUI_DBUS_SIGNAL;
+    signal.path = handle.c_str();
+    signal.interface = "org.freedesktop.portal.Request";
+    signal.member = "Response";
+    signal.destination = destination.empty() ? nullptr : destination.c_str();
+    signal.signature = "ua{sv}";
+    signal.body = body;
+    signal.body_size = static_cast<uint32_t>(size);
+    rgui_dbus_send(conn, &signal);
+}
+
+// A Response body: the code and, when `uri` is not empty, results {"uris": [uri]}.
+std::vector<uint8_t> ResponseBody(uint32_t code, const std::string& uri) {
+    rgui_dbus_buf body{};
+    rgui_dbus_put_uint32(&body, code);
+    rgui_dbus_array results = rgui_dbus_open_array(&body, '{');
+    if (!uri.empty()) {
+        rgui_dbus_open_struct(&body);
+        rgui_dbus_put_string(&body, "uris");
+        rgui_dbus_put_signature(&body, "as");
+        rgui_dbus_array uris = rgui_dbus_open_array(&body, 's');
+        rgui_dbus_put_string(&body, uri.c_str());
+        rgui_dbus_close_array(&body, uris);
+    }
+    rgui_dbus_close_array(&body, results);
+    std::vector<uint8_t> bytes(body.data, body.data + body.size);
+    rgui_dbus_buf_free(&body);
+    return bytes;
+}
 
 std::string FindStringOption(rgui_dbus_iter* options, const char* name) {
     rgui_dbus_iter dict;
@@ -885,6 +1066,7 @@ bool FakePortalHandler(void* user, rgui_dbus_conn* conn, const rgui_dbus_message
     if (interface == "org.freedesktop.portal.Settings" && (member == "ReadOne" || member == "Read")) {
         bool one = member == "ReadOne";
         (one ? fake->readOneCalls : fake->readCalls)++;
+        fake->caller = call->sender;
         if (one && fake->readOneUnknown) return false;  // -> UnknownMethod, as an old portal
         rgui_dbus_iter it;
         rgui_dbus_body_iter(call, &it);
@@ -909,6 +1091,7 @@ bool FakePortalHandler(void* user, rgui_dbus_conn* conn, const rgui_dbus_message
     }
     if (interface == "org.freedesktop.portal.FileChooser" && (member == "OpenFile" || member == "SaveFile")) {
         fake->member = member;
+        fake->caller = call->sender;
         rgui_dbus_iter it;
         rgui_dbus_body_iter(call, &it);
         const char* parent;
@@ -949,16 +1132,12 @@ bool FakePortalHandler(void* user, rgui_dbus_conn* conn, const rgui_dbus_message
             rgui_dbus_close_array(&body, uris);
         }
         rgui_dbus_close_array(&body, results);
-        rgui_dbus_message signal{};
-        signal.type = RGUI_DBUS_SIGNAL;
-        signal.path = handle.c_str();
-        signal.interface = "org.freedesktop.portal.Request";
-        signal.member = "Response";
-        signal.destination = call->sender;
-        signal.signature = "ua{sv}";
-        signal.body = body.data;
-        signal.body_size = static_cast<uint32_t>(body.size);
-        rgui_dbus_send(conn, &signal);
+        if (fake->defer) {
+            fake->deferredHandle = handle;
+            fake->deferredBody.assign(body.data, body.data + body.size);
+        } else {
+            SendResponse(conn, handle, call->sender, body.data, body.size);
+        }
         rgui_dbus_buf_free(&body);
         return true;
     }
@@ -982,6 +1161,17 @@ bool RequestName(rgui_dbus_conn* conn, const char* name) {
     bool sent = rgui_dbus_call(conn, &m, 5000, RecordReply, &r) != 0;
     rgui_dbus_buf_free(&body);
     return sent && Pump({conn}, nullptr, [&] { return r.calls > 0; }) && r.body == "1";
+}
+
+// A round trip to the bus: what `conn` sent before has been routed when it returns.
+bool Sync(rgui_dbus_conn* conn) {
+    CallResult r;
+    rgui_dbus_message getId{};
+    getId.destination = "org.freedesktop.DBus";
+    getId.path = "/org/freedesktop/DBus";
+    getId.interface = "org.freedesktop.DBus";
+    getId.member = "GetId";
+    return rgui_dbus_call(conn, &getId, 5000, RecordReply, &r) != 0 && Pump({conn}, nullptr, [&] { return r.calls > 0; });
 }
 
 } // namespace
@@ -1086,7 +1276,7 @@ RGUI_TEST("linux.dbus_session") {
         ++sig->count;
         sig->body = RenderBody(*s);
     };
-    rgui_dbus_match match{"org.example.Test", "Ping", "/org/example"};
+    rgui_dbus_match match{"org.example.Test", "Ping", "/org/example", nullptr, nullptr};
     uint32_t id = rgui_dbus_add_match(conn, &match, onSignal, &signals);
     CHECK(id != 0);
     rgui_dbus_buf payload{};
@@ -1229,8 +1419,12 @@ RGUI_TEST("linux.dbus_portal_file_chooser") {
     CHECK_EQ(fake.member, std::string("OpenFile"));
     CHECK_EQ(fake.parent, std::string(""));
     CHECK_EQ(fake.title, std::string("Open Markdown or RayoMD PDF"));
-    CHECK_EQ(fake.token, std::string("rayomd_gui_1"));
-    CHECK_EQ(fake.options, std::string("[{\"handle_token\":<s>\"rayomd_gui_1\"},{\"modal\":<b>true},"
+    // A random token: rayomd_gui_ and 16 hex digits, another each time.
+    CHECK_EQ(fake.token.size(), size_t(27));
+    CHECK_EQ(fake.token.substr(0, 11), std::string("rayomd_gui_"));
+    CHECK(fake.token.find_first_not_of("0123456789abcdef", 11) == std::string::npos);
+    const std::string firstToken = fake.token;
+    CHECK_EQ(fake.options, std::string("[{\"handle_token\":<s>\"") + fake.token + std::string("\"},{\"modal\":<b>true},"
                                        "{\"filters\":<a(sa(us))>[(\"Markdown\",[(0,\"*.md\"),(0,\"*.markdown\"),"
                                        "(0,\"*.txt\")]),(\"RayoMD PDF\",[(0,\"*.pdf\")])]}]"));
 
@@ -1247,7 +1441,8 @@ RGUI_TEST("linux.dbus_portal_file_chooser") {
     std::string folderBytes;
     for (char c : folder) folderBytes += std::to_string(static_cast<unsigned char>(c)) + ",";
     folderBytes += "0";
-    CHECK_EQ(fake.options, std::string("[{\"handle_token\":<s>\"rayomd_gui_2\"},{\"modal\":<b>true},"
+    CHECK(fake.token != firstToken);
+    CHECK_EQ(fake.options, std::string("[{\"handle_token\":<s>\"") + fake.token + std::string("\"},{\"modal\":<b>true},"
                                        "{\"filters\":<a(sa(us))>[(\"PDF\",[(0,\"*.pdf\")])]},"
                                        "{\"current_name\":<s>\"doc.pdf\"},{\"current_folder\":<ay>[") +
                                folderBytes + "]}]");
@@ -1283,6 +1478,98 @@ RGUI_TEST("linux.dbus_portal_file_chooser") {
     r = show(rgui::FileDialog::OpenDocument, "");
     CHECK_EQ(r.kind, rgui::FileDialogResult::Chosen);
     CHECK_EQ(r.path, std::string("/tmp/old.md"));
+    fake.otherHandle = false;
+    CHECK_EQ(portal.PortalOwner(), std::string(rgui_dbus_unique_name(service)));
 
+    // Another peer forges the Response while the dialog is open: sent to us by name (match
+    // rules do not apply) and broadcast. Both are ignored; the portal's own answer counts.
+    rgui_dbus_conn* forger = rgui_dbus_open_session(3000);
+    CHECK(forger != nullptr);
+    if (forger) {
+        fake.defer = true;
+        fake.uri = "file:///tmp/real.md";
+        bool done = false;
+        rgui::FileDialogResult result;
+        portal.ShowFileDialog(rgui::FileDialog::SaveMarkdown, "", [&](rgui::FileDialogResult answer) {
+            done = true;
+            result = std::move(answer);
+        });
+        CHECK(Pump({service}, &portal, [&] { return !fake.deferredHandle.empty(); }));
+        const std::vector<uint8_t> evil = ResponseBody(0, "file:///tmp/evil.md");
+        SendResponse(forger, fake.deferredHandle, fake.caller, evil.data(), evil.size());
+        SendResponse(forger, fake.deferredHandle, "", evil.data(), evil.size());
+        CHECK(Sync(forger));  // the forgeries are queued for the portal's client before the real one
+        CHECK(!done);
+        SendResponse(service, fake.deferredHandle, fake.caller, fake.deferredBody.data(), fake.deferredBody.size());
+        CHECK(Pump({service, forger}, &portal, [&] { return done; }));
+        CHECK_EQ(result.kind, rgui::FileDialogResult::Chosen);
+        CHECK_EQ(result.path, std::string("/tmp/real.md"));
+        fake.defer = false;
+        rgui_dbus_close(forger);
+    }
+
+    rgui_dbus_close(service);
+}
+
+RGUI_TEST("linux.dbus_portal_forged_settings") {
+    if (!SessionTestsEnabled("linux.dbus_portal_forged_settings")) return;
+    rgui_dbus_conn* service = rgui_dbus_open_session(3000);
+    rgui_dbus_conn* forger = rgui_dbus_open_session(3000);
+    CHECK(service != nullptr && forger != nullptr);
+    if (!service || !forger) {
+        rgui_dbus_close(service);
+        rgui_dbus_close(forger);
+        return;
+    }
+    FakePortal fake;
+    rgui_dbus_set_method_handler(service, FakePortalHandler, &fake);
+    CHECK(RequestName(service, "org.freedesktop.portal.Desktop"));
+    rgui::dbus::Portal portal;
+    CHECK(portal.Connect(3000));
+    int changes = 0;
+    rgui::dbus::Appearance changed;
+    portal.WatchAppearance([&](rgui::dbus::Appearance a) {
+        ++changes;
+        changed = a;
+    });
+    bool read = false;
+    portal.ReadAppearance([&](rgui::dbus::Appearance) { read = true; });
+    CHECK(Pump({service, forger}, &portal, [&] { return read; }));
+    CHECK(!portal.CurrentAppearance().dark);  // ReadOne answered light
+    CHECK_EQ(portal.PortalOwner(), std::string(rgui_dbus_unique_name(service)));
+
+    auto emit = [](rgui_dbus_conn* from, const std::string& to, const char* key, const char* signature, double value) {
+        rgui_dbus_buf body{};
+        rgui_dbus_put_string(&body, std::strcmp(key, "color-scheme") == 0 ? "org.freedesktop.appearance"
+                                                                          : "org.gnome.desktop.interface");
+        rgui_dbus_put_string(&body, key);
+        rgui_dbus_put_signature(&body, signature);
+        if (signature[0] == 'u') {
+            rgui_dbus_put_uint32(&body, static_cast<uint32_t>(value));
+        } else {
+            rgui_dbus_put_double(&body, value);
+        }
+        rgui_dbus_message s{};
+        s.type = RGUI_DBUS_SIGNAL;
+        s.path = "/org/freedesktop/portal/desktop";
+        s.interface = "org.freedesktop.portal.Settings";
+        s.member = "SettingChanged";
+        s.destination = to.empty() ? nullptr : to.c_str();
+        s.signature = "ssv";
+        s.body = body.data;
+        s.body_size = static_cast<uint32_t>(body.size);
+        rgui_dbus_send(from, &s);
+        rgui_dbus_buf_free(&body);
+    };
+    // Forged: dark, sent to us by name and broadcast; then the portal's real text scale.
+    emit(forger, fake.caller, "color-scheme", "u", 1);
+    emit(forger, "", "color-scheme", "u", 1);
+    CHECK(Sync(forger));
+    emit(service, "", "text-scaling-factor", "d", 1.75);
+    CHECK(Pump({service, forger}, &portal, [&] { return changes > 0; }));
+    CHECK_EQ(changes, 1);
+    CHECK(!changed.dark);
+    CHECK_EQ(changed.textScale, 1.75);
+    rgui_dbus_close(forger);
     rgui_dbus_close(service);
 }

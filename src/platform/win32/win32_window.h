@@ -49,9 +49,12 @@ struct WindowOptions {
     std::string title = "RayoMD";
 };
 
-// UTF-8 <-> UTF-16. Invalid input becomes U+FFFD.
+// UTF-8 <-> UTF-16. Invalid input becomes U+FFFD: for text (the clipboard, the IME).
 std::wstring Widen(std::string_view utf8);
 std::string Narrow(std::wstring_view wide);
+// For paths: false on an unpaired surrogate instead of replacing it, which would name another
+// file (a\uD800.md would become a\uFFFD.md).
+bool NarrowPath(std::wstring_view wide, std::string* utf8);
 
 // AppsUseLightTheme (dark when 0; light when missing) and TextScaleFactor / 100 (1 when missing).
 void ReadSystemAppearance(bool& dark, double& textScale);

@@ -448,3 +448,99 @@ RGUI_TEST("linux.wire.random_mutations") {
     CHECK(dispatched > 0);
     CHECK(refused > 0);
 }
+
+namespace {
+
+// A server-created child whose event carries a fd, made by its parent's event.
+extern const rgui_wl_interface kFdChild;
+const rgui_wl_message kFdChildRequests[] = {
+    {0, RGUI_WL_DESTRUCTOR, "destroy", "", nullptr},
+};
+const rgui_wl_message kFdChildEvents[] = {
+    {0, 0, "fd", "h", nullptr},
+};
+const rgui_wl_interface kFdChild = {"test_fd_child", 1, 1, 1, kFdChildRequests, kFdChildEvents};
+const rgui_wl_message kParentEvents[] = {
+    {0, 0, "create", "n", &kFdChild},
+};
+const rgui_wl_interface kParent = {"test_parent", 1, 0, 1, nullptr, kParentEvents};
+
+// Writes `bytes` with `fds` attached, as a compositor does.
+bool WriteWithFds(int socket, const std::vector<uint8_t>& bytes, const std::vector<int>& fds) {
+    iovec iov{const_cast<uint8_t*>(bytes.data()), bytes.size()};
+    union {
+        char buffer[CMSG_SPACE(sizeof(int) * 4)];
+        cmsghdr align;
+    } control{};
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    if (!fds.empty()) {
+        msg.msg_control = control.buffer;
+        msg.msg_controllen = CMSG_SPACE(sizeof(int) * fds.size());
+        cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int) * fds.size());
+        std::memcpy(CMSG_DATA(cmsg), fds.data(), sizeof(int) * fds.size());
+    }
+    return sendmsg(socket, &msg, 0) == static_cast<ssize_t>(bytes.size());
+}
+
+} // namespace
+
+RGUI_TEST("linux.wire.zombie_fds") {
+    // A server object we destroyed still gets an fd event in flight: the zombie keeps its
+    // interface, so that fd is taken and closed, and the next event gets its own.
+    RawPeer peer;
+    if (!peer.connection) return;
+    const uint32_t parent = rgui_wl_new_object(peer.connection, &kParent, 1, nullptr, nullptr);
+    const uint32_t child = RGUI_WL_SERVER_ID_START + 1;
+    std::vector<uint8_t> m;
+    Header(m, parent, 12, 0);
+    Put32(m, child);
+    peer.Write(m);
+    CHECK_EQ(peer.ReadAndDispatch(), 1);
+    CHECK_EQ(rgui_wl_object_version(peer.connection, child), 1u);
+    CHECK_EQ(rgui_wl_send(peer.connection, child, 0, nullptr), 0);  // destroy: now a zombie
+    CHECK_EQ(rgui_wl_object_version(peer.connection, child), 0u);
+
+    int first[2];
+    int second[2];
+    CHECK_EQ(pipe2(first, O_CLOEXEC), 0);
+    CHECK_EQ(pipe2(second, O_CLOEXEC), 0);
+    m.clear();
+    Header(m, child, 8, 0);         // to the zombie, carrying `first`
+    Header(m, peer.thing, 8, 5);    // to a live object, carrying `second`
+    CHECK(WriteWithFds(peer.raw, m, {first[0], second[0]}));
+    CHECK_EQ(peer.ReadAndDispatch(), 2);
+    CHECK_EQ(peer.received.fds.size(), 1u);
+    if (!peer.received.fds.empty()) {
+        CHECK(SameFile(peer.received.fds[0], second[0]));
+        close(peer.received.fds[0]);
+    }
+    // The zombie's copy was closed: no descriptor but our own refers to `first`'s read end.
+    int holders = 0;
+    for (int fd = 0; fd < 1024; ++fd) {
+        // Read ends only: both ends of a pipe are the same inode.
+        if (fcntl(fd, F_GETFD) >= 0 && (fcntl(fd, F_GETFL) & O_ACCMODE) == O_RDONLY && SameFile(fd, first[0])) ++holders;
+    }
+    CHECK_EQ(holders, 1);
+    close(first[0]);
+    close(first[1]);
+    close(second[0]);
+    close(second[1]);
+
+    // An event for an object that never existed while fds are queued: nothing tells whose fds
+    // they are, so the connection fails instead of handing them to a later event.
+    RawPeer other;
+    if (!other.connection) return;
+    int third[2];
+    CHECK_EQ(pipe2(third, O_CLOEXEC), 0);
+    m.clear();
+    Header(m, 999, 8, 0);
+    CHECK(WriteWithFds(other.raw, m, {third[0]}));
+    CHECK_EQ(other.ReadAndDispatch(), -1);
+    close(third[0]);
+    close(third[1]);
+}

@@ -227,17 +227,15 @@ static void ReleaseClientId(rgui_wl_connection* c, uint32_t id) {
     c->free_ids[c->free_count++] = id;
 }
 
-/* After a destructor: a client id waits for delete_id, a server id is free at once. */
+/* After a destructor the object is a zombie that keeps its interface, so the file descriptors
+ * of events still in flight to it are known and closed: a client id until delete_id frees it, a
+ * server id until the compositor creates another object with it. */
 static void Retire(rgui_wl_connection* c, uint32_t id) {
     Object* o = Lookup(c, id);
     if (!o || o->state != kLive) return;
-    if (id >= RGUI_WL_SERVER_ID_START) {
-        memset(o, 0, sizeof *o);
-    } else {
-        o->state = kZombie;
-        o->dispatcher = NULL;
-        o->user = NULL;
-    }
+    o->state = kZombie;
+    o->dispatcher = NULL;
+    o->user = NULL;
 }
 
 uint32_t rgui_wl_new_object(rgui_wl_connection* c, const rgui_wl_interface* iface, uint32_t version,
@@ -679,9 +677,20 @@ int rgui_wl_dispatch(rgui_wl_connection* c) {
         if (c->in_end - c->in_start < size) break;
         c->in_start += size; /* consumed before the handler runs: handlers may dispatch again */
         const Object* o = Lookup(c, id);
-        if (!o || o->state == kFree) continue; /* destroyed and forgotten */
+        if (!o || o->state == kFree) {
+            /* No object, not even a zombie: nothing tells how many of the queued fds are this
+             * event's, and handing a later event the wrong one is worse than stopping. */
+            if (c->fds_in_count) {
+                SetError(c, "an event for unknown object %u while file descriptors are queued", id);
+                c->depth--;
+                return -1;
+            }
+            continue;
+        }
+        /* Not in our tables: we do not use it. The tables list every event that carries a file
+         * descriptor (wl_protocols.c), so an unlisted one has none to take. */
         const rgui_wl_message* m = FindMessage(o->iface->events, o->iface->event_count, opcode);
-        if (!m) continue; /* not in our tables: we do not use it */
+        if (!m) continue;
         rgui_wl_arg args[RGUI_WL_MAX_ARGS];
         uint32_t new_id;
         if (Decode(c, o, m, header + 8, size - 8, args, &new_id) != 0) {

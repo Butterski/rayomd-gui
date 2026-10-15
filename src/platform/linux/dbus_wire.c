@@ -529,7 +529,8 @@ size_t rgui_dbus_message_size(const uint8_t head[16]) {
     return (size_t)total;
 }
 
-bool rgui_dbus_parse_message(const uint8_t* data, size_t size, rgui_dbus_message* out) {
+/* The header of a complete message of exactly `size` bytes; the body is not looked at. */
+static bool parse_header(const uint8_t* data, size_t size, rgui_dbus_message* out) {
     if (size < 16 || rgui_dbus_message_size(data) != size) return false;
     memset(out, 0, sizeof *out);
     out->big_endian = data[0] == 'B';
@@ -597,13 +598,21 @@ bool rgui_dbus_parse_message(const uint8_t* data, size_t size, rgui_dbus_message
     }
     if (!out->signature) out->signature = "";
     out->body = data + header_end;
+    return true;
+}
 
+/* Every value of the body against its signature. */
+static bool body_valid(const rgui_dbus_message* m) {
     rgui_dbus_iter body;
-    rgui_dbus_body_iter(out, &body);
+    rgui_dbus_body_iter(m, &body);
     while (rgui_dbus_iter_type(&body)) {
         if (!rgui_dbus_skip(&body)) return false;
     }
     return !body.bad && body.pos == body.end;
+}
+
+bool rgui_dbus_parse_message(const uint8_t* data, size_t size, rgui_dbus_message* out) {
+    return parse_header(data, size, out) && body_valid(out);
 }
 
 void rgui_dbus_body_iter(const rgui_dbus_message* message, rgui_dbus_iter* it) {
@@ -762,15 +771,24 @@ typedef struct match_entry {
     char* interface;
     char* member;
     char* path;
+    char* sender;
+    char* arg0;
     char* rule;
     rgui_dbus_signal_fn callback;
     void* user;
 } match_entry;
 
+enum { CONN_CONNECTING, CONN_AUTH, CONN_OPEN };
+
 struct rgui_dbus_conn {
     int fd;
+    int state;    /* CONN_*: the socket's connect, the authentication, then messages */
+    bool ready;   /* Hello answered */
     bool dead;
     bool dispatching;
+    char auth_line[512];
+    size_t auth_length;
+    size_t skip; /* bytes still to drop of a message over RGUI_DBUS_MAX_INCOMING */
     uint32_t next_serial;
     uint32_t next_match_id;
     char unique_name[256];
@@ -798,6 +816,7 @@ static int64_t now_ms(void) {
 
 /* Writes queued output until it is all sent or the socket would block. */
 static bool conn_flush(rgui_dbus_conn* conn) {
+    if (conn->state != CONN_OPEN) return !conn->dead; /* queued until after BEGIN */
     while (!conn->dead && conn->out_start < conn->out.size) {
         ssize_t n = send(conn->fd, conn->out.data + conn->out_start, conn->out.size - conn->out_start, MSG_NOSIGNAL);
         if (n > 0) {
@@ -939,6 +958,8 @@ static void free_match(match_entry* m) {
     free(m->interface);
     free(m->member);
     free(m->path);
+    free(m->sender);
+    free(m->arg0);
     free(m->rule);
     memset(m, 0, sizeof *m);
 }
@@ -946,7 +967,10 @@ static void free_match(match_entry* m) {
 uint32_t rgui_dbus_add_match(rgui_dbus_conn* conn, const rgui_dbus_match* match, rgui_dbus_signal_fn callback,
                              void* user) {
     if (!conn || conn->dead || !callback) return 0;
-    if (!rule_value_ok(match->interface) || !rule_value_ok(match->member) || !rule_value_ok(match->path)) return 0;
+    if (!rule_value_ok(match->interface) || !rule_value_ok(match->member) || !rule_value_ok(match->path) ||
+        !rule_value_ok(match->sender) || !rule_value_ok(match->arg0)) {
+        return 0;
+    }
     if (conn->match_count == conn->match_capacity) {
         size_t capacity = conn->match_capacity ? conn->match_capacity * 2 : 8;
         match_entry* m = (match_entry*)realloc(conn->matches, capacity * sizeof *m);
@@ -959,17 +983,22 @@ uint32_t rgui_dbus_add_match(rgui_dbus_conn* conn, const rgui_dbus_match* match,
     entry.interface = dup_or_null(match->interface, &ok);
     entry.member = dup_or_null(match->member, &ok);
     entry.path = dup_or_null(match->path, &ok);
-    size_t size = 3200;
+    entry.sender = dup_or_null(match->sender, &ok);
+    entry.arg0 = dup_or_null(match->arg0, &ok);
+    size_t size = 5400;
     entry.rule = (char*)malloc(size);
     if (!ok || !entry.rule) {
         free_match(&entry);
         return 0;
     }
-    int n = snprintf(entry.rule, size, "type='signal'%s%s%s%s%s%s%s%s%s",
-                     match->interface ? ",interface='" : "", match->interface ? match->interface : "",
-                     match->interface ? "'" : "", match->member ? ",member='" : "",
-                     match->member ? match->member : "", match->member ? "'" : "",
-                     match->path ? ",path='" : "", match->path ? match->path : "", match->path ? "'" : "");
+    int n = snprintf(entry.rule, size, "type='signal'%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+                     match->sender ? ",sender='" : "", match->sender ? match->sender : "",
+                     match->sender ? "'" : "", match->interface ? ",interface='" : "",
+                     match->interface ? match->interface : "", match->interface ? "'" : "",
+                     match->member ? ",member='" : "", match->member ? match->member : "",
+                     match->member ? "'" : "", match->path ? ",path='" : "", match->path ? match->path : "",
+                     match->path ? "'" : "", match->arg0 ? ",arg0='" : "", match->arg0 ? match->arg0 : "",
+                     match->arg0 ? "'" : "");
     if (n < 0 || (size_t)n >= size || !bus_call_string(conn, "AddMatch", entry.rule)) {
         free_match(&entry);
         return 0;
@@ -1019,6 +1048,44 @@ static bool field_matches(const char* want, const char* have) {
     return !want || (have && strcmp(want, have) == 0);
 }
 
+/* A sender the client itself can compare: a unique name, or the bus. A well-known name's owner
+ * is known to the caller only. */
+static bool sender_checkable(const char* sender) {
+    return sender[0] == ':' || strcmp(sender, "org.freedesktop.DBus") == 0;
+}
+
+/* The header part of a match: everything but arg0, which needs the body. */
+static bool header_matches(const match_entry* e, const rgui_dbus_message* m) {
+    return e->id && field_matches(e->interface, m->interface) && field_matches(e->member, m->member) &&
+           field_matches(e->path, m->path) && (!e->sender || !sender_checkable(e->sender) || field_matches(e->sender, m->sender));
+}
+
+static bool arg0_matches(const match_entry* e, const rgui_dbus_message* m) {
+    if (!e->arg0) return true;
+    if (m->signature[0] != 's') return false;
+    rgui_dbus_iter it;
+    rgui_dbus_body_iter(m, &it);
+    const char* value;
+    return rgui_dbus_get_string(&it, &value, NULL) && strcmp(value, e->arg0) == 0;
+}
+
+/* Whether a message whose header is parsed is worth validating and routing. */
+static bool wanted(const rgui_dbus_conn* conn, const rgui_dbus_message* m) {
+    if (m->type == RGUI_DBUS_METHOD_RETURN || m->type == RGUI_DBUS_ERROR) {
+        for (size_t i = 0; i < conn->pending_count; ++i) {
+            if (conn->pending[i].serial == m->reply_serial) return true;
+        }
+        return false;
+    }
+    if (m->type == RGUI_DBUS_SIGNAL) {
+        for (size_t i = 0; i < conn->match_count; ++i) {
+            if (header_matches(&conn->matches[i], m)) return true;
+        }
+        return false;
+    }
+    return true; /* a method call: answered (Ping, the handler, or UnknownMethod) */
+}
+
 static void route(rgui_dbus_conn* conn, const rgui_dbus_message* m) {
     if (m->type == RGUI_DBUS_METHOD_RETURN || m->type == RGUI_DBUS_ERROR) {
         for (size_t i = 0; i < conn->pending_count; ++i) {
@@ -1032,10 +1099,7 @@ static void route(rgui_dbus_conn* conn, const rgui_dbus_message* m) {
         size_t count = conn->match_count;
         for (size_t i = 0; i < count; ++i) {
             match_entry e = conn->matches[i]; /* the array may grow in the callback */
-            if (e.id && field_matches(e.interface, m->interface) && field_matches(e.member, m->member) &&
-                field_matches(e.path, m->path)) {
-                e.callback(e.user, m);
-            }
+            if (header_matches(&e, m) && arg0_matches(&e, m)) e.callback(e.user, m);
         }
     } else if (m->type == RGUI_DBUS_METHOD_CALL) {
         if (m->interface && strcmp(m->interface, "org.freedesktop.DBus.Peer") == 0 && strcmp(m->member, "Ping") == 0) {
@@ -1049,14 +1113,29 @@ static void route(rgui_dbus_conn* conn, const rgui_dbus_message* m) {
 
 /* Routes every complete message in the input; false when the stream is not D-Bus. */
 static bool process_input(rgui_dbus_conn* conn) {
-    while (conn->in_size - conn->in_start >= 16) {
+    for (;;) {
+        const size_t available = conn->in_size - conn->in_start;
+        if (conn->skip) {
+            const size_t drop = conn->skip < available ? conn->skip : available;
+            conn->in_start += drop;
+            conn->skip -= drop;
+            if (conn->skip) break;
+            continue;
+        }
+        if (available < 16) break;
         const uint8_t* head = conn->in + conn->in_start;
         size_t size = rgui_dbus_message_size(head);
         if (size == 0) return false;
-        if (conn->in_size - conn->in_start < size) break;
+        if (size > RGUI_DBUS_MAX_INCOMING) {
+            conn->skip = size; /* dropped as it arrives */
+            continue;
+        }
+        if (available < size) break;
+        /* An invalid or unwanted message of a valid size is dropped; the body of a wanted one is
+         * checked only now. */
         rgui_dbus_message m;
-        if (rgui_dbus_parse_message(head, size, &m)) route(conn, &m);
-        conn->in_start += size; /* an invalid message of a valid size is dropped */
+        if (parse_header(head, size, &m) && wanted(conn, &m) && body_valid(&m)) route(conn, &m);
+        conn->in_start += size;
     }
     if (conn->in_start) {
         memmove(conn->in, conn->in + conn->in_start, conn->in_size - conn->in_start);
@@ -1069,13 +1148,12 @@ static bool process_input(rgui_dbus_conn* conn) {
 /* Makes room for the next read: the whole of the message being received, or a chunk. */
 static bool reserve_input(rgui_dbus_conn* conn) {
     size_t need = conn->in_size + RGUI_DBUS_READ_CHUNK;
-    if (conn->in_size >= 16) {
+    if (conn->in_size >= 16 && !conn->skip) {
         size_t size = rgui_dbus_message_size(conn->in);
         if (size == 0) return false;
-        if (size > need) need = size;
+        if (size <= RGUI_DBUS_MAX_INCOMING && size > need) need = size;
     }
     if (need <= conn->in_capacity) return true;
-    if (need > RGUI_DBUS_MAX_QUEUE) return false;
     size_t capacity = conn->in_capacity ? conn->in_capacity : RGUI_DBUS_READ_CHUNK;
     while (capacity < need) capacity *= 2;
     uint8_t* in = (uint8_t*)realloc(conn->in, capacity);
@@ -1096,13 +1174,83 @@ static void expire_calls(rgui_dbus_conn* conn, bool all) {
     }
 }
 
+/* Sends a short handshake line at once; the socket is fresh, so it never fills. */
+static bool send_line(rgui_dbus_conn* conn, const char* data, size_t size) {
+    while (size > 0) {
+        ssize_t n = send(conn->fd, data, size, MSG_NOSIGNAL);
+        if (n > 0) {
+            data += n;
+            size -= (size_t)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* AUTH EXTERNAL with our uid's decimal digits in hex. */
+static bool send_auth(rgui_dbus_conn* conn) {
+    char uid[24];
+    snprintf(uid, sizeof uid, "%u", (unsigned)getuid());
+    char auth[96];
+    size_t n = 0;
+    auth[n++] = 0;
+    n += (size_t)snprintf(auth + n, sizeof auth - n, "AUTH EXTERNAL ");
+    for (const char* p = uid; *p; ++p) n += (size_t)snprintf(auth + n, sizeof auth - n, "%02x", (unsigned char)*p);
+    n += (size_t)snprintf(auth + n, sizeof auth - n, "\r\n");
+    return send_line(conn, auth, n);
+}
+
+/* Moves the handshake on as far as the socket allows: connect, AUTH, OK, BEGIN. */
+static void advance_handshake(rgui_dbus_conn* conn) {
+    if (conn->state == CONN_CONNECTING) {
+        struct pollfd p = {conn->fd, POLLOUT, 0};
+        if (poll(&p, 1, 0) <= 0) return;
+        int error = 0;
+        socklen_t error_length = sizeof error;
+        if (getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &error, &error_length) != 0 || error != 0 || !send_auth(conn)) {
+            conn->dead = true;
+            return;
+        }
+        conn->state = CONN_AUTH;
+    }
+    /* One line, read a byte at a time: a server sends nothing after OK before our BEGIN. */
+    while (conn->state == CONN_AUTH) {
+        if (conn->auth_length + 1 >= sizeof conn->auth_line) {
+            conn->dead = true;
+            return;
+        }
+        ssize_t r = recv(conn->fd, conn->auth_line + conn->auth_length, 1, 0);
+        if (r == 1) {
+            size_t n = ++conn->auth_length;
+            if (n < 2 || conn->auth_line[n - 2] != '\r' || conn->auth_line[n - 1] != '\n') continue;
+            conn->auth_line[n - 2] = 0;
+            if (strncmp(conn->auth_line, "OK ", 3) != 0 || !send_line(conn, "BEGIN\r\n", 7)) {
+                conn->dead = true;
+                return;
+            }
+            conn->state = CONN_OPEN; /* Hello and whatever was queued go out now */
+        } else if (r < 0 && errno == EINTR) {
+            continue;
+        } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+        } else {
+            conn->dead = true;
+            return;
+        }
+    }
+}
+
 bool rgui_dbus_dispatch(rgui_dbus_conn* conn) {
     if (!conn) return false;
     if (conn->dispatching) return !conn->dead;
     conn->dispatching = true;
+    if (!conn->dead && conn->state != CONN_OPEN) advance_handshake(conn);
     /* Read at most 16 MiB per call, so other sources get their turn. */
     size_t budget = 16u << 20;
-    while (!conn->dead && budget > 0) {
+    while (!conn->dead && conn->state == CONN_OPEN && budget > 0) {
         if (!reserve_input(conn)) {
             conn->dead = true;
             break;
@@ -1122,7 +1270,14 @@ bool rgui_dbus_dispatch(rgui_dbus_conn* conn) {
     }
     conn_flush(conn);
     expire_calls(conn, conn->dead);
+    if (conn->dead) expire_calls(conn, true); /* a callback (Hello's) may have closed it */
     compact_matches(conn);
+    /* A big message made the buffer grow: give the memory back once it is drained. */
+    if (conn->in_size == 0 && conn->in_capacity > RGUI_DBUS_READ_CHUNK) {
+        free(conn->in);
+        conn->in = NULL;
+        conn->in_capacity = 0;
+    }
     conn->dispatching = false;
     return !conn->dead;
 }
@@ -1150,9 +1305,13 @@ bool rgui_dbus_wait(rgui_dbus_conn* conn, int timeout_ms) {
 
 const char* rgui_dbus_unique_name(const rgui_dbus_conn* conn) { return conn->unique_name; }
 bool rgui_dbus_connected(const rgui_dbus_conn* conn) { return conn && !conn->dead; }
+bool rgui_dbus_ready(const rgui_dbus_conn* conn) { return conn && conn->ready && !conn->dead; }
 int rgui_dbus_fd(const rgui_dbus_conn* conn) { return conn->fd; }
+size_t rgui_dbus_input_capacity(const rgui_dbus_conn* conn) { return conn->in_capacity; }
 
 short rgui_dbus_poll_events(const rgui_dbus_conn* conn) {
+    if (conn->state == CONN_CONNECTING) return POLLOUT;
+    if (conn->state == CONN_AUTH) return POLLIN;
     return (short)(POLLIN | (conn->out_start < conn->out.size ? POLLOUT : 0));
 }
 
@@ -1167,111 +1326,32 @@ void rgui_dbus_close(rgui_dbus_conn* conn) {
     free(conn);
 }
 
-/* Polls the socket for `events` until `deadline`; false on timeout or error. */
-static bool poll_until(int fd, short events, int64_t deadline) {
-    for (;;) {
-        int64_t left = deadline - now_ms();
-        if (left <= 0) return false;
-        struct pollfd p = {fd, events, 0};
-        int r = poll(&p, 1, (int)(left > 0x7FFFFFFF ? 0x7FFFFFFF : left));
-        if (r > 0) return (p.revents & (events | POLLHUP | POLLERR)) != 0;
-        if (r < 0 && errno != EINTR) return false;
-    }
-}
-
-static bool write_all(int fd, const char* data, size_t size, int64_t deadline) {
-    while (size > 0) {
-        ssize_t n = send(fd, data, size, MSG_NOSIGNAL);
-        if (n > 0) {
-            data += n;
-            size -= (size_t)n;
-        } else if (n < 0 && errno == EINTR) {
-            continue;
-        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            if (!poll_until(fd, POLLOUT, deadline)) return false;
-        } else {
-            return false;
-        }
-    }
-    return true;
-}
-
-/* Reads one authentication line ending in \r\n into `line` (without it). Bytes after it, which
- * a server sends only after BEGIN, cannot occur here. */
-static bool read_auth_line(int fd, char* line, size_t capacity, int64_t deadline) {
-    size_t n = 0;
-    for (;;) {
-        if (n + 1 >= capacity) return false;
-        ssize_t r = recv(fd, line + n, 1, 0);
-        if (r == 1) {
-            ++n;
-            if (n >= 2 && line[n - 2] == '\r' && line[n - 1] == '\n') {
-                line[n - 2] = 0;
-                return true;
-            }
-        } else if (r < 0 && errno == EINTR) {
-            continue;
-        } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            if (!poll_until(fd, POLLIN, deadline)) return false;
-        } else {
-            return false;
-        }
-    }
-}
-
-typedef struct hello_state {
-    bool done;
-    rgui_dbus_conn* conn;
-} hello_state;
-
 static void on_hello(void* user, const rgui_dbus_message* reply) {
-    hello_state* state = (hello_state*)user;
-    state->done = true;
-    if (!reply || reply->type != RGUI_DBUS_METHOD_RETURN || strcmp(reply->signature, "s") != 0) return;
-    rgui_dbus_iter it;
-    rgui_dbus_body_iter(reply, &it);
-    const char* name;
-    uint32_t length;
-    if (!rgui_dbus_get_string(&it, &name, &length) || length == 0 || length >= sizeof state->conn->unique_name ||
-        name[0] != ':') {
+    rgui_dbus_conn* conn = (rgui_dbus_conn*)user;
+    const char* name = NULL;
+    uint32_t length = 0;
+    if (reply && reply->type == RGUI_DBUS_METHOD_RETURN && strcmp(reply->signature, "s") == 0) {
+        rgui_dbus_iter it;
+        rgui_dbus_body_iter(reply, &it);
+        if (!rgui_dbus_get_string(&it, &name, &length) || length == 0 || length >= sizeof conn->unique_name ||
+            name[0] != ':') {
+            name = NULL;
+        }
+    }
+    if (!name) {
+        conn->dead = true; /* no Hello, no bus: the pending calls get their NULL replies */
         return;
     }
-    memcpy(state->conn->unique_name, name, (size_t)length + 1);
+    memcpy(conn->unique_name, name, (size_t)length + 1);
+    conn->ready = true;
 }
 
-rgui_dbus_conn* rgui_dbus_open(const char* address, int timeout_ms) {
+rgui_dbus_conn* rgui_dbus_open_async(const char* address, int timeout_ms) {
     struct sockaddr_un sa;
     unsigned sa_length;
     if (!address || !rgui_dbus_parse_address(address, &sa, &sa_length)) return NULL;
-    int64_t deadline = now_ms() + (timeout_ms > 0 ? timeout_ms : 1);
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) return NULL;
-    if (connect(fd, (const struct sockaddr*)&sa, (socklen_t)sa_length) != 0) {
-        int error = 0;
-        socklen_t error_length = sizeof error;
-        if (errno != EINPROGRESS || !poll_until(fd, POLLOUT, deadline) ||
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_length) != 0 || error != 0) {
-            close(fd);
-            return NULL;
-        }
-    }
-
-    /* AUTH EXTERNAL with our uid's decimal digits in hex. */
-    char uid[24];
-    snprintf(uid, sizeof uid, "%u", (unsigned)getuid());
-    char auth[96];
-    size_t n = 0;
-    auth[n++] = 0;
-    n += (size_t)snprintf(auth + n, sizeof auth - n, "AUTH EXTERNAL ");
-    for (const char* p = uid; *p; ++p) n += (size_t)snprintf(auth + n, sizeof auth - n, "%02x", (unsigned char)*p);
-    n += (size_t)snprintf(auth + n, sizeof auth - n, "\r\n");
-    char line[512];
-    if (!write_all(fd, auth, n, deadline) || !read_auth_line(fd, line, sizeof line, deadline) ||
-        strncmp(line, "OK ", 3) != 0 || !write_all(fd, "BEGIN\r\n", 7, deadline)) {
-        close(fd);
-        return NULL;
-    }
-
     rgui_dbus_conn* conn = (rgui_dbus_conn*)calloc(1, sizeof *conn);
     if (!conn) {
         close(fd);
@@ -1280,26 +1360,55 @@ rgui_dbus_conn* rgui_dbus_open(const char* address, int timeout_ms) {
     conn->fd = fd;
     conn->next_serial = 1;
     conn->next_match_id = 1;
-
-    hello_state hello = {false, conn};
+    conn->state = CONN_AUTH;
+    if (connect(fd, (const struct sockaddr*)&sa, (socklen_t)sa_length) != 0) {
+        if (errno != EINPROGRESS && errno != EAGAIN) {
+            rgui_dbus_close(conn);
+            return NULL;
+        }
+        conn->state = CONN_CONNECTING;
+    }
+    if (conn->state == CONN_AUTH && !send_auth(conn)) {
+        rgui_dbus_close(conn);
+        return NULL;
+    }
+    /* Hello first; its timeout bounds the whole handshake. */
     rgui_dbus_message m = {0};
     m.destination = "org.freedesktop.DBus";
     m.path = "/org/freedesktop/DBus";
     m.interface = "org.freedesktop.DBus";
     m.member = "Hello";
-    if (!rgui_dbus_call(conn, &m, timeout_ms, on_hello, &hello)) {
+    if (!rgui_dbus_call(conn, &m, timeout_ms > 0 ? timeout_ms : 1, on_hello, conn)) {
         rgui_dbus_close(conn);
         return NULL;
     }
-    while (!hello.done) {
+    return conn;
+}
+
+bool rgui_dbus_wait_ready(rgui_dbus_conn* conn, int timeout_ms) {
+    if (!conn) return false;
+    int64_t deadline = now_ms() + (timeout_ms > 0 ? timeout_ms : 0);
+    while (!conn->ready && !conn->dead) {
         int64_t left = deadline - now_ms();
-        if (left <= 0 || !rgui_dbus_wait(conn, (int)left)) break;
+        if (left <= 0) break;
+        rgui_dbus_wait(conn, (int)(left > 0x7FFFFFFF ? 0x7FFFFFFF : left));
     }
-    if (!hello.done || conn->unique_name[0] == 0) {
+    return rgui_dbus_ready(conn);
+}
+
+rgui_dbus_conn* rgui_dbus_open(const char* address, int timeout_ms) {
+    rgui_dbus_conn* conn = rgui_dbus_open_async(address, timeout_ms);
+    if (conn && !rgui_dbus_wait_ready(conn, timeout_ms)) {
         rgui_dbus_close(conn); /* the Hello callback, if still pending, is dropped */
         return NULL;
     }
     return conn;
+}
+
+rgui_dbus_conn* rgui_dbus_open_session_async(int timeout_ms) {
+    char address[4096];
+    if (!rgui_dbus_session_address(address, sizeof address)) return NULL;
+    return rgui_dbus_open_async(address, timeout_ms);
 }
 
 rgui_dbus_conn* rgui_dbus_open_session(int timeout_ms) {

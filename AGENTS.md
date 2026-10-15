@@ -99,7 +99,12 @@ memory, so it is the PDF, not an approximation of it.
   and `snprintf` (the C locale; `setlocale` is never called).
 - Every Wayland or D-Bus message added goes into the protocol tables (`wl_protocols.c`, the
   D-Bus calls in `portal.cpp`) with its signature from the protocol XML or interface
-  definition.
+  definition. Every event that carries a file descriptor of a listed interface is listed, used
+  or not: the wire skips unlisted events without taking fds off the queue.
+- Nothing on the UI thread waits on another process: the D-Bus handshake, Hyprland's IPC and
+  clipboard and drop transfers run on the event loop with deadlines. A D-Bus signal counts only
+  from the sender it is about (the portal's current owner, the bus); clipboard transfers are
+  capped in number, idle time and size (`data_transfer.h`).
 - Keymap changes keep the xkb fixtures (`tests/data/xkb`, ctest `rayomd-gui-xkb`) passing; a
   keymap form the reader misses is added to the reader and to the fixtures, never handed to
   libxkbcommon.

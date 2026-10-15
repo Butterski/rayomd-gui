@@ -4,6 +4,7 @@
 //
 // The D-Bus messages RayoMD GUI sends and receives (signatures as in the interfaces' XML):
 //   org.freedesktop.DBus             Hello () -> s; AddMatch (s); RemoveMatch (s)   [dbus_wire.c]
+//                                    GetNameOwner (s) -> s; signal NameOwnerChanged (sss)
 //   org.freedesktop.DBus.Peer        Ping () -> (), answered                        [dbus_wire.c]
 //   org.freedesktop.portal.Settings  ReadOne (ss) -> v; Read (ss) -> v (a v in the v);
 //                                    signal SettingChanged (ssv)
@@ -16,7 +17,12 @@
 
 #include "core/rayomd_pdf_source.h"
 
+#include <sys/random.h>
+#include <time.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <system_error>
@@ -33,6 +39,24 @@ constexpr const char* kColorScheme = "color-scheme";
 constexpr const char* kInterface = "org.gnome.desktop.interface";
 constexpr const char* kTextScale = "text-scaling-factor";
 constexpr int kCallTimeoutMs = 25000;
+constexpr const char* kBusName = "org.freedesktop.DBus";
+constexpr const char* kBusPath = "/org/freedesktop/DBus";
+
+// A request token nobody can guess: 64 random bits (getrandom; should the kernel refuse, the
+// clock, the pid and a counter, which still never repeat within the process).
+std::string RandomToken() {
+    static uint64_t counter = 0;
+    uint64_t r = 0;
+    if (getrandom(&r, sizeof r, GRND_NONBLOCK) != static_cast<ssize_t>(sizeof r)) {
+        timespec ts{};
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        r = (static_cast<uint64_t>(ts.tv_sec) * 1000000000u + static_cast<uint64_t>(ts.tv_nsec)) ^
+            (static_cast<uint64_t>(getpid()) << 40) ^ (++counter * 0x9E3779B97F4A7C15ull);
+    }
+    char hex[17];
+    std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(r));
+    return std::string("rayomd_gui_") + hex;
+}
 
 int HexValue(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -164,20 +188,80 @@ void Portal::Disconnect() {
     rgui_dbus_close(conn_);
     conn_ = nullptr;
     settingsMatch_ = 0;
+    ownerMatch_ = 0;
+    portalOwner_.clear();
     requests_.clear();
     reads_.clear();
 }
 
 bool Portal::Connect(int timeoutMs) {
     Disconnect();
-    conn_ = rgui_dbus_open_session(timeoutMs);
-    return conn_ != nullptr;
+    conn_ = rgui_dbus_open_session_async(timeoutMs);
+    return Started(timeoutMs);
 }
 
 bool Portal::ConnectTo(const char* address, int timeoutMs) {
     Disconnect();
-    conn_ = rgui_dbus_open(address, timeoutMs);
-    return conn_ != nullptr;
+    conn_ = rgui_dbus_open_async(address, timeoutMs);
+    return Started(timeoutMs);
+}
+
+bool Portal::Started(int timeoutMs) {
+    if (!conn_) return false;
+    connectTimeoutMs_ = timeoutMs;
+    // The portal's owner: changes from now on, then who owns it now.
+    rgui_dbus_match changed{kBusName, "NameOwnerChanged", kBusPath, kBusName, kPortalName};
+    ownerMatch_ = rgui_dbus_add_match(conn_, &changed, &Portal::OnNameOwnerChanged, this);
+    rgui_dbus_buf body{};
+    rgui_dbus_put_string(&body, kPortalName);
+    rgui_dbus_message m{};
+    m.destination = kBusName;
+    m.path = kBusPath;
+    m.interface = kBusName;
+    m.member = "GetNameOwner";
+    m.signature = "s";
+    m.body = body.data;
+    m.body_size = static_cast<uint32_t>(body.size);
+    if (!body.failed) rgui_dbus_call(conn_, &m, kCallTimeoutMs, &Portal::OnNameOwner, this);
+    rgui_dbus_buf_free(&body);
+    return true;
+}
+
+void Portal::OnNameOwner(void* user, const rgui_dbus_message* reply) {
+    auto* portal = static_cast<Portal*>(user);
+    if (!reply || reply->type != RGUI_DBUS_METHOD_RETURN || std::strcmp(reply->signature, "s") != 0) return;
+    rgui_dbus_iter it;
+    rgui_dbus_body_iter(reply, &it);
+    const char* owner;
+    if (rgui_dbus_get_string(&it, &owner, nullptr) && owner[0] == ':') portal->portalOwner_ = owner;
+}
+
+void Portal::OnNameOwnerChanged(void* user, const rgui_dbus_message* signal) {
+    auto* portal = static_cast<Portal*>(user);
+    // Only the bus speaks for names (dbus_wire compares the sender of a unique or bus sender).
+    if (!signal->sender || std::strcmp(signal->sender, kBusName) != 0 || std::strcmp(signal->signature, "sss") != 0) {
+        return;
+    }
+    rgui_dbus_iter it;
+    rgui_dbus_body_iter(signal, &it);
+    const char* name;
+    const char* oldOwner;
+    const char* newOwner;
+    if (!rgui_dbus_get_string(&it, &name, nullptr) || !rgui_dbus_get_string(&it, &oldOwner, nullptr) ||
+        !rgui_dbus_get_string(&it, &newOwner, nullptr) || std::strcmp(name, kPortalName) != 0) {
+        return;
+    }
+    portal->portalOwner_ = newOwner[0] == ':' ? newOwner : "";
+}
+
+void Portal::LearnOwner(const rgui_dbus_message* reply) {
+    if (reply && reply->type == RGUI_DBUS_METHOD_RETURN && reply->sender && reply->sender[0] == ':') {
+        portalOwner_ = reply->sender;
+    }
+}
+
+bool Portal::FromPortal(const rgui_dbus_message* signal) const {
+    return signal->sender && !portalOwner_.empty() && portalOwner_ == signal->sender;
 }
 
 int Portal::Fd() const { return conn_ ? rgui_dbus_fd(conn_) : -1; }
@@ -249,6 +333,7 @@ void Portal::OnSettingReply(void* user, const rgui_dbus_message* reply) {
         key->usingRead = true;
         if (portal->ReadKey(key)) return;
     } else if (reply && reply->type == RGUI_DBUS_METHOD_RETURN && std::strcmp(reply->signature, "v") == 0) {
+        portal->LearnOwner(reply);
         rgui_dbus_iter it;
         rgui_dbus_body_iter(reply, &it);
         portal->ApplySetting(key->nameSpace, key->key, &it);
@@ -289,7 +374,7 @@ void Portal::ReadAppearance(std::function<void(Appearance)> done) {
 
 void Portal::OnSettingChanged(void* user, const rgui_dbus_message* signal) {
     auto* portal = static_cast<Portal*>(user);
-    if (std::strcmp(signal->signature, "ssv") != 0) return;
+    if (!portal->FromPortal(signal) || std::strcmp(signal->signature, "ssv") != 0) return;
     rgui_dbus_iter it;
     rgui_dbus_body_iter(signal, &it);
     const char* nameSpace;
@@ -306,7 +391,7 @@ void Portal::OnSettingChanged(void* user, const rgui_dbus_message* signal) {
 void Portal::WatchAppearance(std::function<void(Appearance)> changed) {
     changed_ = std::move(changed);
     if (!conn_ || settingsMatch_) return;
-    rgui_dbus_match match{kSettings, "SettingChanged", kPortalPath};
+    rgui_dbus_match match{kSettings, "SettingChanged", kPortalPath, kPortalName, nullptr};
     settingsMatch_ = rgui_dbus_add_match(conn_, &match, &Portal::OnSettingChanged, this);
 }
 
@@ -331,6 +416,7 @@ void Portal::OnFileReply(void* user, const rgui_dbus_message* reply) {
     const char* handle = nullptr;
     rgui_dbus_iter it;
     if (reply && reply->type == RGUI_DBUS_METHOD_RETURN && std::strcmp(reply->signature, "o") == 0) {
+        portal->LearnOwner(reply);
         rgui_dbus_body_iter(reply, &it);
         if (!rgui_dbus_get_string(&it, &handle, nullptr)) handle = nullptr;
     }
@@ -342,7 +428,8 @@ void Portal::OnFileReply(void* user, const rgui_dbus_message* reply) {
         // A portal older than handle_token (before 0.9) picks its own request path.
         rgui_dbus_remove_match(portal->conn_, request->match);
         request->handle = handle;
-        rgui_dbus_match match{"org.freedesktop.portal.Request", "Response", request->handle.c_str()};
+        rgui_dbus_match match{"org.freedesktop.portal.Request", "Response", request->handle.c_str(), kPortalName,
+                              nullptr};
         request->match = rgui_dbus_add_match(portal->conn_, &match, &Portal::OnFileResponse, request);
         if (!request->match) portal->Finish(request, {FileDialogResult::Unavailable, {}});
     }
@@ -351,6 +438,8 @@ void Portal::OnFileReply(void* user, const rgui_dbus_message* reply) {
 void Portal::OnFileResponse(void* user, const rgui_dbus_message* signal) {
     auto* request = static_cast<Request*>(user);
     Portal* portal = request->portal;
+    // Anyone may send us a signal with this path; only the portal's Response counts.
+    if (!portal->FromPortal(signal)) return;
     FileDialogResult result{FileDialogResult::Failed, {}};
     rgui_dbus_iter it;
     rgui_dbus_body_iter(signal, &it);
@@ -389,20 +478,21 @@ void Portal::OnFileResponse(void* user, const rgui_dbus_message* signal) {
 
 void Portal::ShowFileDialog(FileDialog kind, const std::string& suggestedPath,
                             std::function<void(FileDialogResult)> callback) {
-    if (!conn_) {
+    // The request path holds our unique name: the handshake must be over.
+    if (!conn_ || !rgui_dbus_wait_ready(conn_, connectTimeoutMs_)) {
         if (callback) callback({FileDialogResult::Unavailable, {}});
         return;
     }
     auto request = std::make_unique<Request>();
     request->portal = this;
     request->callback = std::move(callback);
-    std::string token = "rayomd_gui_" + std::to_string(++nextToken_);
+    std::string token = RandomToken();
     request->handle = RequestPath(rgui_dbus_unique_name(conn_), token);
     Request* raw = request.get();
     requests_.push_back(std::move(request));
 
     // Subscribe to the Response before calling, so it cannot be missed.
-    rgui_dbus_match match{"org.freedesktop.portal.Request", "Response", raw->handle.c_str()};
+    rgui_dbus_match match{"org.freedesktop.portal.Request", "Response", raw->handle.c_str(), kPortalName, nullptr};
     raw->match = rgui_dbus_add_match(conn_, &match, &Portal::OnFileResponse, raw);
     if (!raw->match) {
         Finish(raw, {FileDialogResult::Unavailable, {}});

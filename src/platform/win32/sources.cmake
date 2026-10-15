@@ -8,7 +8,7 @@ list(APPEND RGUI_WIN32_SOURCES
 # System DLLs loaded on first use (delay_load.cpp): every call of these goes to its __wrap_.
 set(RGUI_WIN32_DELAY_LOADED
     GetOpenFileNameW GetSaveFileNameW CommDlgExtendedError
-    DragAcceptFiles DragQueryFileW DragFinish ShellExecuteW SHGetFolderPathW
+    DragAcceptFiles DragQueryFileW DragFinish ShellExecuteExW SHGetFolderPathW
     DwmSetWindowAttribute
     ImmGetContext ImmReleaseContext ImmGetCompositionStringW ImmSetCompositionWindow
     ImmSetCandidateWindow ImmAssociateContextEx)

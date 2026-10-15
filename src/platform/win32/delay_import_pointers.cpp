@@ -20,7 +20,7 @@ extern "C" DWORD WINAPI __wrap_CommDlgExtendedError();
 extern "C" void WINAPI __wrap_DragAcceptFiles(HWND, BOOL);
 extern "C" UINT WINAPI __wrap_DragQueryFileW(HDROP, UINT, LPWSTR, UINT);
 extern "C" void WINAPI __wrap_DragFinish(HDROP);
-extern "C" HINSTANCE WINAPI __wrap_ShellExecuteW(HWND, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, INT);
+extern "C" BOOL WINAPI __wrap_ShellExecuteExW(SHELLEXECUTEINFOW*);
 extern "C" HRESULT WINAPI __wrap_SHGetFolderPathW(HWND, int, HANDLE, DWORD, LPWSTR);
 extern "C" HRESULT WINAPI __wrap_DwmSetWindowAttribute(HWND, DWORD, LPCVOID, DWORD);
 extern "C" HIMC WINAPI __wrap_ImmGetContext(HWND);
@@ -37,7 +37,7 @@ decltype(&CommDlgExtendedError) __imp_CommDlgExtendedError = __wrap_CommDlgExten
 decltype(&DragAcceptFiles) __imp_DragAcceptFiles = __wrap_DragAcceptFiles;
 decltype(&DragQueryFileW) __imp_DragQueryFileW = __wrap_DragQueryFileW;
 decltype(&DragFinish) __imp_DragFinish = __wrap_DragFinish;
-decltype(&ShellExecuteW) __imp_ShellExecuteW = __wrap_ShellExecuteW;
+decltype(&ShellExecuteExW) __imp_ShellExecuteExW = __wrap_ShellExecuteExW;
 decltype(&SHGetFolderPathW) __imp_SHGetFolderPathW = __wrap_SHGetFolderPathW;
 decltype(&DwmSetWindowAttribute) __imp_DwmSetWindowAttribute = __wrap_DwmSetWindowAttribute;
 decltype(&ImmGetContext) __imp_ImmGetContext = __wrap_ImmGetContext;
