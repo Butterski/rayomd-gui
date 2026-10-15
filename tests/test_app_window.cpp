@@ -786,6 +786,10 @@ RGUI_TEST("app.recovery_copy") {
         CHECK_EQ(copy.extension().u8string(), std::string(".md"));
         CHECK_EQ(ReadFile(copy), std::string("unsaved words"));
     }
+#ifndef _WIN32
+    // The copies may hold private text: their folder is the owner's only.
+    CHECK(fs::status(h.dir / "recovery", error).permissions() == fs::perms::owner_all);
+#endif
 }
 
 RGUI_TEST("app.no_settings_path") {

@@ -1,0 +1,7 @@
+[
+  {
+    "rule": "cpp/path-injection",
+    "path": "src/app/safefile.cpp",
+    "reason": "ReadRegularFile and WriteFileAtomically are the app's file layer. Every path they get is the user's own choice: arguments, file dialogs and drops, or files under the user's own XDG_CONFIG_HOME, HOME or APPDATA, and the user may open any file they can. They open regular files only, never block on FIFOs, cap sizes and never write through a planted link."
+  }
+]

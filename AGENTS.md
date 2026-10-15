@@ -148,6 +148,9 @@ memory, so it is the PDF, not an approximation of it.
   `tests/fuzz.cmake`, `tests/fuzz/CMakeLists.txt`, `run_fuzzers.sh` and `fuzz.regressions`) and
   seeds in `make_seeds.cpp`. A crash a fuzzer finds is fixed with its minimized input committed
   under `tests/fuzz/regressions/<harness>/`.
+- CodeQL (`codeql.yml`, security-extended) fails on any result in the app's code. A result that
+  is no flaw is fixed in the code where possible; otherwise its rule and file go into
+  `.github/codeql/reviewed.json` with the reason, never a blanket query exclusion.
 
 ## Build And Test
 

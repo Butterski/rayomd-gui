@@ -219,10 +219,22 @@ bool App::SaveRecoveryCopy() {
     if (!window_ || !window_->Doc().modified || settingsPath_.empty()) return false;
     const fs::path dir = settingsPath_.parent_path() / "recovery";
     std::error_code error;
-    fs::create_directories(dir, error);
+    // Unsaved text may be private: the folder is its owner's only (POSIX; on Windows the
+    // per-user configuration folder's ACL already is).
+    if (fs::create_directories(dir, error)) {
+#ifndef _WIN32
+        fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace, error);
+#endif
+    }
     char stamp[32] = "";
     const std::time_t now = std::time(nullptr);
-    if (const std::tm* local = std::localtime(&now)) std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", local);
+    std::tm local{};
+#ifdef _WIN32
+    const bool haveTime = localtime_s(&local, &now) == 0;
+#else
+    const bool haveTime = localtime_r(&now, &local) != nullptr;
+#endif
+    if (haveTime) std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &local);
     std::string stem = fs::u8path(window_->Doc().displayName).stem().u8string();
     if (stem.empty()) stem = "untitled";
     fs::path path = dir / fs::u8path(stem + "-" + stamp + ".md");

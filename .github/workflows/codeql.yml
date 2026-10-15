@@ -47,7 +47,8 @@ jobs:
           cmake --build build/codeql --parallel 4 --target rayomd-gui
       # Private repositories without GitHub Advanced Security cannot upload to code scanning:
       # the SARIF is kept as an artifact and its results printed. A result in the app's code fails
-      # the job; the engine's (external/rayomd) are printed for its repository to fix.
+      # the job unless .github/codeql/reviewed.json lists its rule and file with the reason it is
+      # no flaw; the engine's (external/rayomd) are printed for its repository to fix.
       - uses: github/codeql-action/analyze@v3
         with:
           category: /language:${{ matrix.language }}
@@ -57,19 +58,23 @@ jobs:
         run: |
           python3 - <<'EOF'
           import glob, json, sys
-          app = engine = 0
+          reviewed = {(entry["rule"], entry["path"]) for entry in json.load(open(".github/codeql/reviewed.json"))}
+          app = engine = accepted = 0
           for path in glob.glob("sarif/*.sarif"):
               for run in json.load(open(path))["runs"]:
                   for result in run.get("results", []):
                       location = result["locations"][0]["physicalLocation"]
                       uri = location["artifactLocation"]["uri"]
-                      print(f'{result["ruleId"]}: {uri}:{location.get("region", {}).get("startLine", "?")}: '
-                            f'{result["message"]["text"]}')
+                      known = (result["ruleId"], uri) in reviewed
+                      print(f'{"reviewed " if known else ""}{result["ruleId"]}: {uri}:'
+                            f'{location.get("region", {}).get("startLine", "?")}: {result["message"]["text"]}')
                       if uri.startswith("external/"):
                           engine += 1
+                      elif known:
+                          accepted += 1
                       else:
                           app += 1
-          print(f"{app} result(s) in the app, {engine} in the engine")
+          print(f"{app} result(s) in the app ({accepted} more reviewed), {engine} in the engine")
           sys.exit(1 if app else 0)
           EOF
       - uses: actions/upload-artifact@v4

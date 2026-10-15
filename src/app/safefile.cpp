@@ -72,10 +72,28 @@ std::string Describe(const char* what) {
     return buffer;
 }
 
+// `path` as the Win32 file functions take it past MAX_PATH: absolute, normalized and `\\?\`
+// prefixed (`\\?\UNC\server\share\...` for a share), so a temporary name longer than its
+// destination's never fails where the destination would not, whether or not the system enables
+// long paths. Already prefixed and device paths stay as they are.
+std::wstring LongPath(const fs::path& path) {
+    const std::wstring& raw = path.native();
+    if (raw.rfind(L"\\\\?\\", 0) == 0 || raw.rfind(L"\\\\.\\", 0) == 0) return raw;
+    DWORD length = GetFullPathNameW(raw.c_str(), 0, nullptr, nullptr);
+    if (length == 0) return raw;
+    std::wstring full(length, L'\0');
+    length = GetFullPathNameW(raw.c_str(), length, full.data(), nullptr);
+    if (length == 0 || length >= full.size()) return raw;
+    full.resize(length);
+    if (full.rfind(L"\\\\", 0) == 0) return L"\\\\?\\UNC\\" + full.substr(2);
+    if (full.size() >= 3 && full[1] == L':' && full[2] == L'\\') return L"\\\\?\\" + full;
+    return raw;
+}
+
 // The file a symlink (or other name surrogate) at `path` finally names.
 bool ResolveLink(const fs::path& path, fs::path& out) {
-    const HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    const HANDLE handle = CreateFileW(LongPath(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (handle == INVALID_HANDLE_VALUE) return false;
     std::wstring buffer(512, L'\0');
     DWORD length = GetFinalPathNameByHandleW(handle, buffer.data(), static_cast<DWORD>(buffer.size()),
@@ -131,7 +149,7 @@ bool WriteFully(int fd, std::string_view bytes) {
 
 bool WriteFileAtomically(const fs::path& path, std::string_view bytes, WriteMode mode, std::string* error) {
     fs::path target = path;
-    DWORD attributes = GetFileAttributesW(target.c_str());
+    DWORD attributes = GetFileAttributesW(LongPath(target).c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
         mode == WriteMode::Document) {
         // Write through the link: the file it names is replaced, the link stays.
@@ -139,7 +157,7 @@ bool WriteFileAtomically(const fs::path& path, std::string_view bytes, WriteMode
             SetError(error, Describe("cannot resolve the link"));
             return false;
         }
-        attributes = GetFileAttributesW(target.c_str());
+        attributes = GetFileAttributesW(LongPath(target).c_str());
     }
     if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
         SetError(error, "not a regular file");
@@ -168,7 +186,7 @@ bool WriteFileAtomically(const fs::path& path, std::string_view bytes, WriteMode
         temp = directory / tempName;
         // CREATE_NEW fails on anything already at the name, a planted link included; with
         // FILE_FLAG_OPEN_REPARSE_POINT no reparse point is ever followed.
-        file = CreateFileW(temp.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+        file = CreateFileW(LongPath(temp).c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         if (file == INVALID_HANDLE_VALUE) {
             const DWORD code = GetLastError();
@@ -199,15 +217,15 @@ bool WriteFileAtomically(const fs::path& path, std::string_view bytes, WriteMode
     CloseHandle(file);
     if (ok) {
         const DWORD flags = MOVEFILE_REPLACE_EXISTING | (mode == WriteMode::Document ? MOVEFILE_WRITE_THROUGH : 0);
-        ok = MoveFileExW(temp.c_str(), target.c_str(), flags) != 0;
+        ok = MoveFileExW(LongPath(temp).c_str(), LongPath(target).c_str(), flags) != 0;
         if (!ok) SetError(error, Describe("cannot replace the file"));
     }
-    if (!ok) DeleteFileW(temp.c_str());
+    if (!ok) DeleteFileW(LongPath(temp).c_str());
     return ok;
 }
 
 bool ReadRegularFile(const fs::path& path, size_t limit, std::string& out, std::string* error) {
-    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    const HANDLE file = CreateFileW(LongPath(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         SetError(error, Describe("cannot open"));

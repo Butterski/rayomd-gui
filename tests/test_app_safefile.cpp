@@ -130,10 +130,13 @@ RGUI_TEST("app.safefile.round_trip") {
         CHECK(rgui::ReadRegularFile(dir / "empty.md", 0, read, &error));
         CHECK(read.empty());
     }
-    // A name near the 255-byte limit still finds a temporary name.
+    // A name near the 255-byte limit still finds a temporary name, and on Windows a path past
+    // MAX_PATH (this one is) is written and read through LongPath's `\\?\` form.
     const std::string longName = std::string(250, 'n') + ".md";
     CHECK(rgui::WriteFileAtomically(dir / longName, "long", WriteMode::Output, &error));
-    CHECK_EQ(ReadFile(dir / longName), std::string("long"));
+    std::string longRead;
+    CHECK(rgui::ReadRegularFile(dir / longName, 64, longRead, &error));
+    CHECK_EQ(longRead, std::string("long"));
     CHECK_EQ(TempFilesIn(dir), size_t(0));
 
     // The size limit: exactly `limit` bytes read, one more refused with `out` untouched.
