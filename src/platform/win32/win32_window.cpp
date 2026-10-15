@@ -358,6 +358,10 @@ int Win32Window::Run() {
         client_->OnResize(width_, height_, scale_);
         RunFrame();
     }
+    // Tasks posted while starting (the opened file's text) run before the window is shown: the
+    // first ShowWindow and paint take tens of milliseconds, which the first preview build then
+    // overlaps instead of following (CI: the file's text was taken 35 ms after the first frame).
+    RunTasks();
     ShowWindow(window_, showMaximized_ ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
     UpdateWindow(window_);
 
