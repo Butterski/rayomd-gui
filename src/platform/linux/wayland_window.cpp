@@ -413,7 +413,8 @@ private:
     int32_t repeatDelay_ = 600;
     uint32_t repeatKey_ = 0;
     uint64_t repeatTimer_ = 0;
-    uint32_t inputSerial_ = 0;  // of the last key or button press
+    uint32_t inputSerial_ = 0;          // of the last key or button press
+    uint32_t keyboardEnterSerial_ = 0;  // set_selection's serial before any press
 
     // Text input.
     uint32_t textInput_ = 0;
@@ -1356,6 +1357,7 @@ void WaylandWindowImpl::OnKeyboard(uint32_t, uint16_t opcode, const rgui_wl_arg*
         break;
     }
     case WL_KEYBOARD_E_ENTER: {
+        keyboardEnterSerial_ = args[0].u;
         InputEvent e;
         e.type = InputEvent::Type::FocusIn;
         Emit(e);
@@ -1734,7 +1736,9 @@ void WaylandWindowImpl::SetClipboardText(std::string text) {
     for (const char* mime : {"text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "TEXT", "STRING"}) {
         Send(selectionSource_, WL_DATA_SOURCE_R_OFFER, {S(mime)});
     }
-    Send(dataDevice_, WL_DATA_DEVICE_R_SET_SELECTION, {O(selectionSource_), U(inputSerial_)});
+    // The serial of the last key or button press; before any, the keyboard focus's own.
+    const uint32_t serial = inputSerial_ ? inputSerial_ : keyboardEnterSerial_;
+    Send(dataDevice_, WL_DATA_DEVICE_R_SET_SELECTION, {O(selectionSource_), U(serial)});
 }
 
 void WaylandWindowImpl::RequestClipboardText(std::function<void(std::string)> callback) {
