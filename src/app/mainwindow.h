@@ -21,6 +21,11 @@
 // kPreviewBudgetMs (status `Preview stopped: the document takes too long to build`; no retry
 // before the next change), and when the window goes. Cancelled results are dropped silently.
 // Files open on the document loader's thread, the status saying `Opening <name>…` meanwhile.
+//
+// Source sync (the preview's SourceMap): a press in the editor shows its line in the preview,
+// marked for a moment; a double click on a page puts the editor's caret on the line it shows;
+// with `ui.syncScroll` the pane the user moved last (the leader) scrolls the other to the same
+// place. Only the leader drives: moves the window makes itself are no user scrolls.
 #pragma once
 
 #include "app/buildworker.h"
@@ -29,6 +34,7 @@
 #include "app/exportsettings.h"
 #include "app/platform.h"
 #include "app/previewpages.h"
+#include "app/sourcemap.h"
 #include "ui/texteditor.h"
 #include "ui/ui.h"
 
@@ -81,8 +87,8 @@ public:
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
 
-    // The `ui.` (theme, editorZoom, previewZoom, splitRatio, optionsVisible, lastDirectory) and
-    // `export.` settings.
+    // The `ui.` (theme, editorZoom, previewZoom, splitRatio, optionsVisible, syncScroll,
+    // lastDirectory) and `export.` settings.
     void LoadSettings(const ui::SettingsFile& file);
     void StoreSettings(ui::SettingsFile& file) const;
 
@@ -107,6 +113,9 @@ public:
     void SetNotice(std::string text);
     // Whether the Theme menu offers `Follow Omarchy` (else `Automatic`) first.
     void SetOmarchyAvailable(bool available);
+    // `ui.syncScroll`: scrolling one pane scrolls the other to the same place. Turning it on
+    // brings the preview to the editor.
+    void SetSyncScroll(bool on);
 
     // ---- State ----
     // `ui.theme`: `omarchy`, `auto` or a bundled slug.
@@ -127,6 +136,17 @@ public:
     int PreviewZoomIndex() const { return previewZoom_; }
     // The preview's scroll offset in the last frame, logical px.
     float PreviewScroll() const { return previewOffset_; }
+    // The screen x of the pages' left edge (the last frame's layout).
+    float PageX() const { return pageX_; }
+    // The preview's content y (logical px, the last frame's layout) of a page position (page
+    // index + the fraction of the page above the point); 0 without pages.
+    float PreviewYOfPage(double page) const;
+    // The page position at the preview's content y: the last page whose top is at or above it,
+    // the gap after a page counting as its bottom; 0 without pages.
+    double PageOfPreviewY(float y) const;
+    bool SyncScroll() const { return syncScroll_; }
+    // The shown preview's source map (empty before the first preview and for fake builds).
+    const SourceMap& Sources() const { return sourceMap_; }
     int RequestedGeneration() const { return requestedGeneration_; }
     int ShownGeneration() const { return shownGeneration_; }
     // Build and parse time of the preview shown, ms (0 before the first).
@@ -166,6 +186,16 @@ private:
     struct Link {
         bool alive = true;
         MainWindow* owner = nullptr;
+    };
+    // The pane the user moved last: the other follows it.
+    enum class ScrollLeader : uint8_t { Editor, Preview };
+    struct PreviewReveal {
+        double page;   // the page position to show
+        float viewY;   // at this y of the preview pane
+    };
+    struct EditorReveal {
+        double line;   // the fractional line to show and put the caret on
+        float viewY;   // at this y of the editor pane
     };
 
     // Frame parts.
@@ -213,6 +243,13 @@ private:
 
     // The page at the top of the preview and how far into it the view is, by the last frame.
     std::optional<Anchor> ViewAnchor() const;
+    // The scroll sync's mapping, on the last frame's layout: the preview's offset that shows the
+    // editor's top line where line 0 shows at the preview's top, and the editor's scroll for a
+    // preview offset. The last screenful of either brings the other to its end.
+    float PreviewOffsetForEditor() const;
+    float EditorScrollForPreview(float offset) const;
+    // A new document: no map, the editor leads, nothing pending.
+    void ResetSourceSync();
 
     Platform& platform_;
     Hooks hooks_;
@@ -229,6 +266,7 @@ private:
     int previewZoom_ = kPreviewZoomDefault;
     float splitRatio_ = 0.5f;
     bool optionsVisible_ = false;
+    bool syncScroll_ = true;
     std::string lastDirectory_;
     bool omarchy_ = false;
     std::vector<std::string> themeItems_;
@@ -264,10 +302,26 @@ private:
     std::vector<float> pageTops_;     // the last frame's layout, logical px from the content top
     std::vector<float> pageHeights_;
     float pageWidth_ = 0;
+    float pageX_ = 0;                 // the pages' left edge on screen
     float previewOffset_ = 0;
     float previewZoomWheel_ = 0;
     std::vector<int> wanted_;
     bool settled_ = false;
+
+    // Source sync.
+    SourceMap sourceMap_;                         // the shown preview's
+    ScrollLeader leader_ = ScrollLeader::Editor;
+    uint64_t revisionSeen_ = 0;                   // editor_.Revision() at the end of the last frame
+    float lastEditorScroll_ = -1;                 // editor_.ScrollY() at the end of the last frame
+    float lastPreviewOffset_ = -1;                // the preview's offset in the last frame
+    bool syncPreviewNow_ = false;                 // PreviewPane sets the preview from the editor
+    std::optional<float> editorScrollNext_;       // the next frame sets the editor's scroll (at once)
+    std::optional<PreviewReveal> previewReveal_;  // this frame's PreviewPane shows it
+    std::optional<EditorReveal> editorReveal_;    // the next frame shows it
+    double flashPage_ = -1;                       // the jump marker: where, and until when (ms)
+    double flashUntil_ = 0;
+    float previewContent_ = 0;                    // the last PreviewPane's content height and view
+    float previewView_ = 0;
 
     bool focusEditor_ = true;
     bool dirty_ = false;

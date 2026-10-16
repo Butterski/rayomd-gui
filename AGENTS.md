@@ -38,7 +38,9 @@ memory, so it is the PDF, not an approximation of it.
   immediate-mode core, the display list and tile compositor, widgets, the text editor, the
   settings file.
 - `src/app/` — the app, independent of the platform: the `Platform` interface, export settings,
-  the document, the build worker, preview pages, the main window, arguments and snapshot mode.
+  the document, the build worker, preview pages, the source map (the engine's
+  `PdfOptions::sourceMap` of a preview build, which the main window's source sync maps between
+  editor lines and page positions), the main window, arguments and snapshot mode.
 - `src/platform/linux/` — Wayland, keyboard (XKB keymap, keysyms, Compose), D-Bus and the
   desktop portal, Omarchy and Hyprland integration, the event loop; all of it is the library
   `rayomd_gui_linux`, which the tests link too. `main_linux.cpp` is the executable

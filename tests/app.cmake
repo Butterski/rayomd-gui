@@ -5,6 +5,7 @@ list(APPEND RGUI_TEST_SOURCES
     test_app_safefile.cpp
     test_app_model.cpp
     test_app_scroll_bench.cpp
+    test_app_sourcemap.cpp
     test_app_window.cpp)
 
 # Keystroke -> preview latency in documents of 1 to 700 copies of tester.md (prints p50 / p99

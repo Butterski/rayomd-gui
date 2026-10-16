@@ -7,6 +7,7 @@
 #pragma once
 
 #include "app/document.h"
+#include "app/sourcemap.h"
 #include "rayomd/tiny_pdf.h"
 
 #include <atomic>
@@ -44,6 +45,7 @@ struct PreviewReady {
     DocumentStats stats;     // of the text built
     std::string themeFile;   // the request's theme file
     std::string themeError;  // why it could not be used (ExportSettings::themeError)
+    SourceMap sourceMap;     // of the text built; empty when the build failed
 };
 
 struct ExportFinished {

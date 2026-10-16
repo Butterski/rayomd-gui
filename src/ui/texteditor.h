@@ -90,6 +90,20 @@ public:
     float ScrollY() const { return scrollY_; }
     float MaxScrollY() const;
     void SetScrollY(float y);
+    // Moves the view to `y` (clamped), eased over 200 ms or at once; unlike SetScrollY it lasts
+    // past the next Frame. Not a user scroll (UserScrolled).
+    void ScrollTo(float y, bool ease, double nowMs);
+    // Whether the last Frame's input moved the view: the wheel, keys, a click or drag that moved
+    // the caret, auto-scroll, a text size step.
+    bool UserScrolled() const { return userScrolled_; }
+    // Whether the last Frame took a mouse press on the text.
+    bool PressedThisFrame() const { return pressed_; }
+    // The line at scroll offset `y`, as a line index plus how far into the line (its rows).
+    double LineAtScrollY(float y) const;
+    // The scroll offset of the top of fractional line `line` (the inverse of LineAtScrollY).
+    float ScrollYOfLine(double line) const;
+    // The text area's height below the top padding, logical px.
+    float ViewHeight() const { return paneHeight_ - kEditorPadTop; }
 
     // The clock for undo merging and auto-scroll, ms; the frame sets it.
     void SetNow(double ms) { now_ = ms; }
@@ -234,6 +248,8 @@ private:
     float fontSize_ = 14;
     float ascent_ = 0, descent_ = 0;
     SmoothScroll scroll_;
+    bool userScrolled_ = false;   // UserScrolled
+    bool pressed_ = false;        // PressedThisFrame
     float zoomWheel_ = 0;
     double lastAutoScroll_ = 0;
     // The glyphs of a row being drawn, normal and selected.

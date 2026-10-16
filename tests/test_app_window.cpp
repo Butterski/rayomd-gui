@@ -203,14 +203,15 @@ RGUI_TEST("app.preview_pipeline") {
     CHECK(w.Preview().Image(1) != second);
 }
 
-// The preview keeps its place (the page at its top, and how far into it) across builds and zooms.
+// The preview keeps its place (the page at its top, and how far into it) across builds and zooms
+// (without the scroll sync, which would bring it to the editor's).
 RGUI_TEST("app.preview_scroll") {
     if (!HaveFonts()) {
         std::printf("skip app.preview_scroll: DejaVu Sans Mono not installed\n");
         return;
     }
     Harness h("preview_scroll");
-    h.Start("ui.theme=tokyo-night\n", TesterPath());
+    h.Start("ui.theme=tokyo-night\nui.syncScroll=false\n", TesterPath());
     CHECK(h.Settle());
     rgui::MainWindow& w = h.Window();
     InputEvent wheel;

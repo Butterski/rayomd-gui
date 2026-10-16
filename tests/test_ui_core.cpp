@@ -593,6 +593,15 @@ RGUI_TEST("ui.smooth_scroll") {
     s.AddPixels(-2000);
     CHECK_EQ(s.Value(600, 1.0), 0.0f);
     CHECK(!s.Animating(600));
+    // EaseTo: the curve of one notch over 200 ms, to a target clamped at the end.
+    SmoothScroll e;
+    e.SetMax(1000);
+    e.EaseTo(500, 0);
+    CHECK_EQ(e.Value(100, 1.0), 250.0f);
+    CHECK_EQ(e.Value(200, 1.0), 500.0f);
+    CHECK(!e.Animating(200));
+    e.EaseTo(2000, 300);
+    CHECK_EQ(e.Target(), 1000.0f);
 }
 
 RGUI_TEST("ui.scroll_area") {

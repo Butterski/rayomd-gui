@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <utility>
+#include <vector>
 
 namespace rgui {
 namespace {
@@ -190,7 +191,11 @@ void BuildWorker::RunPreview(Job& job) {
     ready.themeFile = job.themeFile;
     ready.themeError = ApplyTheme(job);
     std::string bytes;
+    // Where each top-level block is laid out, for the source sync; fake builds leave it empty.
+    std::vector<TinyPdf::SourceBlock> blocks;
+    job.options.sourceMap = &blocks;
     const TinyPdf::BuildResult result = build_(job.utf8, job.options, bytes);
+    job.options.sourceMap = nullptr;
     ready.generation = job.generation;
     bool abandoned = result.error == TinyPdf::BuildError::Cancelled;
     if (!abandoned && cancel_.load()) {
@@ -227,7 +232,16 @@ void BuildWorker::RunPreview(Job& job) {
     } else {
         std::string parseError;
         ready.pdf = pdf::PdfFile::Parse(std::move(bytes), &parseError);
-        if (!ready.pdf) ready.error = "the preview PDF cannot be read (" + parseError + ")";
+        if (!ready.pdf) {
+            ready.error = "the preview PDF cannot be read (" + parseError + ")";
+        } else {
+            std::vector<double> heights(static_cast<size_t>(ready.pdf->PageCount()));
+            for (size_t i = 0; i < heights.size(); i++) {
+                const pdf::PdfRect box = ready.pdf->PageMediaBox(static_cast<int>(i));
+                heights[i] = box.y1 - box.y0;
+            }
+            ready.sourceMap = SourceMap::FromEngine(blocks, job.utf8, heights);
+        }
     }
     ready.ms = MsSince(start);
     platform_.PostToUi([callbacks = callbacks_, ready = std::move(ready)]() mutable {

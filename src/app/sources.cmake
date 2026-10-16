@@ -9,5 +9,6 @@ list(APPEND RGUI_CORE_SOURCES
     app/mainwindow.cpp
     app/previewpages.cpp
     app/safefile.cpp
+    app/sourcemap.cpp
     app/themeselect.cpp
     app/version.cpp)

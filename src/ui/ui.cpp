@@ -118,6 +118,19 @@ void SmoothScroll::AddNotches(float notches, double nowMs, float step) {
 
 void SmoothScroll::AddPixels(float pixels) { JumpTo(target_ + pixels); }
 
+void SmoothScroll::EaseTo(float value, double nowMs) {
+    const float current = RawValue(nowMs);
+    target_ = Clamp(value, 0, max_);
+    if ((target_ > current ? target_ - current : current - target_) < 0.01f) {
+        JumpTo(target_);
+        return;
+    }
+    start_ = current;
+    startMs_ = nowMs;
+    durationMs_ = 200.0;
+    animating_ = true;
+}
+
 void SmoothScroll::JumpTo(float value) {
     target_ = Clamp(value, 0, max_);
     start_ = target_;

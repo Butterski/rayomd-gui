@@ -197,6 +197,34 @@ void TextEditor::SetScrollY(float y) {
     ClampScroll();
 }
 
+void TextEditor::ScrollTo(float y, bool ease, double nowMs) {
+    scroll_.SetMax(MaxScrollY());
+    if (ease) scroll_.EaseTo(y, nowMs);
+    else scroll_.JumpTo(y);
+}
+
+double TextEditor::LineAtScrollY(float y) const {
+    const size_t rows = wrap_.RowCount();
+    if (lineHeight_ <= 0 || rows == 0) return 0;
+    // Past the last row counts as its bottom; the bound keeps the cast to size_t defined.
+    const double rowF = std::min(std::max(0.0, static_cast<double>(y) / lineHeight_), static_cast<double>(rows));
+    const size_t row = std::min(static_cast<size_t>(rowF), rows - 1);
+    size_t line = 0, rowInLine = 0;
+    wrap_.LineOfRow(row, line, rowInLine);
+    const double into = static_cast<double>(rowInLine) + std::min(1.0, rowF - static_cast<double>(row));
+    return static_cast<double>(line) + into / static_cast<double>(wrap_.RowsOf(line));
+}
+
+float TextEditor::ScrollYOfLine(double line) const {
+    const size_t lines = wrap_.LineCount();
+    if (lines == 0) return 0;
+    const double at = std::min(std::max(0.0, line), static_cast<double>(lines));
+    const size_t whole = std::min(static_cast<size_t>(at), lines - 1);
+    const double frac = std::min(std::max(at - static_cast<double>(whole), 0.0), 1.0);
+    const double row = static_cast<double>(wrap_.FirstRowOf(whole)) + frac * static_cast<double>(wrap_.RowsOf(whole));
+    return static_cast<float>(row * lineHeight_);
+}
+
 void TextEditor::EnsureCaretVisible() {
     if (paneHeight_ <= 0) return;
     const float top = static_cast<float>(CaretRow()) * lineHeight_;
@@ -659,6 +687,7 @@ void TextEditor::Frame(Context& ctx, RectF rect) {
     ClampScroll();
 
     const Interaction in = ctx.Interact(id_, rect, kInteractFocusable);
+    pressed_ = in.pressed;
     const bool focused = ctx.FocusBehavior(id_);
     if (in.hovered || in.held) ctx.SetCursor(Cursor::IBeam);
     const int zoomBefore = zoom_;
@@ -689,11 +718,13 @@ void TextEditor::Frame(Context& ctx, RectF rect) {
 
     // Keys, clicks and auto-scroll move the view at once; the wheel eases.
     scroll_.SetMax(MaxScrollY());
+    userScrolled_ = scrollY_ != shown;
     if (scrollY_ != shown) scroll_.JumpTo(scrollY_);
     float pixels = 0;
     const float notches = ctx.ConsumeWheel(rect, pixels);
     if (notches != 0) scroll_.AddNotches(notches, now_);
     if (pixels != 0) scroll_.AddPixels(pixels);
+    if (notches != 0 || pixels != 0) userScrolled_ = true;
     scrollY_ = scroll_.Value(now_, ctx.Scale());
     if (scroll_.Animating(now_)) ctx.RequestAnimation();
 

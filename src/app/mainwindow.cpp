@@ -21,6 +21,7 @@ constexpr float kPageMargin = 16;   // above the first page, below the last and 
 constexpr float kFooterMargin = 12; // Omawrite's footer: 12 px from the edges, 12 px apart
 constexpr float kIconHit = 28;
 constexpr float kOptionsLabelWidth = 96;
+constexpr double kFlashMs = 1200;   // how long the jump marker shows
 
 constexpr const char* kEmbedTooltip =
     "Embeds the complete Markdown source, including comments, front matter and anything not visible on "
@@ -76,6 +77,13 @@ std::string WithPdfExtension(std::string path) {
     return path;
 }
 
+// `value` within [lo, hi]; NaN gives lo.
+double Within(double value, double lo, double hi) {
+    if (!(value > lo)) return lo;
+    if (!(value < hi)) return hi;
+    return value;
+}
+
 } // namespace
 
 MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hooks hooks,
@@ -117,6 +125,7 @@ void MainWindow::LoadSettings(const ui::SettingsFile& file) {
     if (!(ratio >= 0.2 && ratio <= 0.8)) ratio = ratio > 0.8 ? 0.8 : (ratio < 0.2 ? 0.2 : 0.5);   // NaN: 0.5
     splitRatio_ = static_cast<float>(ratio);
     optionsVisible_ = file.GetBool("ui.optionsVisible", false);
+    syncScroll_ = file.GetBool("ui.syncScroll", true);
     lastDirectory_ = file.GetString("ui.lastDirectory");
     export_.Load(file);
     export_.imageCacheDirectory = platform_.ImageCacheDir().u8string();
@@ -128,6 +137,7 @@ void MainWindow::StoreSettings(ui::SettingsFile& file) const {
     file.SetDouble("ui.previewZoom", kPreviewZoomLadder[previewZoom_]);
     file.SetDouble("ui.splitRatio", splitRatio_);
     file.SetBool("ui.optionsVisible", optionsVisible_);
+    file.SetBool("ui.syncScroll", syncScroll_);
     if (lastDirectory_.empty() || !file.SetString("ui.lastDirectory", lastDirectory_)) file.Erase("ui.lastDirectory");
     export_.Store(file);
 }
@@ -135,6 +145,16 @@ void MainWindow::StoreSettings(ui::SettingsFile& file) const {
 void MainWindow::SetOmarchyAvailable(bool available) {
     omarchy_ = available;
     themeItems_ = ThemeMenuItems(available);
+}
+
+void MainWindow::SetSyncScroll(bool on) {
+    syncScroll_ = on;
+    if (on) {
+        leader_ = ScrollLeader::Editor;
+        syncPreviewNow_ = true;
+    }
+    hooks_.settingsChanged();
+    Dirty();
 }
 
 // ---- Status ----
@@ -194,6 +214,28 @@ void MainWindow::Frame(ui::Context& ctx) {
     ctx.FillRect({split - 3, win.y, 3, win.h}, colors.windowBackground);
     ctx.FillRect({split + 1, win.y, 3, win.h}, colors.previewBackground);
 
+    // A double click on the preview last frame: the caret goes to its line, shown where the
+    // click was unless the synced view shows it already.
+    if (editorReveal_) {
+        const ui::TextBuffer& buffer = editor_.Buffer();
+        if (buffer.LineCount() > 0) {
+            const size_t line =
+                static_cast<size_t>(Within(editorReveal_->line, 0, static_cast<double>(buffer.LineCount() - 1)));
+            // Before Select, which moves the view it holds (Frame takes it back).
+            const float shown = editor_.ScrollY();
+            editor_.Select(buffer.LineStart(line), buffer.LineStart(line));
+            const float rowTop = editor_.ScrollYOfLine(static_cast<double>(line));
+            const float view = editor_.ViewHeight();
+            if (!(syncScroll_ && rowTop >= shown + 0.1f * view && rowTop + editor_.LineHeight() <= shown + 0.9f * view)) {
+                editor_.ScrollTo(rowTop - (editorReveal_->viewY - ui::kEditorPadTop), true, ctx.NowMs());
+            }
+        }
+        editorReveal_.reset();
+        editorScrollNext_.reset();
+    } else if (editorScrollNext_) {
+        editor_.ScrollTo(*editorScrollNext_, false, ctx.NowMs());
+        editorScrollNext_.reset();
+    }
     if (focusEditor_) {
         ctx.SetFocus(ctx.MakeId("##texteditor"));
         focusEditor_ = false;
@@ -201,12 +243,27 @@ void MainWindow::Frame(ui::Context& ctx) {
     const int zoomBefore = editor_.ZoomIndex();
     editor_.Frame(ctx, editorRect);
     if (editor_.ZoomIndex() != zoomBefore) hooks_.settingsChanged();
+    // Typing, a press, the wheel or keys in the editor: it leads. A press shows its line in the
+    // preview, at the caret's height (the panes start at the same y).
+    if (editor_.Revision() != revisionSeen_ || editor_.UserScrolled() || editor_.PressedThisFrame()) {
+        leader_ = ScrollLeader::Editor;
+    }
+    if (editor_.PressedThisFrame() && !sourceMap_.Empty()) {
+        const ui::TextBuffer& buffer = editor_.Buffer();
+        previewReveal_ = PreviewReveal{
+            sourceMap_.PageOfLine(buffer, static_cast<double>(buffer.LineOf(editor_.Caret()))), editor_.CaretRect().y};
+    }
+    if (syncScroll_ && leader_ == ScrollLeader::Editor && editor_.ScrollY() != lastEditorScroll_ && !sourceMap_.Empty()) {
+        syncPreviewNow_ = true;
+    }
     PreviewPane(ctx, previewRect);
 
     Prompts(ctx);
     Shortcuts(ctx);
     ctx.SetTitle(Title());
     inFrame_ = false;
+    lastEditorScroll_ = editor_.ScrollY();
+    revisionSeen_ = editor_.Revision();
     // This frame's edits are all in: build them.
     MaybeStartPreview();
     if (dirty_) ctx.RequestAnimation();
@@ -427,6 +484,8 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
         if (hooks_.themeChanged) hooks_.themeChanged();
         Dirty();
     }
+    bool sync = syncScroll_;
+    if (ui::Checkbox(ctx, "Sync scrolling", sync, row())) SetSyncScroll(sync);
 
     height = column.y - top;
     if (changed) OptionsChanged();
@@ -470,6 +529,8 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
     }
     const float content = count > 0 ? y : 0;
     pageWidth_ = pageW;
+    previewContent_ = content;
+    previewView_ = rect.h;
 
     if (anchor_ && count > 0) {
         const int page = std::min(anchor_->page, count - 1);
@@ -481,9 +542,37 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
     }
     anchor_.reset();
 
+    // The source sync's moves, made before the scroll area reads the position, so that neither
+    // counts as the user's (targetBefore): the editor's view at once, then a revealed line eased
+    // into the view unless the synced view shows it.
+    ui::SmoothScroll& scroll = ui::ScrollAreaScroll(ctx, "##preview");
+    scroll.SetMax(content - rect.h);
+    if (syncPreviewNow_) {
+        if (!sourceMap_.Empty() && count > 0) scroll.JumpTo(PreviewOffsetForEditor());
+        syncPreviewNow_ = false;
+    }
+    if (previewReveal_) {
+        if (previewReveal_->page >= 0 && count > 0) {
+            const float target = PreviewYOfPage(previewReveal_->page);
+            const float shown = scroll.Target();
+            if (!(syncScroll_ && target >= shown + 0.1f * rect.h && target <= shown + 0.9f * rect.h)) {
+                scroll.EaseTo(target - previewReveal_->viewY, ctx.NowMs());
+            }
+            flashPage_ = previewReveal_->page;
+            flashUntil_ = ctx.NowMs() + kFlashMs;
+            ctx.WakeAt(flashUntil_);
+        }
+        previewReveal_.reset();
+    }
+    const float targetBefore = scroll.Target();
+
     const float offset = ui::BeginScrollArea(ctx, "##preview", rect, content);
     previewOffset_ = offset;
     const float pageX = ctx.SnapToDevice(rect.x + (rect.w - pageW) / 2);
+    pageX_ = pageX;
+    // The page of the jump marker, while it shows.
+    const int flashIndex =
+        ctx.NowMs() < flashUntil_ && count > 0 ? static_cast<int>(Within(flashPage_, 0, count - 1)) : -1;
     const int widthPx = std::max(1, static_cast<int>(pageW * ctx.Scale() + 0.5));
     std::vector<int> visible;
     for (int i = 0; i < count; i++) {
@@ -496,8 +585,33 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
         ctx.StrokeRect({page.x - 1, page.y - 1, page.w + 2, page.h + 2}, 1, t.colors.hairline);
         ctx.FillRect(page, kWhite);
         if (const gfx::Image* image = preview_->Image(i)) ctx.DrawImage(*image, page);
+        if (i == flashIndex) {
+            // A bar in the page's left margin beside the line, 16 points high (at least 12 px).
+            const float at = static_cast<float>(Within(flashPage_ - i, 0, 1)) * pageHeights_[k];
+            const float pointPx = static_cast<float>(pageW / preview_->PageWidthPt(i));
+            ctx.FillRect({pageX + 6, top + at - 2, 4, std::max(12.0f, 16 * pointPx)}, t.colors.accent);
+        }
     }
     ui::EndScrollArea(ctx, content);
+    // The wheel or the thumb moved it: the preview leads.
+    if (scroll.Target() != targetBefore) leader_ = ScrollLeader::Preview;
+    // A double click on a page puts the editor's caret on the line shown there (the next frame).
+    // After the scroll area, so that its thumb keeps its presses.
+    const ui::Interaction pages = ctx.Interact(ctx.MakeId("##pages"), rect);
+    if (pages.pressed && pages.clickCount == 2 && !sourceMap_.Empty()) {
+        const ui::PointerInput& pointer = ctx.Pointer();
+        for (const int i : visible) {
+            const size_t k = static_cast<size_t>(i);
+            const float top = rect.y - offset + pageTops_[k];
+            if (!RectF{pageX, top, pageW, pageHeights_[k]}.Contains(pointer.pressX, pointer.pressY)) continue;
+            const double page = i + (pointer.pressY - top) / pageHeights_[k];
+            editorReveal_ = EditorReveal{sourceMap_.LineOfPage(editor_.Buffer(), page), pointer.pressY - rect.y};
+            leader_ = ScrollLeader::Preview;
+            focusEditor_ = true;
+            Dirty();
+            break;
+        }
+    }
 
     // The visible pages, the one nearest the middle of the view first, then their neighbours.
     wanted_ = visible;
@@ -522,6 +636,12 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
                    shownGeneration_ == requestedGeneration_ && preview_->Generation() == shownGeneration_;
     for (const int i : visible) current = current && preview_->Current(i, widthPx);
     settled_ = current;
+    // The preview leads: the editor follows in the next frame.
+    if (syncScroll_ && leader_ == ScrollLeader::Preview && !sourceMap_.Empty() && offset != lastPreviewOffset_) {
+        editorScrollNext_ = EditorScrollForPreview(offset);
+        Dirty();
+    }
+    lastPreviewOffset_ = offset;
 }
 
 void MainWindow::Prompts(ui::Context& ctx) {
@@ -662,6 +782,7 @@ void MainWindow::NewDocument() {
     editor_.SetText({});
     syncedRevision_ = editor_.Revision();
     stats_ = DocumentStats();
+    ResetSourceSync();
     exportTargets_.erase(std::string());
     SetStatus({}, StatusKind::Info);
     focusEditor_ = true;
@@ -692,6 +813,7 @@ void MainWindow::OnLoaded(DocumentLoaded loaded) {
     editor_.SetText(doc_.text);
     syncedRevision_ = editor_.Revision();
     stats_ = loaded.stats;
+    ResetSourceSync();
     exportTargets_.erase(std::string());
     Remember(loaded.path);
     SetStatus(loaded.status, StatusKind::Info);
@@ -885,6 +1007,62 @@ std::optional<MainWindow::Anchor> MainWindow::ViewAnchor() const {
     return anchor;
 }
 
+// ---- Source sync ----
+
+void MainWindow::ResetSourceSync() {
+    sourceMap_ = SourceMap();
+    leader_ = ScrollLeader::Editor;
+    lastEditorScroll_ = -1;
+    editorReveal_.reset();
+    previewReveal_.reset();
+    editorScrollNext_.reset();
+    flashPage_ = -1;
+}
+
+float MainWindow::PreviewYOfPage(double page) const {
+    if (pageTops_.empty()) return 0;
+    const size_t count = pageTops_.size();
+    const double at = Within(page, 0, static_cast<double>(count));
+    const size_t p = std::min(static_cast<size_t>(at), count - 1);
+    return pageTops_[p] + static_cast<float>(Within(at - static_cast<double>(p), 0, 1)) * pageHeights_[p];
+}
+
+double MainWindow::PageOfPreviewY(float y) const {
+    if (pageTops_.empty()) return 0;
+    // The last page whose top is at or above y; the first when y is above it.
+    const auto above = std::upper_bound(pageTops_.begin(), pageTops_.end(), y);
+    const size_t p = above == pageTops_.begin() ? 0 : static_cast<size_t>(above - pageTops_.begin()) - 1;
+    const double into = pageHeights_[p] > 0 ? (y - pageTops_[p]) / pageHeights_[p] : 0;
+    return static_cast<double>(p) + Within(into, 0, 1);
+}
+
+float MainWindow::PreviewOffsetForEditor() const {
+    const ui::TextBuffer& buffer = editor_.Buffer();
+    const float reference = PreviewYOfPage(sourceMap_.PageOfLine(buffer, 0.0));
+    const float scrollY = editor_.ScrollY();
+    float target = PreviewYOfPage(sourceMap_.PageOfLine(buffer, editor_.LineAtScrollY(scrollY))) - reference;
+    const float previewMax = std::max(0.0f, previewContent_ - previewView_);
+    const float editorMax = editor_.MaxScrollY();
+    if (editorMax > 0 && scrollY > editorMax - editor_.ViewHeight()) {
+        const float from = std::max(0.0f, editorMax - editor_.ViewHeight());
+        target += (previewMax - target) * ((scrollY - from) / (editorMax - from));
+    }
+    return std::min(std::max(target, 0.0f), previewMax);
+}
+
+float MainWindow::EditorScrollForPreview(float offset) const {
+    const ui::TextBuffer& buffer = editor_.Buffer();
+    const float reference = PreviewYOfPage(sourceMap_.PageOfLine(buffer, 0.0));
+    float target = editor_.ScrollYOfLine(sourceMap_.LineOfPage(buffer, PageOfPreviewY(offset + reference)));
+    const float previewMax = std::max(0.0f, previewContent_ - previewView_);
+    const float editorMax = editor_.MaxScrollY();
+    if (previewMax > 0 && offset > previewMax - previewView_) {
+        const float from = std::max(0.0f, previewMax - previewView_);
+        target += (editorMax - target) * ((offset - from) / (previewMax - from));
+    }
+    return std::min(std::max(target, 0.0f), editorMax);
+}
+
 void MainWindow::OnPreview(PreviewReady ready) {
     if (ready.generation == requestedGeneration_) {
         previewInFlight_ = false;
@@ -910,6 +1088,9 @@ void MainWindow::OnPreview(PreviewReady ready) {
         // Keep the view on the page at its top, at the same place within it.
         if (!anchor_) anchor_ = ViewAnchor();
         preview_->SetDocument(std::move(ready.pdf), ready.generation);
+        sourceMap_ = std::move(ready.sourceMap);
+        // The anchor keeps the view first; the editor, when it leads, then sets it.
+        if (syncScroll_ && leader_ == ScrollLeader::Editor) syncPreviewNow_ = true;
         std::string status = "Preview: " + Count(ready.pages, "page") + " in " + FormatMs(ready.ms);
         if (ready.missingCharacters > 0) status += "; " + Count(ready.missingCharacters, "character") + " missing";
         if (ready.failedImages > 0) {

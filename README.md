@@ -168,6 +168,11 @@ The editor is on the left, the PDF on the right. A change goes to the engine at 
 frame that made it, and what you type while a build runs goes into the next one. Pages that did
 not change keep their images, and a page with a large picture draws again in about 2 ms.
 
+The two panes stay together. A click in the editor shows its line in the preview, marked for a
+moment by a bar beside it, and a double click on a page puts the caret on the Markdown line that
+made it. With *Sync scrolling* (on by default, in the options' Interface section), scrolling
+either pane brings the other to the same place.
+
 <img src="assets/screenshot-links-images.png" alt="Links and images: the Markdown on the left, the PDF page with a photo, reference links and quotes on the right">
 
 | Keys | Action |
@@ -178,6 +183,7 @@ not change keep their images, and a page with a large picture draws again in abo
 | `Ctrl+,` | Show or hide the options |
 | `Ctrl+=`, `Ctrl+-`, `Ctrl+0` | Editor text size up, down, back (`Ctrl+0` also resets the preview zoom) |
 | `Ctrl+wheel` | Zoom the preview |
+| Double click on a page | Put the editor's caret on the line it shows |
 | `Ctrl+Q` | Quit |
 
 Every action that would lose unsaved text asks first. Files dropped on the window open: `.md`,

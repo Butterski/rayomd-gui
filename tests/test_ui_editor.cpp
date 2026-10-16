@@ -832,6 +832,43 @@ RGUI_TEST("ui.editor_widget_frame") {
     CHECK(!editor.Dragging());
 }
 
+// The scroll the app sets (ScrollTo) lasts past a Frame and is no user scroll; the wheel is.
+// LineAtScrollY and ScrollYOfLine invert each other, a wrapped line counting its rows.
+RGUI_TEST("ui.editor_scroll_api") {
+    TextEditor editor;
+    Grid(editor, 20);
+    std::string text;
+    for (int i = 0; i < 300; i++) text += i == 150 ? "line text line text line text\n" : "line text\n";
+    editor.SetText(text);
+    CHECK_EQ(editor.Wrap().RowsOf(150), size_t(2));
+    CHECK_EQ(editor.LineAtScrollY(150 * 20.0f), 150.0);
+    CHECK_EQ(editor.LineAtScrollY(151 * 20.0f), 150.5);   // line 150's second row
+    CHECK_EQ(editor.ScrollYOfLine(151.0), 152 * 20.0f);
+    for (const float y : {0.0f, 37.5f, 150 * editor.LineHeight()}) {
+        CHECK_NEAR(editor.ScrollYOfLine(editor.LineAtScrollY(y)), y, 0.01);
+    }
+
+    rgui::ui::Context ctx;
+    double now = 1000;
+    RunFrame(ctx, editor, now);
+    editor.ScrollTo(400, false, now);
+    RunFrame(ctx, editor, now += 10);
+    CHECK_EQ(editor.ScrollY(), 400.0f);
+    CHECK(!editor.UserScrolled());
+    ctx.AddEvent(WheelEvent(300, 300, 1), now += 10);
+    RunFrame(ctx, editor, now);
+    CHECK(editor.UserScrolled());
+    RunFrame(ctx, editor, now += 300);
+    CHECK(!editor.UserScrolled());
+    CHECK_EQ(editor.ScrollY(), 520.0f);
+    editor.ScrollTo(0, true, now);
+    RunFrame(ctx, editor, now += 100);
+    CHECK(editor.ScrollY() > 0 && editor.ScrollY() < 520);
+    CHECK(!editor.UserScrolled());
+    RunFrame(ctx, editor, now += 100);
+    CHECK_EQ(editor.ScrollY(), 0.0f);
+}
+
 // ---- Pathological text: memory and time bounds ---------------------------------------------
 
 namespace {

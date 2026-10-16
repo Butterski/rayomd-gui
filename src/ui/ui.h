@@ -56,6 +56,8 @@ public:
     float Max() const { return max_; }
     void AddNotches(float notches, double nowMs, float step = kNotchStep);
     void AddPixels(float pixels);
+    // Eases from where it is to `value` over 200 ms (the curve of one notch).
+    void EaseTo(float value, double nowMs);
     // Jumps without easing (a scrollbar drag, keeping a caret visible).
     void JumpTo(float value);
     // The position at `nowMs`, a whole number of device pixels at `scale`.
