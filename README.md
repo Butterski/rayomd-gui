@@ -232,14 +232,18 @@ container, pinned to six cores, on headless Wayland compositors; on Windows on G
 | The same, 70 copies (364 KB, 350 pages) | 21.6 / 24.8 ms |
 | The same, 700 copies (3.6 MB, 3,500 pages) | 192 / 206 ms |
 | One keystroke in a 1 MiB document, editor and drawing, median | 0.31 ms |
+| A frame while the preview / the editor scrolls, 1788×1097 window, 40 pages, median / p99 | 3.4 / 4.6 ms, 3.2 / 4.0 ms |
+| Scrolling frames a second on Windows runners, before / now | 32 / 64 (every refresh of their 64 Hz display) |
 | Page 1 of `tester.md` at 1,200 px, first time / with warm caches | 6.8 / 1.3 ms |
 | Start to first frame / to the preview of `tester.md`, Linux | 12 / 37 ms |
 | The same on Windows runners | 15–26 / 74–161 ms |
 
 A keystroke used to wait 80 ms for typing to pause (84 ms in `tester.md`); a build that is no
-longer wanted is now abandoned, so quitting during the 3.6 MB build takes 25 ms. The tests
-`bench.preview_latency` and `bench.typing` print these numbers; `--snapshot` prints the startup
-ones.
+longer wanted is now abandoned, so quitting during the 3.6 MB build takes 25 ms. On Windows,
+animated scrolling used to wait on a 16 ms timer, which the system clock's 15.6 ms ticks turn
+into 31 ms; frames now come at each refresh of the display. The tests `bench.preview_latency`,
+`bench.typing` and `bench.scroll` print these numbers, `win32.frame_pacer` the Windows frame
+rate; `--snapshot` prints the startup ones.
 
 ## Boundaries
 

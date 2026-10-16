@@ -87,6 +87,12 @@ extern "C" HRESULT WINAPI __wrap_DwmSetWindowAttribute(HWND window, DWORD attrib
                      : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
 }
 
+// Without DWM's timing, FramePacer keeps its own 60 Hz.
+extern "C" HRESULT WINAPI __wrap_DwmGetCompositionTimingInfo(HWND window, DWM_TIMING_INFO* timing) {
+    RAYOMD_DELAY_PROC(L"dwmapi.dll", DwmGetCompositionTimingInfo);
+    return procedure ? procedure(window, timing) : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+}
+
 // imm32. Without it there is no IME: no context, no composition.
 extern "C" HIMC WINAPI __wrap_ImmGetContext(HWND window) {
     RAYOMD_DELAY_PROC(L"imm32.dll", ImmGetContext);

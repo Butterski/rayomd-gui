@@ -45,7 +45,10 @@ memory, so it is the PDF, not an approximation of it.
   `rayomd-gui`: the startup sequence of `src/app/app.h`, with the portal, the Omarchy watcher
   and Hyprland's rounding wired into the event loop.
 - `src/platform/win32/` — the Win32 window, input, shell integration, delay-loaded system DLLs,
-  resources, `main_win32.cpp`.
+  resources, `main_win32.cpp`. Animation frames wait for DWM's next vertical blank on a
+  high-resolution waitable timer (`frame_pacer.h`), never on a WM_TIMER outside the system's
+  modal loops: a 16 ms WM_TIMER fires every 31 ms (32 frames a second on the CI runners). Wheel
+  messages of whole notches are eased; other deltas (precision touchpads) scroll as pixels.
 - `tests/` — `rayomd-gui-tests` (one executable, `RGUI_TEST("module.name")`; arguments select
   tests by name prefix), its data and corpus.
 - `tests/e2e/` — the end-to-end runs: `run_compositor.sh weston|sway <rayomd-gui> <out dir>`
@@ -100,7 +103,8 @@ memory, so it is the PDF, not an approximation of it.
   files. Workers hand results to the UI thread only through `Platform::PostToUi`. The UI
   thread does no file I/O and no O(document) work per keystroke beyond the one copy of the text
   a preview build takes (`mainwindow.h` states the preview policy); `bench.preview_latency`
-  (ctest `rayomd-gui-bench-latency`) measures keystroke-to-preview latency.
+  (ctest `rayomd-gui-bench-latency`) measures keystroke-to-preview latency, `bench.scroll`
+  (ctest `rayomd-gui-bench-scroll`) a frame's cost while the preview and the editor scroll.
 - Nothing in startup or the UI thread waits for the font index's scan, which a cold font folder
   makes take up to a second. On Windows the interface font, the standard-font substitutes and
   the default fallbacks open from their known files, and the scan runs at background priority;

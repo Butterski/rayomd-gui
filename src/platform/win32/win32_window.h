@@ -12,9 +12,10 @@
 //
 // Run() first calls OnSystemAppearance and OnResize, then OnFrame once, and shows the window only
 // after that frame, so the first thing on screen is the app's. Afterwards OnFrame is called after
-// RequestFrame: at once when the request came from input or a task, every 16 ms while frames are
-// requested from inside OnFrame (animations), and from a 16 ms timer during the system's modal
-// loops (moving or sizing the window, file dialogs).
+// RequestFrame: at once when the request came from input or a task, at the display's next
+// vertical blank while frames are requested from inside OnFrame (animations; FramePacer), and
+// from a 16 ms timer during the system's modal loops (moving or sizing the window, file dialogs).
+// Each frame's damage is blitted before OnFrame's caller goes on.
 //
 // Frames: the framebuffer is a top-down 32-bpp DIB section in a memory DC; WM_PAINT blits from
 // it. Present(frame, damage) copies the damage rectangles of `frame` into it, unless `frame` is
@@ -31,6 +32,7 @@
 #include <windows.h>
 
 #include "app/platform.h"
+#include "platform/win32/frame_pacer.h"
 
 #include <cstdint>
 #include <deque>
@@ -164,6 +166,7 @@ private:
     bool inFrame_ = false;
     bool frameTimer_ = false;
     int modalDepth_ = 0;
+    FramePacer pacer_;           // animation frames: the next vertical blank
 
     // Input.
     Cursor cursor_ = Cursor::Arrow;
@@ -172,6 +175,9 @@ private:
     float lastX_ = 0;
     float lastY_ = 0;
     wchar_t highSurrogate_ = 0;
+    // The last wheel message with a delta that is not whole notches (a touchpad's), GetMessageTime.
+    bool fineWheel_ = false;
+    DWORD fineWheelTime_ = 0;
     gfx::RectI textInputRect_{};
     bool textInputEnabled_ = true;
     bool composing_ = false;

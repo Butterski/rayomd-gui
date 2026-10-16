@@ -7,7 +7,7 @@ set(RGUI_TEST_SOURCES
     main.cpp
     runner.cpp
     test_build.cpp)
-foreach(module gfx text pdf ui app linux fuzz)
+foreach(module gfx text pdf ui app linux win32 fuzz)
     include(${CMAKE_CURRENT_SOURCE_DIR}/${module}.cmake)
 endforeach()
 
@@ -15,6 +15,9 @@ add_executable(rayomd-gui-tests ${RGUI_TEST_SOURCES})
 target_link_libraries(rayomd-gui-tests PRIVATE rayomd_gui_core)
 if(TARGET rayomd_gui_linux)
     target_link_libraries(rayomd-gui-tests PRIVATE rayomd_gui_linux)
+endif()
+if(TARGET rayomd_gui_win32)
+    target_link_libraries(rayomd-gui-tests PRIVATE rayomd_gui_win32)
 endif()
 target_include_directories(rayomd-gui-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(rayomd-gui-tests PRIVATE

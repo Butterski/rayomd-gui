@@ -380,7 +380,16 @@ int Win32Window::Run() {
         if (!running_) break;
         if (framePending_ && frameNow_) {
             RunFrame();
-            continue;  // drain again: the frame's WM_PAINT, and anything that came meanwhile
+            continue;  // drain again: anything that came meanwhile
+        }
+        if (pacer_.Scheduled()) {
+            // Messages or the next vertical blank, whichever comes first.
+            const HANDLE timer = pacer_.Timer();
+            if (MsgWaitForMultipleObjectsEx(1, &timer, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_OBJECT_0) {
+                pacer_.Fired();
+                if (framePending_) RunFrame();
+            }
+            continue;
         }
         WaitMessage();
     }
@@ -436,8 +445,10 @@ void Win32Window::SetTextInputRect(gfx::RectI rect, bool enabled) {
 
 void Win32Window::RequestFrame() {
     framePending_ = true;
-    if (inFrame_ || modalDepth_ > 0) {
-        EnsureFrameTimer();
+    if (modalDepth_ > 0) {
+        EnsureFrameTimer();   // the system's modal loop runs, not Run's
+    } else if (inFrame_) {
+        if (!pacer_.Schedule()) EnsureFrameTimer();
     } else {
         frameNow_ = true;
     }
@@ -454,6 +465,9 @@ void Win32Window::RunFrame() {
     inFrame_ = true;
     client_->OnFrame();
     inFrame_ = false;
+    // Blit the damage now: WM_PAINT would wait until the queue is empty, at no fixed time before
+    // DWM's next composition.
+    UpdateWindow(window_);
     if (!framePending_ && frameTimer_) {
         KillTimer(window_, kFrameTimer);
         frameTimer_ = false;
@@ -467,6 +481,11 @@ void Win32Window::EnterModal() {
 
 void Win32Window::LeaveModal() {
     if (modalDepth_ > 0) --modalDepth_;
+    // Run's loop paces the frames again (FramePacer): the modal loop's timer would add its own.
+    if (modalDepth_ == 0 && frameTimer_) {
+        KillTimer(window_, kFrameTimer);
+        frameTimer_ = false;
+    }
     if (framePending_) frameNow_ = true;
 }
 
@@ -1175,17 +1194,31 @@ LRESULT Win32Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     case WM_MOUSEHWHEEL: {
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};  // screen coordinates
         ScreenToClient(window, &point);
-        const float notches = GET_WHEEL_DELTA_WPARAM(wParam) / static_cast<float>(WHEEL_DELTA);
+        const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         InputEvent event;
         event.type = InputEvent::Type::Wheel;
         event.x = ToLogical(point.x);
         event.y = ToLogical(point.y);
+        // Whole notches are a wheel's clicks, which the app eases. Precision touchpads send other
+        // amounts, a stream of small steps that should follow the finger at once, as Wayland's
+        // finger scrolling does: pixels, one per unit (a notch's 120 units are the app's 120-pixel
+        // step). A whole multiple within such a stream (300 ms) stays pixels.
+        const DWORD time = static_cast<DWORD>(GetMessageTime());
+        if (delta % WHEEL_DELTA != 0) {
+            fineWheel_ = true;
+            fineWheelTime_ = time;
+        }
+        const bool fine = fineWheel_ && time - fineWheelTime_ < 300;
+        const float notches = fine ? 0.0f : delta / static_cast<float>(WHEEL_DELTA);
+        const float pixels = fine ? static_cast<float>(delta) : 0.0f;
         // Windows: a positive vertical delta rolls away from the user (content up), a positive
         // horizontal one tilts right (content right).
         if (message == WM_MOUSEWHEEL) {
             event.notchesY = -notches;
+            event.pixelsY = -pixels;
         } else {
             event.notchesX = notches;
+            event.pixelsX = pixels;
         }
         event.mods = CurrentModifiers();
         Deliver(event);
