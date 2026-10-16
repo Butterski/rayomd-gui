@@ -188,11 +188,14 @@ cmake -S . -B build/mingw -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER=x86_64-
 `dbus-run-session`, `weston`, `sway`) are separate ctest entries, added when CMake finds the
 tool.
 
-Releases (`release.yml`): every push to `main` replaces the `continuous` pre-release with the
-Linux tarball, the Arch package (`linux/pkgbuild`, its `pkgver` set from `VERSION`) and the
-Windows zip; a tag `v<VERSION>` publishes that version's release. The Linux binary is built on
-ubuntu-22.04 so it runs on glibc 2.34 and newer: keep the code building with GCC 11 and
-CMake 3.22, including every header a file uses (newer libstdc++ pulls in more by itself).
+Releases (`release.yml`), as in `rayomd`: a push to `main` that changes `VERSION` publishes the
+release `v<VERSION>`, tagged at that commit, with the Linux tarball, the Arch package
+(`linux/pkgbuild`, its `pkgver` set from `VERSION`) and the Windows zip; a tag `v<VERSION>` or a
+manual run publishes the same, and other pushes publish nothing. To release, raise `VERSION`
+together with `pkgver` in `linux/pkgbuild/PKGBUILD` and the README's version badge and download
+commands. The Linux binary is built on ubuntu-22.04 so it runs on glibc 2.34 and newer: keep
+the code building with GCC 11 and CMake 3.22, including every header a file uses (newer
+libstdc++ pulls in more by itself).
 
 Fuzzing (Clang with compiler-rt; CI runs every harness 60 s):
 

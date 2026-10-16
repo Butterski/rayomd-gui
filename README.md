@@ -9,7 +9,7 @@
 **Markdown on the left, the real PDF on the right, updated as you type.**<br>
 A native desktop app for Omarchy, Wayland desktops and Windows. No browser. No Qt. No Electron.
 
-<a href="https://github.com/Butterski/rayomd-gui/releases/tag/continuous"><img alt="Version: 1.0.0" src="https://img.shields.io/badge/version-1.0.0-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd-gui/releases/latest"><img alt="Version: 1.0.1" src="https://img.shields.io/badge/version-1.0.1-informational?style=for-the-badge"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 <a href="https://omarchy.org"><img alt="Made for Omarchy" src="https://img.shields.io/badge/made%20for-Omarchy-7aa2f7?style=for-the-badge"></a>
 
@@ -19,7 +19,7 @@ A native desktop app for Omarchy, Wayland desktops and Windows. No browser. No Q
 <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
 <img alt="Platforms: Linux (Wayland) and Windows" src="https://img.shields.io/badge/platform-Linux%20(Wayland)%20%7C%20Windows-2ea44f">
 
-[**Download**](https://github.com/Butterski/rayomd-gui/releases/tag/continuous) ·
+[**Download**](https://github.com/Butterski/rayomd-gui/releases/latest) ·
 [Quick start](#quick-start) ·
 [Features](#features) ·
 [Performance](#performance) ·
@@ -30,9 +30,9 @@ A native desktop app for Omarchy, Wayland desktops and Windows. No browser. No Q
 </div>
 
 > [!NOTE]
-> The repository is private while the app is prepared for its first release. Every push to
-> `main` is built for Linux, Arch Linux and Windows and published as the
-> [`continuous`](https://github.com/Butterski/rayomd-gui/releases/tag/continuous) pre-release.
+> The repository is private while the app is prepared for its first public release. Each version
+> is built for Linux, Arch Linux and Windows and published as a
+> [release](https://github.com/Butterski/rayomd-gui/releases/latest).
 
 RayoMD GUI is the desktop app of [RayoMD](https://github.com/Butterski/rayomd): write Markdown,
 see the PDF as you type, export it. It runs on its own small toolkit, drawn by its own software
@@ -95,14 +95,14 @@ with the platforms' exploit mitigations.
 
 While the repository is private, download the assets with a logged-in
 [GitHub CLI](https://cli.github.com) (`gh auth login`) or from the
-[release page](https://github.com/Butterski/rayomd-gui/releases/tag/continuous).
+[release page](https://github.com/Butterski/rayomd-gui/releases/latest).
 
 <details open>
 <summary><b>Omarchy and Arch Linux</b>: the package</summary>
 
 ```sh
-gh release download continuous --repo Butterski/rayomd-gui --pattern '*.pkg.tar.zst'
-sudo pacman -U rayomd-gui-1.0.0-1-x86_64.pkg.tar.zst
+gh release download v1.0.1 --repo Butterski/rayomd-gui --pattern '*.pkg.tar.zst'
+sudo pacman -U rayomd-gui-1.0.1-1-x86_64.pkg.tar.zst
 rayomd-gui notes.md
 ```
 
@@ -114,16 +114,16 @@ It installs the program, its menu entry and its icons.
 <summary><b>Other Linux</b>: glibc 2.34 or newer and a Wayland desktop</summary>
 
 ```sh
-gh release download continuous --repo Butterski/rayomd-gui --pattern '*-linux-x64.tar.gz'
-tar -xzf rayomd-gui-1.0.0-linux-x64.tar.gz
-./rayomd-gui-1.0.0-linux-x64/rayomd-gui notes.md
+gh release download v1.0.1 --repo Butterski/rayomd-gui --pattern '*-linux-x64.tar.gz'
+tar -xzf rayomd-gui-1.0.1-linux-x64.tar.gz
+./rayomd-gui-1.0.1-linux-x64/rayomd-gui notes.md
 ```
 
 For the application menu, put the program on your `PATH` and copy its menu entry and icons:
 
 ```sh
-install -Dm755 rayomd-gui-1.0.0-linux-x64/rayomd-gui ~/.local/bin/rayomd-gui
-cp -r rayomd-gui-1.0.0-linux-x64/share/. ~/.local/share/
+install -Dm755 rayomd-gui-1.0.1-linux-x64/rayomd-gui ~/.local/bin/rayomd-gui
+cp -r rayomd-gui-1.0.1-linux-x64/share/. ~/.local/share/
 ```
 
 </details>
@@ -131,8 +131,8 @@ cp -r rayomd-gui-1.0.0-linux-x64/share/. ~/.local/share/
 <details>
 <summary><b>Windows</b>: <code>rayomd-gui.exe</code></summary>
 
-Download `rayomd-gui-1.0.0-windows-x64.zip` from the
-[release page](https://github.com/Butterski/rayomd-gui/releases/tag/continuous), unpack it and
+Download `rayomd-gui-1.0.1-windows-x64.zip` from the
+[release page](https://github.com/Butterski/rayomd-gui/releases/latest), unpack it and
 start `rayomd-gui.exe`, or drop a Markdown file on it.
 
 </details>
@@ -284,10 +284,11 @@ build/windows/tests/rayomd-gui-tests.exe
 snapshot; ctest runs both when weston and sway are installed. On Arch, `linux/pkgbuild` builds a
 package of the working tree: `cd linux/pkgbuild && makepkg -f`.
 
-Every push to `main` runs the Release workflow (`.github/workflows/release.yml`). It builds the
-Linux binary on Ubuntu 22.04 (so it runs on glibc 2.34 or newer), the Arch package and the
-Windows executable, and publishes them as the `continuous` pre-release, replaced on each push. A
-tag `v<VERSION>` publishes the release of that version instead.
+A push to `main` that changes `VERSION` runs the Release workflow
+(`.github/workflows/release.yml`), as in RayoMD. It builds the Linux binary on Ubuntu 22.04 (so
+it runs on glibc 2.34 or newer), the Arch package and the Windows executable, and publishes them
+as the release `v<VERSION>`, tagged at that commit. A tag `v<VERSION>` or a manual run of the
+workflow publishes the same; other pushes publish nothing (CI builds and tests them).
 
 ## Contributing
 
