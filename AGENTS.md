@@ -60,6 +60,9 @@ memory, so it is the PDF, not an approximation of it.
   generator `rgui-fuzz-seeds`, `run_fuzzers.sh`, and `regressions/<harness>/`: minimized inputs
   that once crashed, replayed by the unit test `fuzz.regressions` in every build.
 - `linux/` — the desktop file, icons and the Arch PKGBUILD.
+- `assets/` — the app icon (`rayomd.ico`, `rayomd.png`) and the README's screenshots
+  (`screenshot-*.png`). The README's sizes, timings and screenshots follow the app: update them
+  with a change that makes them wrong, with the date of the measurement.
 - `third_party/omarchy/` — the MIT notices of the Omarchy, Omawrite and Hype material and what
   came from where.
 

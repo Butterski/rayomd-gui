@@ -1,37 +1,261 @@
+<a id="readme-top"></a>
+
+<div align="center">
+
+<img src="assets/rayomd.png" alt="RayoMD mascot" width="170">
+
 # RayoMD GUI
 
-The desktop app of [RayoMD](https://github.com/Butterski/rayomd): write Markdown on the left,
-see the PDF on the right as you type, export it. It is made for
-[Omarchy](https://omarchy.org) and follows its theme live, and runs on any Linux desktop with
-Wayland and on Windows.
+**Markdown on the left, the real PDF on the right, updated as you type.**<br>
+A native desktop app for Omarchy, Wayland desktops and Windows. No browser. No Qt. No Electron.
 
-It is built on its own small toolkit, with no Qt, GTK or browser engine: on Linux the program
-needs only the C library, on Windows only system DLLs. The preview is the PDF itself, drawn by
-the app's own PDF rasterizer from the bytes the engine just made in memory.
+<a href="https://github.com/Butterski/rayomd-gui/releases/tag/continuous"><img alt="Version: 1.0.0" src="https://img.shields.io/badge/version-1.0.0-informational?style=for-the-badge"></a>
+<a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
+<a href="https://omarchy.org"><img alt="Made for Omarchy" src="https://img.shields.io/badge/made%20for-Omarchy-7aa2f7?style=for-the-badge"></a>
 
-This repository is private while the app is prepared for its first release.
+<a href="https://github.com/Butterski/rayomd-gui/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Butterski/rayomd-gui/actions/workflows/ci.yml/badge.svg"></a>
+<a href="https://github.com/Butterski/rayomd-gui/actions/workflows/release.yml"><img alt="Release" src="https://github.com/Butterski/rayomd-gui/actions/workflows/release.yml/badge.svg"></a>
+<a href="https://github.com/Butterski/rayomd-gui/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/Butterski/rayomd-gui/actions/workflows/codeql.yml/badge.svg"></a>
+<img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white">
+<img alt="Platforms: Linux (Wayland) and Windows" src="https://img.shields.io/badge/platform-Linux%20(Wayland)%20%7C%20Windows-2ea44f">
 
-## Using it
+[**Download**](https://github.com/Butterski/rayomd-gui/releases/tag/continuous) ·
+[Quick start](#quick-start) ·
+[Features](#features) ·
+[Performance](#performance) ·
+[Building](#building)
+
+<img src="assets/screenshot-math-toc.png" alt="RayoMD GUI: the Markdown source of tester.md on the left, its PDF with a table of contents, formulas and highlighted code in the middle, the export options on the right">
+
+</div>
+
+> [!NOTE]
+> The repository is private while the app is prepared for its first release. Every push to
+> `main` is built for Linux, Arch Linux and Windows and published as the
+> [`continuous`](https://github.com/Butterski/rayomd-gui/releases/tag/continuous) pre-release.
+
+RayoMD GUI is the desktop app of [RayoMD](https://github.com/Butterski/rayomd): write Markdown,
+see the PDF as you type, export it. It runs on its own small toolkit, drawn by its own software
+renderer: on Linux the program needs only the C library, on Windows only system DLLs. The preview
+is not an imitation of the PDF but the PDF itself, the bytes the engine just built in memory,
+drawn by the app's own PDF renderer.
+
+## Highlights
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### Live
+A keystroke reaches the preview in about **4 ms** in `tester.md`. No waiting timer, and a slow
+build never holds up typing.
+
+</td>
+<td width="33%" valign="top">
+
+### The real PDF
+The preview shows the PDF Export writes, **0.4/255** from poppler's rendering on average over 45
+test pages.
+
+</td>
+<td width="33%" valign="top">
+
+### Omarchy native
+Follows the current **Omarchy** theme and font as they change, in the look of Omarchy's own
+apps. 23 Omarchy themes are built in for other desktops.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### Small
+A **1.4 MB** Linux download and a 1.7 MB Windows download. No browser engine, toolkit or runtime
+to install.
+
+</td>
+<td valign="top">
+
+### Every export option
+Styles, margins, page sizes, PDF themes, tables of contents, page numbers, code colours,
+**PDF/A-3b** and **PDF/UA-1**.
+
+</td>
+<td valign="top">
+
+### Hardened
+Untrusted documents, images and fonts are read within work and memory limits; fuzzed, and built
+with the platforms' exploit mitigations.
+
+</td>
+</tr>
+</table>
+
+## Quick start
+
+While the repository is private, download the assets with a logged-in
+[GitHub CLI](https://cli.github.com) (`gh auth login`) or from the
+[release page](https://github.com/Butterski/rayomd-gui/releases/tag/continuous).
+
+<details open>
+<summary><b>Omarchy and Arch Linux</b>: the package</summary>
 
 ```sh
-rayomd-gui [file.md | file.pdf]
+gh release download continuous --repo Butterski/rayomd-gui --pattern '*.pkg.tar.zst'
+sudo pacman -U rayomd-gui-1.0.0-1-x86_64.pkg.tar.zst
+rayomd-gui notes.md
 ```
 
-- The editor is on the left, the PDF on the right, rebuilt as you type: a keystroke goes to the
-  engine in its own frame, with no waiting timer, and what you type while a build runs goes
-  into the next one. A reversible RayoMD PDF opens as its embedded Markdown source.
-- The footer holds Open (`Ctrl+O`), Save (`Ctrl+S`, `Ctrl+Shift+S` to save as), Export PDF
-  (`Ctrl+E`, `Ctrl+Shift+E` to choose the file) and Options (`Ctrl+,`): style, margins, page
-  size, PDF theme file, table of contents, page numbers, code highlighting, PDF/A-3b, PDF/UA-1,
-  compression, embedded source, and the interface theme. `Ctrl+=`, `Ctrl+-` and `Ctrl+0` change
-  the editor's text size, `Ctrl+wheel` over the preview its zoom.
-- On Omarchy the interface follows the current theme and font as they change. Elsewhere it
-  follows the system's light or dark mode with Omarchy's bundled themes, or the one you pick.
-- File dialogs are the system's (the desktop portal on Linux, the common dialogs on Windows).
-- `rayomd-gui --snapshot out.png file.md` writes the first complete frame to a PNG and exits;
-  the end-to-end tests use it.
+It installs the program, its menu entry and its icons.
 
-URL images are not fetched on Linux (the build links no libcurl); they show their alt text.
+</details>
+
+<details>
+<summary><b>Other Linux</b>: glibc 2.34 or newer and a Wayland desktop</summary>
+
+```sh
+gh release download continuous --repo Butterski/rayomd-gui --pattern '*-linux-x64.tar.gz'
+tar -xzf rayomd-gui-1.0.0-linux-x64.tar.gz
+./rayomd-gui-1.0.0-linux-x64/rayomd-gui notes.md
+```
+
+For the application menu, put the program on your `PATH` and copy its menu entry and icons:
+
+```sh
+install -Dm755 rayomd-gui-1.0.0-linux-x64/rayomd-gui ~/.local/bin/rayomd-gui
+cp -r rayomd-gui-1.0.0-linux-x64/share/. ~/.local/share/
+```
+
+</details>
+
+<details>
+<summary><b>Windows</b>: <code>rayomd-gui.exe</code></summary>
+
+Download `rayomd-gui-1.0.0-windows-x64.zip` from the
+[release page](https://github.com/Butterski/rayomd-gui/releases/tag/continuous), unpack it and
+start `rayomd-gui.exe`, or drop a Markdown file on it.
+
+</details>
+
+<details>
+<summary><b>Build from source</b></summary>
+
+GCC or Clang and CMake 3.21 or newer, x86-64. The engine is the `external/rayomd` submodule:
+
+```sh
+git clone --recursive https://github.com/Butterski/rayomd-gui.git && cd rayomd-gui
+cmake --preset linux-release && cmake --build --preset linux-release
+build/linux-release/src/rayomd-gui notes.md
+```
+
+Windows and the tests: [Building](#building).
+
+</details>
+
+| Package | Size | For |
+|---|---:|---|
+| `rayomd-gui-<version>-1-x86_64.pkg.tar.zst` | 1,465 KB | Omarchy and Arch Linux: `pacman -U` |
+| `rayomd-gui-<version>-linux-x64.tar.gz` | 1,371 KB | Linux with glibc 2.34 or newer: the program, its menu entry and icons |
+| `rayomd-gui-<version>-windows-x64.zip` | 1,663 KB | Windows x64: one `rayomd-gui.exe` |
+
+<p align="right"><a href="#readme-top">back to top ↑</a></p>
+
+## Features
+
+### Editor and preview
+
+The editor is on the left, the PDF on the right. A change goes to the engine at the end of the
+frame that made it, and what you type while a build runs goes into the next one. Pages that did
+not change keep their images, and a page with a large picture draws again in about 2 ms.
+
+<img src="assets/screenshot-links-images.png" alt="Links and images: the Markdown on the left, the PDF page with a photo, reference links and quotes on the right">
+
+| Keys | Action |
+|---|---|
+| `Ctrl+O` / `Ctrl+N` | Open / new document |
+| `Ctrl+S` / `Ctrl+Shift+S` | Save / save as |
+| `Ctrl+E` / `Ctrl+Shift+E` | Export the PDF / export to another file |
+| `Ctrl+,` | Show or hide the options |
+| `Ctrl+=`, `Ctrl+-`, `Ctrl+0` | Editor text size up, down, back (`Ctrl+0` also resets the preview zoom) |
+| `Ctrl+wheel` | Zoom the preview |
+| `Ctrl+Q` | Quit |
+
+Every action that would lose unsaved text asks first. Files dropped on the window open: `.md`,
+`.markdown`, `.txt` and `.pdf`. A reversible RayoMD PDF, exported with its Markdown source
+embedded, opens as that source, checked byte for byte.
+
+### Export options
+
+The engine's export options, in the panel on the right (`Ctrl+,`):
+
+<img src="assets/screenshot-options.png" alt="A new document with the options panel: style, margins, page size, PDF theme, table of contents, page numbers, code highlighting, PDF/A-3b, PDF/UA-1, compression and the interface theme">
+
+- **Document:** style (Elegant, Modern, Tech), margins (also custom), page size (A4, A3, A5,
+  Letter, Legal or custom, in landscape too) and a PDF theme file: company fonts, colours,
+  header, footer and cover page.
+- **Contents:** a table of contents with its depth, page numbers, code coloured as on GitHub.
+- **Output:** PDF/A-3b, PDF/UA-1, compression, faster image encoding, the Markdown source
+  embedded, URL images (Windows), opening the PDF after export.
+
+The options are remembered, with the window's size and the editor's text size.
+
+### Themes
+
+On Omarchy, *Follow Omarchy* takes the current theme's colours, its `shell.toml` sizes and the
+Omarchy font, and follows a theme switch as it happens. Elsewhere *Automatic* follows the
+system's light or dark mode (Tokyo Night or Catppuccin Latte), or you pick one of the 23 Omarchy
+themes: Catppuccin, Catppuccin Latte, Ethereal, Everforest, Flexoki Light, Gruvbox, Hackerman,
+Kanagawa, Last Horizon, Lumon, Lupine, Matte Black, Miasma, Nord, Osaka Jade, Retro 82, Ristretto,
+Rose Pine, Solitude, Starship, Tokyo Night, Vantablack and White.
+
+### Desktop integration
+
+System file dialogs (the desktop portal on Linux, the common dialogs on Windows), the clipboard,
+input methods such as fcitx5, Compose keys, fractional scaling and server-side decorations where
+the compositor offers them. Saves replace the file atomically and keep its permissions. On Linux,
+if the compositor goes away, unsaved text is written to a recovery copy first.
+
+`rayomd-gui --snapshot out.png notes.md` writes the first complete frame to a PNG and prints
+where startup's time went; the end-to-end tests run it on headless compositors.
+
+<p align="right"><a href="#readme-top">back to top ↑</a></p>
+
+## Performance
+
+Measured on 2026-10-15 and 2026-10-16: on Linux with an AMD Ryzen 5 PRO 4650GE in an Arch Linux
+container, pinned to six cores, on headless Wayland compositors; on Windows on GitHub's runners.
+
+| Measure | Result |
+|---|---:|
+| Keystroke to the edited page's preview, `tester.md` (5 KB, 5 pages), median / p99 | **4.1 / 5.1 ms** |
+| The same, 8 copies (42 KB, 40 pages) | 5.9 / 7.5 ms |
+| The same, 70 copies (364 KB, 350 pages) | 21.6 / 24.8 ms |
+| The same, 700 copies (3.6 MB, 3,500 pages) | 192 / 206 ms |
+| One keystroke in a 1 MiB document, editor and drawing, median | 0.31 ms |
+| Page 1 of `tester.md` at 1,200 px, first time / with warm caches | 6.8 / 1.3 ms |
+| Start to first frame / to the preview of `tester.md`, Linux | 12 / 37 ms |
+| The same on Windows runners | 15–26 / 74–161 ms |
+
+A keystroke used to wait 80 ms for typing to pause (84 ms in `tester.md`); a build that is no
+longer wanted is now abandoned, so quitting during the 3.6 MB build takes 25 ms. The tests
+`bench.preview_latency` and `bench.typing` print these numbers; `--snapshot` prints the startup
+ones.
+
+## Boundaries
+
+> [!NOTE]
+> The PDFs are RayoMD's: its fast Markdown subset, not Pandoc's. What the engine does and does
+> not render is in its [README](https://github.com/Butterski/rayomd#features) and
+> [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
+
+- The editor is plain text, without Markdown highlighting; the preview shows the formatting.
+- Linux needs a Wayland desktop; there is no X11 backend. x86-64 only.
+- URL images are fetched on Windows only: the Linux program links no libcurl, so they show their
+  alt text there.
+- The interface font is the system's: Omarchy's monospace font on Linux, Cascadia Mono or
+  Consolas on Windows.
+
+<p align="right"><a href="#readme-top">back to top ↑</a></p>
 
 ## Building
 
@@ -53,17 +277,23 @@ build/windows/tests/rayomd-gui-tests.exe
 ```
 
 `tests/e2e/run_compositor.sh weston|sway` runs the app on a headless compositor and checks its
-snapshot; ctest runs both when weston and sway are installed. On Arch, `linux/pkgbuild` builds
-a package of the working tree: `cd linux/pkgbuild && makepkg -f`.
-
-## Builds
+snapshot; ctest runs both when weston and sway are installed. On Arch, `linux/pkgbuild` builds a
+package of the working tree: `cd linux/pkgbuild && makepkg -f`.
 
 Every push to `main` runs the Release workflow (`.github/workflows/release.yml`). It builds the
 Linux binary on Ubuntu 22.04 (so it runs on glibc 2.34 or newer), the Arch package and the
-Windows executable, and publishes them as the `continuous` pre-release, replaced on each push.
-A tag `v<VERSION>` publishes the release of that version instead.
+Windows executable, and publishes them as the `continuous` pre-release, replaced on each push. A
+tag `v<VERSION>` publishes the release of that version instead.
+
+## Contributing
+
+Read [`AGENTS.md`](AGENTS.md) first: the toolkit's conventions, the rule that the Linux program
+needs nothing beyond the C library, the limits every reader of outside data keeps, and how to
+build, test and fuzz.
 
 ## License
 
 Apache License 2.0; see [`LICENSE`](LICENSE). [`NOTICE`](NOTICE) lists the third-party
 material, among it the Omarchy theme palettes and icon paths (MIT, `third_party/omarchy/`).
+
+<p align="right"><a href="#readme-top">back to top ↑</a></p>
