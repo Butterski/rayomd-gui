@@ -27,7 +27,16 @@ enum class WriteMode {
     // permission bits are kept, a new file gets 0666 less the umask; a symlink at the destination
     // is replaced, never followed.
     Output,
+    // A file that must not exist yet (an image copied beside a document): no flush, 0666 less the
+    // umask, and the temporary file takes the name only while nothing is there (RENAME_NOREPLACE,
+    // or a hard link where the file system has no such rename; MoveFileExW without
+    // MOVEFILE_REPLACE_EXISTING), so an existing file or link is never replaced; that failure's
+    // reason is kFileExistsError.
+    NewFile,
 };
+
+// The reason WriteFileAtomically gives when a NewFile destination exists.
+inline constexpr const char kFileExistsError[] = "the file exists";
 
 // Replaces `path` with `bytes` as described above. A destination that exists and is not a
 // regular file (a directory, FIFO, device or socket; for Output also no symlink to one) is

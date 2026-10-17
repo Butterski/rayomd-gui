@@ -159,6 +159,10 @@ bool WriteFileAtomically(const fs::path& path, std::string_view bytes, WriteMode
         }
         attributes = GetFileAttributesW(LongPath(target).c_str());
     }
+    if (attributes != INVALID_FILE_ATTRIBUTES && mode == WriteMode::NewFile) {
+        SetError(error, kFileExistsError);
+        return false;
+    }
     if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
         SetError(error, "not a regular file");
         return false;
@@ -216,9 +220,18 @@ bool WriteFileAtomically(const fs::path& path, std::string_view bytes, WriteMode
     }
     CloseHandle(file);
     if (ok) {
-        const DWORD flags = MOVEFILE_REPLACE_EXISTING | (mode == WriteMode::Document ? MOVEFILE_WRITE_THROUGH : 0);
-        ok = MoveFileExW(LongPath(temp).c_str(), LongPath(target).c_str(), flags) != 0;
-        if (!ok) SetError(error, Describe("cannot replace the file"));
+        if (mode == WriteMode::NewFile) {
+            ok = MoveFileExW(LongPath(temp).c_str(), LongPath(target).c_str(), 0) != 0;
+            if (!ok) {
+                const DWORD code = GetLastError();
+                if (code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS) SetError(error, kFileExistsError);
+                else SetError(error, Describe("cannot create the file"));
+            }
+        } else {
+            const DWORD flags = MOVEFILE_REPLACE_EXISTING | (mode == WriteMode::Document ? MOVEFILE_WRITE_THROUGH : 0);
+            ok = MoveFileExW(LongPath(temp).c_str(), LongPath(target).c_str(), flags) != 0;
+            if (!ok) SetError(error, Describe("cannot replace the file"));
+        }
     }
     if (!ok) DeleteFileW(LongPath(temp).c_str());
     return ok;
@@ -314,6 +327,11 @@ bool WriteFileAtomically(const fs::path& path, std::string_view bytes, WriteMode
     mode_t keptMode = 0;
     struct stat existing {};
     if (fstatat(directory, name.c_str(), &existing, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (mode == WriteMode::NewFile) {
+            SetError(error, kFileExistsError);
+            close(directory);
+            return false;
+        }
         if (S_ISREG(existing.st_mode)) {
             keepMode = true;
             keptMode = existing.st_mode & 0777;
@@ -370,7 +388,25 @@ bool WriteFileAtomically(const fs::path& path, std::string_view bytes, WriteMode
         SetError(error, Describe("cannot write"));
         ok = false;
     }
-    if (ok && renameat(directory, tempName.c_str(), directory, name.c_str()) != 0) {
+    if (ok && mode == WriteMode::NewFile) {
+        // Nothing may be replaced. A file system without RENAME_NOREPLACE takes a hard link,
+        // which fails on an existing name too; the temporary name then goes.
+        if (renameat2(directory, tempName.c_str(), directory, name.c_str(), RENAME_NOREPLACE) != 0) {
+            const int code = errno;
+            if (code == EEXIST) {
+                SetError(error, kFileExistsError);
+                ok = false;
+            } else if (code != EINVAL && code != ENOSYS) {
+                SetError(error, Describe("cannot create the file"));
+                ok = false;
+            } else if (linkat(directory, tempName.c_str(), directory, name.c_str(), 0) != 0) {
+                SetError(error, errno == EEXIST ? std::string(kFileExistsError) : Describe("cannot create the file"));
+                ok = false;
+            } else {
+                unlinkat(directory, tempName.c_str(), 0);
+            }
+        }
+    } else if (ok && renameat(directory, tempName.c_str(), directory, name.c_str()) != 0) {
         SetError(error, Describe("cannot replace the file"));
         ok = false;
     }

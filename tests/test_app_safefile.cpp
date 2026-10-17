@@ -7,6 +7,7 @@
 
 #include "app/buildworker.h"
 #include "app/document.h"
+#include "app/documentloader.h"
 #include "app/exportsettings.h"
 #include "app/safefile.h"
 #include "common/file_io.h"
@@ -156,6 +157,101 @@ RGUI_TEST("app.safefile.round_trip") {
     CHECK(!rgui::WriteFileAtomically(dir / "no-dir" / "x.md", "x", WriteMode::Output, &error));
     CHECK(!fs::exists(dir / "no-dir"));
     CHECK_EQ(TempFilesIn(dir), size_t(0));
+}
+
+RGUI_TEST("app.safefile.new_file") {
+    // NewFile writes a name that is free and never replaces what is there: a file, a folder or
+    // (below) a symlink, dangling or not.
+    const fs::path dir = TempDir("new-file");
+    std::string error;
+    CHECK(rgui::WriteFileAtomically(dir / "a.png", "first", WriteMode::NewFile, &error));
+    CHECK(!rgui::WriteFileAtomically(dir / "a.png", "second", WriteMode::NewFile, &error));
+    CHECK_EQ(error, std::string(rgui::kFileExistsError));
+    std::string read;
+    CHECK(rgui::ReadRegularFile(dir / "a.png", 64, read, &error));
+    CHECK_EQ(read, std::string("first"));
+    fs::create_directories(dir / "folder.png");
+    CHECK(!rgui::WriteFileAtomically(dir / "folder.png", "x", WriteMode::NewFile, &error));
+    CHECK_EQ(error, std::string(rgui::kFileExistsError));
+    CHECK(fs::is_directory(dir / "folder.png"));
+#ifndef _WIN32
+    const fs::path victim = dir / "victim.txt";
+    CHECK(RayoMd::File::WriteAll(victim, "victim\n"));
+    fs::create_symlink(victim, dir / "link.png");
+    fs::create_symlink(dir / "nowhere", dir / "dangling.png");
+    CHECK(!rgui::WriteFileAtomically(dir / "link.png", "x", WriteMode::NewFile, &error));
+    CHECK(!rgui::WriteFileAtomically(dir / "dangling.png", "x", WriteMode::NewFile, &error));
+    CHECK(!fs::exists(dir / "nowhere"));
+    CHECK(rgui::ReadRegularFile(victim, 64, read, &error));
+    CHECK_EQ(read, std::string("victim\n"));
+    CHECK(fs::is_symlink(dir / "link.png"));
+#endif
+    CHECK_EQ(TempFilesIn(dir), size_t(0));
+}
+
+RGUI_TEST("app.safefile.image_copy") {
+    // A dropped image goes into images/ beside the document under a safe name, never over a
+    // file that is there.
+    const fs::path dir = TempDir("image-copy");
+    const fs::path document = dir / "doc.md";
+    CHECK(RayoMd::File::WriteAll(document, "# Doc\n"));
+    fs::create_directories(dir / "elsewhere");
+    const fs::path source = dir / "elsewhere" / "My (best) photo.PNG";
+    CHECK(RayoMd::File::WriteAll(source, "png one"));
+    rgui::ImageCopied copied;
+    rgui::CopyImageBeside(source, document, copied);
+    CHECK(copied.ok);
+    CHECK_EQ(copied.markdown, std::string("![My--best--photo](images/My--best--photo.png)"));
+    CHECK_EQ(copied.status, std::string("Copied My (best) photo.PNG into images/ as My--best--photo.png"));
+    std::string read;
+    CHECK(rgui::ReadRegularFile(dir / "images" / "My--best--photo.png", 64, read, nullptr));
+    CHECK_EQ(read, std::string("png one"));
+    // Again, with other bytes: the next free name, the first copy kept.
+    CHECK(RayoMd::File::WriteAll(source, "png two"));
+    rgui::CopyImageBeside(source, document, copied);
+    CHECK(copied.ok);
+    CHECK_EQ(copied.markdown, std::string("![My--best--photo](images/My--best--photo-2.png)"));
+    CHECK(rgui::ReadRegularFile(dir / "images" / "My--best--photo.png", 64, read, nullptr));
+    CHECK_EQ(read, std::string("png one"));
+    CHECK(rgui::ReadRegularFile(dir / "images" / "My--best--photo-2.png", 64, read, nullptr));
+    CHECK_EQ(read, std::string("png two"));
+    // An image already in images/ is linked as it is.
+    CHECK(RayoMd::File::WriteAll(dir / "images" / "plain.svg", "<svg/>"));
+    rgui::CopyImageBeside(dir / "images" / "plain.svg", document, copied);
+    CHECK(copied.ok);
+    CHECK_EQ(copied.markdown, std::string("![plain](images/plain.svg)"));
+    CHECK_EQ(copied.status, std::string("Linked images/plain.svg"));
+    CHECK(!fs::exists(dir / "images" / "plain-2.svg"));
+    // A hidden name is made visible; a file past the size cap is refused, nothing written.
+    CHECK(RayoMd::File::WriteAll(dir / "elsewhere" / ".hidden.jpg", "jpg"));
+    rgui::CopyImageBeside(dir / "elsewhere" / ".hidden.jpg", document, copied);
+    CHECK_EQ(copied.markdown, std::string("![-hidden](images/-hidden.jpg)"));
+    const fs::path big = dir / "elsewhere" / "big.png";
+    CHECK(RayoMd::File::WriteAll(big, "x"));
+    fs::resize_file(big, rgui::kMaxDroppedImageBytes + 1);
+    rgui::CopyImageBeside(big, document, copied);
+    CHECK(!copied.ok);
+    CHECK_EQ(copied.status, std::string("Cannot copy big.png: too large"));
+    CHECK(!fs::exists(dir / "images" / "big.png"));
+#ifndef _WIN32
+    // A link planted at the name is passed over, its target untouched.
+    const fs::path victim = dir / "victim.txt";
+    CHECK(RayoMd::File::WriteAll(victim, "victim\n"));
+    fs::create_symlink(victim, dir / "images" / "shot.png");
+    CHECK(RayoMd::File::WriteAll(dir / "elsewhere" / "shot.png", "shot"));
+    rgui::CopyImageBeside(dir / "elsewhere" / "shot.png", document, copied);
+    CHECK_EQ(copied.markdown, std::string("![shot](images/shot-2.png)"));
+    CHECK(rgui::ReadRegularFile(victim, 64, read, nullptr));
+    CHECK_EQ(read, std::string("victim\n"));
+    // A file where the folder should be.
+    const fs::path other = dir / "other";
+    fs::create_directories(other);
+    CHECK(RayoMd::File::WriteAll(other / "images", "not a folder"));
+    rgui::CopyImageBeside(dir / "elsewhere" / "shot.png", other / "doc.md", copied);
+    CHECK(!copied.ok);
+    CHECK_EQ(copied.status, std::string("Cannot copy shot.png: no images folder beside the document"));
+#endif
+    CHECK_EQ(TempFilesIn(dir / "images"), size_t(0));
 }
 
 #ifndef _WIN32
