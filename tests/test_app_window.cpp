@@ -886,7 +886,15 @@ RGUI_TEST("app.insert_popup") {
     h.KeyDown(Key::I, rgui::kModCtrl);
     h.KeyDown(Key::Up);
     h.KeyDown(Key::Enter);
-    CHECK_EQ(std::string(editor.Text()), std::string("---\n\n"));
+    CHECK_EQ(std::string(editor.Text()), std::string("***\n\n"));
+    // `***`, not `---`: a rule on the first line and another later keep the text between them
+    // out of front matter.
+    h.Type("# Hello");
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.KeyDown(Key::Up);
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("***\n\n# Hello\n\n***\n\n"));
+    CHECK(rgui::ui::markdown::DocumentHeadings(editor.Text()) == std::vector<std::string>{"Hello"});
 
     // The table: the caret in its first header cell.
     reset("", 0);
@@ -988,8 +996,9 @@ RGUI_TEST("app.insert_popup") {
     CHECK(w.Popup().CurrentMode() == Mode::Insert);
     h.Type("rule");
     h.KeyDown(Key::Enter);
-    CHECK(StartsWith(caretText(), ""));
-    CHECK(std::string(editor.Text()).find("\n---\n") != std::string::npos);
+    CHECK_EQ(std::string(editor.Text()), std::string("[TOC]\n\n***\n\n"));
+    CHECK_EQ(editor.Caret(), editor.Buffer().Size());
+    CHECK(caretText().empty());
     // A prompt takes the keyboard: the list closes.
     h.KeyDown(Key::I, rgui::kModCtrl);
     CHECK(w.Popup().IsOpen());

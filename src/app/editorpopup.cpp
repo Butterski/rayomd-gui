@@ -39,7 +39,8 @@ const InsertEntry kInsertEntries[] = {
     {"Math block", "$$\n\n$$", 3, false},
     {"Code block", "```\n\n```", 3, false},
     {"Front matter", nullptr, 0, false},
-    {"Horizontal rule", "---", 0, true},
+    // `***`, not `---`: on the first line `---` would open front matter.
+    {"Horizontal rule", "***", 0, true},
 };
 constexpr size_t kCalloutEntry = 3;
 constexpr size_t kCodeBlockEntry = 7;
