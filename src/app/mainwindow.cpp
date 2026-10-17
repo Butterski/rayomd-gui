@@ -101,7 +101,9 @@ MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hoo
     preview_ = std::make_unique<PreviewPages>(platform_, fontIndex, [this] {
         if (hooks_.requestFrame) hooks_.requestFrame();
     });
-    loader_ = std::make_unique<DocumentLoader>(platform_, [this](DocumentLoaded loaded) { OnLoaded(std::move(loaded)); });
+    loader_ = std::make_unique<DocumentLoader>(
+        platform_, [this](DocumentLoaded loaded) { OnLoaded(std::move(loaded)); },
+        [this](ImageCopied copied) { OnImageCopied(std::move(copied)); });
     SetOmarchyAvailable(platform_.OmarchyThemeDir().has_value());
 }
 
@@ -145,6 +147,14 @@ void MainWindow::StoreSettings(ui::SettingsFile& file) const {
 void MainWindow::SetOmarchyAvailable(bool available) {
     omarchy_ = available;
     themeItems_ = ThemeMenuItems(available);
+}
+
+void MainWindow::SetWikiLinks(bool on) {
+    if (on == popup_.WikiLinks()) return;
+    popup_.SetWikiLinks(on);
+    if (!on) popup_.SetHeadings({});
+    // The next build collects the headings.
+    MarkPreviewDirty();
 }
 
 void MainWindow::SetSyncScroll(bool on) {
@@ -240,9 +250,13 @@ void MainWindow::Frame(ui::Context& ctx) {
         ctx.SetFocus(ctx.MakeId("##texteditor"));
         focusEditor_ = false;
     }
+    // The popup list at the caret takes its keys first; the editor keeps the focus.
+    const bool editorKeys = ctx.IsFocused(editor_.WidgetId()) && !prompt_.open && !pathPrompt_.open;
+    popup_.BeforeEditor(ctx, editor_, editorKeys);
     const int zoomBefore = editor_.ZoomIndex();
     editor_.Frame(ctx, editorRect);
     if (editor_.ZoomIndex() != zoomBefore) hooks_.settingsChanged();
+    popup_.AfterEditor(ctx, editor_, editorRect);
     // Typing, a press, the wheel or keys in the editor: it leads. A press shows its line in the
     // preview, at the caret's height (the panes start at the same y).
     if (editor_.Revision() != revisionSeen_ || editor_.UserScrolled() || editor_.PressedThisFrame()) {
@@ -343,6 +357,11 @@ void MainWindow::Footer(ui::Context& ctx, RectF rect) {
     if (ui::IconButton(ctx, "##save", ui::Icon::Save, next(), "Save (Ctrl+S)")) Save(false);
     if (ui::IconButton(ctx, "##export", ui::Icon::Export, next(), "Export PDF (Ctrl+E)", ui::IconStyle::Accent)) {
         ExportPdf(false);
+    }
+    if (ui::IconButton(ctx, "##insert", ui::Icon::Insert, next(), "Insert (Ctrl+I)")) {
+        popup_.OpenInsert();
+        focusEditor_ = true;
+        Dirty();
     }
     if (ui::IconButton(ctx, "##options", ui::Icon::Options, next(), "Options (Ctrl+,)")) {
         optionsVisible_ = !optionsVisible_;
@@ -735,8 +754,21 @@ void MainWindow::RequestClose() { Guarded(Action::Close); }
 
 void MainWindow::DropFile(const std::string& path) {
     const std::string ext = LowerExtension(path);
+    const std::string name = fs::u8path(path).filename().u8string();
+    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".svg") {
+        if (doc_.filePath.empty()) {
+            SetStatus("Save the document first: a dropped image goes into the images folder beside it",
+                      StatusKind::Warning);
+        } else if (loader_->CopyImage(path, doc_.filePath) == 0) {
+            SetStatus("Cannot copy " + name + ": too many images are being copied", StatusKind::Warning);
+        } else {
+            SetStatus("Copying " + name + "\xE2\x80\xA6", StatusKind::Info);
+        }
+        if (hooks_.requestFrame) hooks_.requestFrame();
+        return;
+    }
     if (ext != ".md" && ext != ".markdown" && ext != ".txt" && ext != ".pdf") {
-        SetStatus("Not a Markdown, text or PDF file: " + fs::u8path(path).filename().u8string(), StatusKind::Warning);
+        SetStatus("Not a Markdown, text, PDF or image file: " + name, StatusKind::Warning);
         if (hooks_.requestFrame) hooks_.requestFrame();
         return;
     }
@@ -780,6 +812,7 @@ void MainWindow::NewDocument() {
     DropPreviewBuild();
     doc_.New();
     editor_.SetText({});
+    popup_.Close();
     syncedRevision_ = editor_.Revision();
     stats_ = DocumentStats();
     ResetSourceSync();
@@ -811,6 +844,8 @@ void MainWindow::OnLoaded(DocumentLoaded loaded) {
     trace_.opened = std::chrono::steady_clock::now();
     doc_ = std::move(loaded.document);
     editor_.SetText(doc_.text);
+    popup_.Close();
+    popup_.SetHeadings({});
     syncedRevision_ = editor_.Revision();
     stats_ = loaded.stats;
     ResetSourceSync();
@@ -819,6 +854,20 @@ void MainWindow::OnLoaded(DocumentLoaded loaded) {
     SetStatus(loaded.status, StatusKind::Info);
     focusEditor_ = true;
     PreviewNow();
+    if (hooks_.requestFrame) hooks_.requestFrame();
+}
+
+void MainWindow::OnImageCopied(ImageCopied copied) {
+    if (!copied.ok) {
+        SetStatus(std::move(copied.status), StatusKind::Error);
+    } else if (copied.documentPath != doc_.filePath || loading_) {
+        // Another document is open now: the copy stays, the link is not put into it.
+        SetStatus(copied.status + "; the document changed, so no link was inserted", StatusKind::Warning);
+    } else {
+        const size_t start = editor_.SelectionStart();
+        editor_.Replace(start, editor_.SelectionEnd() - start, copied.markdown, copied.markdown.size());
+        SetStatus(std::move(copied.status), StatusKind::Info);
+    }
     if (hooks_.requestFrame) hooks_.requestFrame();
 }
 
@@ -940,7 +989,8 @@ void MainWindow::MaybeStartPreview() {
     if (export_.themeFile.empty()) options.theme = TinyPdf::PdfTheme();
     const int generation = ++requestedGeneration_;
     requestedAt_ = std::chrono::steady_clock::now();
-    worker_->RequestPreview(std::move(text), doc_.filePath, std::move(options), generation, export_.themeFile);
+    worker_->RequestPreview(std::move(text), doc_.filePath, std::move(options), generation, export_.themeFile,
+                            popup_.WikiLinks());
     if (budgetTimer_ != 0) platform_.CancelTimer(budgetTimer_);
     budgetTimer_ = platform_.StartTimer(kPreviewBudgetMs, [link = link_, generation] {
         if (!link->alive) return;
@@ -1083,6 +1133,7 @@ void MainWindow::OnPreview(PreviewReady ready) {
     if (ready.generation == requestedGeneration_) trace_.buildRequested = requestedAt_;
     trace_.shown = std::chrono::steady_clock::now();
     stats_ = ready.stats;
+    if (popup_.WikiLinks()) popup_.SetHeadings(std::move(ready.headings));
     if (ready.themeFile == export_.themeFile) export_.themeError = std::move(ready.themeError);
     if (ready.pdf) {
         // Keep the view on the page at its top, at the same place within it.

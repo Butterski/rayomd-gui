@@ -3,7 +3,7 @@
 // exports. Requests come from the UI thread; results go back to it through
 // Platform::PostToUi. Besides the build, the worker does the request's other O(n) and I/O work
 // the UI thread must not: the text's word and line counts, and reading and parsing the PDF
-// theme file.
+// theme file, and, when asked, the document's headings for the editor's `[[` completion.
 #pragma once
 
 #include "app/document.h"
@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace rgui {
 
@@ -46,6 +47,8 @@ struct PreviewReady {
     std::string themeFile;   // the request's theme file
     std::string themeError;  // why it could not be used (ExportSettings::themeError)
     SourceMap sourceMap;     // of the text built; empty when the build failed
+    // The text's ATX headings (ui::markdown::DocumentHeadings) when the request asked for them.
+    std::vector<std::string> headings;
 };
 
 struct ExportFinished {
@@ -90,9 +93,9 @@ public:
     // a `themeFile` (UTF-8), the worker reads and parses it into options.theme before the
     // build, again only when the file's size or modification time changed since it last did;
     // its error comes back in PreviewReady::themeError. Without one, options.theme is used as
-    // given.
+    // given. With `headings`, PreviewReady::headings lists the text's headings.
     void RequestPreview(std::string utf8, std::string sourcePath, TinyPdf::PdfOptions options, int generation,
-                        std::string themeFile = {});
+                        std::string themeFile = {}, bool headings = false);
     // An export to `outputPath` (UTF-8): written to a temporary file, then renamed over it
     // (WriteFileAtomically, WriteMode::Output).
     // Exports run in request order, each before any pending preview; a preview being built is
@@ -113,6 +116,7 @@ private:
         std::string outputPath;
         bool openAfter = false;
         std::string themeFile;
+        bool headings = false;
     };
     // Shared with the tasks posted to the UI thread, which may run after the worker is gone.
     struct Callbacks {

@@ -173,6 +173,16 @@ moment by a bar beside it, and a double click on a page puts the caret on the Ma
 made it. With *Sync scrolling* (on by default, in the options' Interface section), scrolling
 either pane brings the other to the same place.
 
+Typing helps with the Markdown. Enter continues a list or a quote (`- `, `1. ` counting up,
+`- [ ] `, `> `, at the same indentation) and Enter on an empty item ends it; Tab and Shift+Tab
+indent and outdent a list item. `Ctrl+I`, or the footer's insert button, opens a list at the caret:
+page break, table of contents, table, callout (with GitHub's five types), Mermaid flowchart and
+sequence diagram, math block, code block, front matter and rule, each on lines of its own with the
+caret where you type next. Typing ```` ``` ```` at the start of a line lists the fence languages
+the PDF highlights (and `mermaid`, `math`), `> [!` the callout types; type to filter, Enter or a
+click picks, Escape closes. An image dropped on a saved document (PNG, JPEG or SVG) is copied into
+an `images` folder beside it, never over an existing file, and linked at the caret.
+
 <img src="assets/screenshot-links-images.png" alt="Links and images: the Markdown on the left, the PDF page with a photo, reference links and quotes on the right">
 
 | Keys | Action |
@@ -181,14 +191,19 @@ either pane brings the other to the same place.
 | `Ctrl+S` / `Ctrl+Shift+S` | Save / save as |
 | `Ctrl+E` / `Ctrl+Shift+E` | Export the PDF / export to another file |
 | `Ctrl+,` | Show or hide the options |
+| `Ctrl+I` | Insert a page break, table, callout, diagram, math, code, front matter… at the caret |
+| `Enter` / `Shift+Enter` | New line, continuing a list or quote / plain new line |
+| `Tab` / `Shift+Tab` | Indent / outdent a list item (elsewhere `Tab` inserts a tab) |
+| `Up`, `Down`, `Enter`, `Esc` | Move in, pick from, close the list at the caret |
 | `Ctrl+=`, `Ctrl+-`, `Ctrl+0` | Editor text size up, down, back (`Ctrl+0` also resets the preview zoom) |
 | `Ctrl+wheel` | Zoom the preview |
 | Double click on a page | Put the editor's caret on the line it shows |
 | `Ctrl+Q` | Quit |
 
 Every action that would lose unsaved text asks first. Files dropped on the window open: `.md`,
-`.markdown`, `.txt` and `.pdf`. A reversible RayoMD PDF, exported with its Markdown source
-embedded, opens as that source, checked byte for byte.
+`.markdown`, `.txt` and `.pdf`; `.png`, `.jpg`, `.jpeg` and `.svg` go into the document's
+`images` folder (save a new document first). A reversible RayoMD PDF, exported with its Markdown
+source embedded, opens as that source, checked byte for byte.
 
 ### Export options
 

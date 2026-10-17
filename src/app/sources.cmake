@@ -5,6 +5,7 @@ list(APPEND RGUI_CORE_SOURCES
     app/buildworker.cpp
     app/document.cpp
     app/documentloader.cpp
+    app/editorpopup.cpp
     app/exportsettings.cpp
     app/mainwindow.cpp
     app/previewpages.cpp

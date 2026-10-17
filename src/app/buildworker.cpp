@@ -5,6 +5,7 @@
 #include "app/platform.h"
 #include "app/safefile.h"
 #include "pdf/reader.h"
+#include "ui/markdownedit.h"
 
 #include <chrono>
 #include <cstdio>
@@ -77,13 +78,14 @@ BuildWorker::~BuildWorker() {
 }
 
 void BuildWorker::RequestPreview(std::string utf8, std::string sourcePath, TinyPdf::PdfOptions options,
-                                 int generation, std::string themeFile) {
+                                 int generation, std::string themeFile, bool headings) {
     Job job;
     job.utf8 = std::move(utf8);
     job.sourcePath = std::move(sourcePath);
     job.options = std::move(options);
     job.generation = generation;
     job.themeFile = std::move(themeFile);
+    job.headings = headings;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         preview_ = std::move(job);
@@ -223,6 +225,7 @@ void BuildWorker::RunPreview(Job& job) {
         return;
     }
     ready.stats = Document::ComputeStats(job.utf8);
+    if (job.headings) ready.headings = ui::markdown::DocumentHeadings(job.utf8);
     ready.pages = result.pages;
     ready.missingCharacters = result.missingCharacters;
     ready.failedImages = result.failedImages;

@@ -7,6 +7,8 @@
 #include "runner.h"
 
 #include "app/app.h"
+#include "app/editorpopup.h"
+#include "ui/markdownedit.h"
 #include "app/themeselect.h"
 #include "common/file_io.h"
 #include "gfx/png_write.h"
@@ -413,8 +415,8 @@ RGUI_TEST("app.save_and_export") {
     // edited document asks first.
     const fs::path dropped = h.dir / "dropped.markdown";
     RayoMd::File::WriteAll(dropped, "Dropped\n");
-    h.app->OnDropFile(h.dir.u8string() + "/picture.PNG");
-    CHECK_EQ(w.ShownStatus(&kind), std::string("Not a Markdown, text or PDF file: picture.PNG"));
+    h.app->OnDropFile(h.dir.u8string() + "/picture.GIF");
+    CHECK_EQ(w.ShownStatus(&kind), std::string("Not a Markdown, text, PDF or image file: picture.GIF"));
     CHECK(kind == StatusKind::Warning);
     h.app->OnDropFile(dropped.u8string());
     CHECK(h.WaitLoaded());
@@ -826,6 +828,350 @@ RGUI_TEST("app.no_settings_path") {
     }
     CHECK_EQ(entries, size_t(1));  // the settings.ini written above, nothing else
     CHECK_EQ(ReadFile(dir / "settings.ini"), std::string("ui.theme=nord\n"));
+}
+
+// ---- Typing helpers ----
+
+// The insert list: Ctrl+I or the footer's button opens it at the caret; it takes Up, Down,
+// Enter, Escape and typing (its filter) while the editor keeps the focus, and each entry goes in
+// as one undo group on lines of its own, the caret where the next typing goes.
+RGUI_TEST("app.insert_popup") {
+    Harness h("insert_popup");
+    h.Start("ui.theme=tokyo-night\n");
+    h.Frame();
+    rgui::MainWindow& w = h.Window();
+    rgui::ui::TextEditor& editor = w.Editor();
+    using Mode = rgui::EditorPopup::Mode;
+    auto reset = [&](const std::string& text, size_t caret) {
+        editor.SetText(text);
+        editor.Select(caret, caret);
+        h.Frame();
+    };
+    auto caretText = [&] { return std::string(editor.Text().substr(editor.Caret())); };
+
+    h.Type("Intro");
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    CHECK(w.Popup().CurrentMode() == Mode::Insert);
+    CHECK_EQ(w.Popup().Items().size(), size_t(10));
+    // Typing filters the list and does not reach the text.
+    h.Type("page");
+    CHECK_EQ(w.Popup().Items().size(), size_t(1));
+    CHECK_EQ(std::string(editor.Text()), std::string("Intro"));
+    h.KeyDown(Key::Enter);
+    CHECK(w.Popup().CurrentMode() == Mode::Closed);
+    CHECK_EQ(std::string(editor.Text()), std::string("Intro\n\n\\pagebreak\n\n"));
+    CHECK_EQ(editor.Caret(), editor.Buffer().Size());
+    CHECK(editor.Undo());
+    CHECK_EQ(std::string(editor.Text()), std::string("Intro"));
+
+    // Escape closes it, the text unchanged; Backspace takes back the filter, not the text.
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("zz");
+    CHECK(w.Popup().Items().empty());
+    h.KeyDown(Key::Backspace);
+    h.KeyDown(Key::Backspace);
+    CHECK_EQ(w.Popup().Items().size(), size_t(10));
+    h.KeyDown(Key::Escape);
+    CHECK(w.Popup().CurrentMode() == Mode::Closed);
+    CHECK_EQ(std::string(editor.Text()), std::string("Intro"));
+
+    // Down moves to the table of contents; on an empty line below text, a blank line first.
+    reset("Intro\n", 6);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.KeyDown(Key::Down);
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("Intro\n\n[TOC]\n\n"));
+    // Up wraps to the last entry, the rule.
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.KeyDown(Key::Up);
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("---\n\n"));
+
+    // The table: the caret in its first header cell.
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("table");
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("|   |   |   |\n|---|---|---|\n|   |   |   |\n|   |   |   |\n"));
+    CHECK_EQ(editor.Caret(), size_t(2));
+
+    // The callout opens its types; text after the caret moves below the block.
+    reset("before after", 7);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("call");
+    h.KeyDown(Key::Enter);
+    CHECK(w.Popup().CurrentMode() == Mode::Callout);
+    CHECK_EQ(w.Popup().Items().size(), size_t(5));
+    h.KeyDown(Key::Down);
+    h.KeyDown(Key::Down);
+    h.KeyDown(Key::Enter);
+    CHECK(w.Popup().CurrentMode() == Mode::Closed);
+    CHECK_EQ(std::string(editor.Text()), std::string("before \n\n> [!IMPORTANT]\n> \n\nafter"));
+    CHECK_EQ(caretText(), std::string("\n\nafter"));
+    CHECK_EQ(editor.UndoGroups(), size_t(1));
+
+    // Mermaid: the caret at the end of the diagram's last line.
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("flowchart");
+    h.KeyDown(Key::Enter);
+    CHECK(StartsWith(std::string(editor.Text()), "```mermaid\nflowchart TD\n"));
+    CHECK_EQ(caretText(), std::string("\n```\n"));
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("sequence");
+    h.KeyDown(Key::Enter);
+    CHECK(StartsWith(std::string(editor.Text()), "```mermaid\nsequenceDiagram\n"));
+
+    // Math: the caret between the dollars.
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("math");
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("$$\n\n$$\n"));
+    CHECK_EQ(editor.Caret(), size_t(3));
+
+    // The code block asks for its language; Enter without one goes into the block.
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("code");
+    h.KeyDown(Key::Enter);
+    CHECK(w.Popup().CurrentMode() == Mode::Completion);
+    CHECK_EQ(editor.Caret(), size_t(3));
+    // An exact match first, then names that start with the filter, then the rest.
+    h.Type("py");
+    CHECK(w.Popup().Items() == (std::vector<std::string>{"py", "python", "pycon"}));
+    h.Type("th");
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("```python\n\n```\n"));
+    CHECK_EQ(editor.Caret(), size_t(10));
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("code");
+    h.KeyDown(Key::Enter);
+    h.KeyDown(Key::Enter);
+    CHECK(w.Popup().CurrentMode() == Mode::Closed);
+    CHECK_EQ(std::string(editor.Text()), std::string("```\n\n```\n"));
+    CHECK_EQ(editor.Caret(), size_t(4));
+
+    // Front matter goes to the top, the caret after `title: `; a second time only moves there.
+    reset("Body\n", 5);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("front");
+    h.KeyDown(Key::Enter);
+    const std::string text(editor.Text());
+    CHECK(StartsWith(text, "---\ntitle: \nauthor: \ndate: 20"));
+    CHECK(text.size() > 5 && text.compare(text.size() - 10, 10, "---\n\nBody\n") == 0);
+    CHECK_EQ(editor.Caret(), size_t(11));
+    editor.Select(text.size(), text.size());
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("front");
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), text);
+    CHECK_EQ(editor.Caret(), size_t(4));
+
+    // A click picks a row (the second, below the caret); a press elsewhere only closes it.
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    const rgui::gfx::RectF caret = editor.CaretRect();
+    h.Click(caret.x + 40, caret.y + caret.h + 2 + 28 * 1.5f);
+    CHECK(w.Popup().CurrentMode() == Mode::Closed);
+    CHECK_EQ(std::string(editor.Text()), std::string("[TOC]\n\n"));
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Click(kWidth - 100, kHeight / 2);
+    CHECK(w.Popup().CurrentMode() == Mode::Closed);
+    CHECK_EQ(std::string(editor.Text()), std::string("[TOC]\n\n"));
+
+    // The footer's button opens it (the fourth icon), the editor keeping the focus.
+    h.Click(12 - (28 - 16) / 2 + 3 * 28 + 14, static_cast<float>(kHeight - 16));
+    CHECK(w.Popup().CurrentMode() == Mode::Insert);
+    h.Type("rule");
+    h.KeyDown(Key::Enter);
+    CHECK(StartsWith(caretText(), ""));
+    CHECK(std::string(editor.Text()).find("\n---\n") != std::string::npos);
+    // A prompt takes the keyboard: the list closes.
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    CHECK(w.Popup().IsOpen());
+    h.KeyDown(Key::N, rgui::kModCtrl);
+    CHECK(w.UnsavedPromptOpen());
+    h.Frame();
+    CHECK(!w.Popup().IsOpen());
+}
+
+// Completion: ``` lists the fence names, `> [!` the alert types and, with wiki links on, `[[`
+// the document's headings; the list filters as the text is typed, Escape closes it, and Enter
+// picks only once something was typed or chosen.
+RGUI_TEST("app.completion") {
+    Harness h("completion");
+    h.Start("ui.theme=tokyo-night\n");
+    h.Frame();
+    rgui::MainWindow& w = h.Window();
+    rgui::ui::TextEditor& editor = w.Editor();
+    using Mode = rgui::EditorPopup::Mode;
+    using rgui::ui::markdown::Completion;
+    auto reset = [&] {
+        editor.SetText("");
+        h.Frame();
+    };
+
+    // Typed one backtick at a time: the third opens the list.
+    h.Type("`");
+    h.Type("`");
+    CHECK(!w.Popup().IsOpen());
+    h.Type("`");
+    CHECK(w.Popup().CurrentMode() == Mode::Completion);
+    CHECK(w.Popup().CompletionKind() == Completion::Fence);
+    CHECK_EQ(w.Popup().Items().size(), rgui::ui::markdown::FenceNames().size());
+    h.Type("rus");
+    CHECK_EQ(w.Popup().Items().size(), size_t(1));
+    h.KeyDown(Key::Enter);
+    CHECK(!w.Popup().IsOpen());
+    CHECK_EQ(std::string(editor.Text()), std::string("```rust\n\n```"));
+    CHECK_EQ(editor.Caret(), size_t(8));
+    // One undo group for the pick.
+    CHECK(editor.Undo());
+    CHECK_EQ(std::string(editor.Text()), std::string("```rus"));
+
+    // Enter with nothing typed is a line break; Escape closes and keeps the text.
+    reset();
+    h.Type("```");
+    h.KeyDown(Key::Enter);
+    CHECK(!w.Popup().IsOpen());
+    CHECK_EQ(std::string(editor.Text()), std::string("```\n"));
+    reset();
+    h.Type("```");
+    h.KeyDown(Key::Escape);
+    CHECK(!w.Popup().IsOpen());
+    h.Type("x");
+    CHECK(!w.Popup().IsOpen());
+    CHECK_EQ(std::string(editor.Text()), std::string("```x"));
+    // Down picks the next name; in a quote the closing fence keeps the quote.
+    reset();
+    h.Type("> ```");
+    h.KeyDown(Key::Down);
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("> ```sh\n> \n> ```"));
+    // No match hides the list and Enter is a line break again; a space ends it.
+    reset();
+    h.Type("```");
+    h.Type("zzz");
+    CHECK(w.Popup().IsOpen());
+    CHECK(w.Popup().Items().empty());
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("```zzz\n"));
+    CHECK(!w.Popup().IsOpen());
+    reset();
+    h.Type("```");
+    h.Type("c");
+    CHECK(w.Popup().IsOpen());
+    h.Type(" ");
+    CHECK(!w.Popup().IsOpen());
+
+    // Alerts.
+    reset();
+    h.Type("> [!");
+    CHECK(w.Popup().CompletionKind() == Completion::Alert);
+    CHECK_EQ(w.Popup().Items().size(), size_t(5));
+    h.Type("wa");
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("> [!WARNING]\n> "));
+    CHECK_EQ(editor.Caret(), editor.Buffer().Size());
+
+    // `[[` is plain text until wiki links are on; then it lists the headings of the last build.
+    reset();
+    h.Type("[[");
+    CHECK(!w.Popup().IsOpen());
+    w.SetWikiLinks(true);
+    editor.SetText("# Alpha\n\n```\n# not one\n```\n\n## Beta Two\n\nSee ");
+    editor.Select(editor.Buffer().Size(), editor.Buffer().Size());
+    w.PreviewNow();
+    CHECK(h.Settle());
+    CHECK(w.Popup().Headings() == (std::vector<std::string>{"Alpha", "Beta Two"}));
+    h.Type("[[");
+    CHECK(w.Popup().CompletionKind() == Completion::WikiLink);
+    CHECK_EQ(w.Popup().Items().size(), size_t(2));
+    h.Type("be");
+    CHECK_EQ(w.Popup().Items().size(), size_t(1));
+    h.KeyDown(Key::Enter);
+    CHECK(StartsWith(std::string(editor.Text()).substr(editor.Buffer().Size() - 17), "See [[#Beta Two]]"));
+    CHECK_EQ(editor.Caret(), editor.Buffer().Size());
+    // `![[` (an embed) does not complete headings.
+    h.Type(" ![[");
+    CHECK(!w.Popup().IsOpen());
+    w.SetWikiLinks(false);
+    CHECK(w.Popup().Headings().empty());
+}
+
+// Lists and quotes continue on Enter through the window too, and an empty item ends the list.
+RGUI_TEST("app.list_continuation") {
+    Harness h("list_continuation");
+    h.Start("ui.theme=tokyo-night\n");
+    h.Frame();
+    rgui::ui::TextEditor& editor = h.Window().Editor();
+    h.Type("1. one");
+    h.KeyDown(Key::Enter);
+    h.Type("two");
+    h.KeyDown(Key::Tab);
+    h.KeyDown(Key::Enter);
+    h.KeyDown(Key::Enter);
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("1. one\n    2. two\n\n"));
+    CHECK(h.Window().Doc().modified);
+}
+
+// A dropped image: on a saved document it is copied into images/ on the loader's thread and
+// linked at the caret; an unsaved document says to save first.
+RGUI_TEST("app.image_drop") {
+    Harness h("image_drop");
+    h.Start("ui.theme=tokyo-night\n");
+    h.Frame();
+    rgui::MainWindow& w = h.Window();
+    const fs::path picture = h.dir / "shots" / "Screen Shot.PNG";
+    fs::create_directories(picture.parent_path());
+    RayoMd::File::WriteAll(picture, "not really a png");
+    StatusKind kind = StatusKind::Info;
+    h.app->OnDropFile(picture.u8string());
+    CHECK_EQ(w.ShownStatus(&kind),
+             std::string("Save the document first: a dropped image goes into the images folder beside it"));
+    CHECK(kind == StatusKind::Warning);
+    CHECK(!fs::exists(h.dir / "images"));
+    CHECK(w.Editor().Text().empty());
+
+    const fs::path md = h.dir / "notes.md";
+    RayoMd::File::WriteAll(md, "Text\n");
+    w.Open(md.u8string());
+    CHECK(h.WaitLoaded());
+    // Each drop after the preview settled: a preview's status replaces the copy's.
+    CHECK(h.Settle());
+    w.Editor().Select(5, 5);
+    h.app->OnDropFile(picture.u8string());
+    CHECK(StartsWith(w.ShownStatus(), "Copying Screen Shot.PNG"));
+    CHECK(h.RunUntil([&] { return StartsWith(w.ShownStatus(), "Copied "); }));
+    CHECK_EQ(w.ShownStatus(&kind), std::string("Copied Screen Shot.PNG into images/ as Screen-Shot.png"));
+    CHECK(kind == StatusKind::Info);
+    CHECK_EQ(std::string(w.Editor().Text()), std::string("Text\n![Screen-Shot](images/Screen-Shot.png)"));
+    CHECK_EQ(ReadFile(h.dir / "images" / "Screen-Shot.png"), std::string("not really a png"));
+    CHECK(w.Doc().modified);
+    // Once more: a new name, one undo group each.
+    CHECK(h.Settle());
+    h.app->OnDropFile(picture.u8string());
+    CHECK(h.RunUntil([&] { return StartsWith(w.ShownStatus(), "Copied "); }));
+    CHECK(std::string(w.Editor().Text()).find("](images/Screen-Shot-2.png)") != std::string::npos);
+    CHECK(fs::exists(h.dir / "images" / "Screen-Shot-2.png"));
+    CHECK(w.Editor().Undo());
+    CHECK_EQ(std::string(w.Editor().Text()), std::string("Text\n![Screen-Shot](images/Screen-Shot.png)"));
+    // A file that cannot be read says so.
+    CHECK(h.Settle());
+    h.app->OnDropFile((h.dir / "missing.jpg").u8string());
+    CHECK(h.RunUntil([&] { return StartsWith(w.ShownStatus(), "Cannot copy missing.jpg"); }));
+    CHECK(w.ShownStatus(&kind).size() > 0 && kind == StatusKind::Error);
+    // Markdown still opens.
+    const fs::path other = h.dir / "other.txt";
+    RayoMd::File::WriteAll(other, "Other\n");
+    CHECK(w.Doc().modified);
+    h.app->OnDropFile(other.u8string());
+    CHECK(w.UnsavedPromptOpen());
 }
 
 } // namespace

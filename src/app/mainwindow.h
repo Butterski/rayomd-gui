@@ -21,6 +21,13 @@
 // kPreviewBudgetMs (status `Preview stopped: the document takes too long to build`; no retry
 // before the next change), and when the window goes. Cancelled results are dropped silently.
 // Files open on the document loader's thread, the status saying `Opening <name>…` meanwhile.
+// Images dropped on a saved document are copied beside it on that thread too, and their link goes
+// in at the caret when the copy is done.
+//
+// Typing helpers: the editor continues lists and quotes itself; the popup list at the caret
+// (EditorPopup: the insert list on Ctrl+I and the footer's button, the completions after ```,
+// `> [!` and `[[`) takes its keys before the editor's frame. With wiki links on, preview builds
+// also collect the document's headings for `[[` (the worker, from the text it builds).
 //
 // Source sync (the preview's SourceMap): a press in the editor shows its line in the preview,
 // marked for a moment; a double click on a page puts the editor's caret on the line it shows;
@@ -31,6 +38,7 @@
 #include "app/buildworker.h"
 #include "app/document.h"
 #include "app/documentloader.h"
+#include "app/editorpopup.h"
 #include "app/exportsettings.h"
 #include "app/platform.h"
 #include "app/previewpages.h"
@@ -104,7 +112,9 @@ public:
     // The window's close button, Ctrl+Q, the platform's close request: through the unsaved
     // prompt, then Hooks::quit.
     void RequestClose();
-    // A dropped file: .md .markdown .txt .pdf open through the unsaved prompt.
+    // A dropped file: .md .markdown .txt .pdf open through the unsaved prompt; .png .jpg .jpeg
+    // .svg on a saved document are copied into its `images` folder (CopyImageBeside, on the
+    // loader's thread) and linked at the caret; an unsaved document gets a status message.
     void DropFile(const std::string& path);
     // The status line; a preview's status gives way to the PDF theme's error and to the notice.
     void SetStatus(std::string text, StatusKind kind, bool fromPreview = false);
@@ -116,6 +126,8 @@ public:
     // `ui.syncScroll`: scrolling one pane scrolls the other to the same place. Turning it on
     // brings the preview to the editor.
     void SetSyncScroll(bool on);
+    // `[[` completes the document's headings (default off; the Obsidian dialect turns it on).
+    void SetWikiLinks(bool on);
 
     // ---- State ----
     // `ui.theme`: `omarchy`, `auto` or a bundled slug.
@@ -161,6 +173,7 @@ public:
 
     Document& Doc() { return doc_; }
     ui::TextEditor& Editor() { return editor_; }
+    EditorPopup& Popup() { return popup_; }
     ExportSettings& Export() { return export_; }
     PreviewPages& Preview() { return *preview_; }
 
@@ -240,6 +253,7 @@ private:
     void OnPreview(PreviewReady ready);
     void OnExport(ExportFinished finished);
     void OnLoaded(DocumentLoaded loaded);
+    void OnImageCopied(ImageCopied copied);
 
     // The page at the top of the preview and how far into it the view is, by the last frame.
     std::optional<Anchor> ViewAnchor() const;
@@ -257,6 +271,7 @@ private:
 
     Document doc_;
     ui::TextEditor editor_;
+    EditorPopup popup_;
     uint64_t syncedRevision_ = 0;
     ExportSettings export_;
     DocumentStats stats_;
