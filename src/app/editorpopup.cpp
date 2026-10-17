@@ -48,6 +48,19 @@ constexpr size_t kFrontMatterEntry = 8;
 
 const char* const kCalloutLabels[] = {"Note", "Tip", "Important", "Warning", "Caution"};
 
+// Whether the line starting at `lineStart` lies in a fenced code block (so a fence typed there
+// closes it or is code): md::InsideFence over at most kFenceScanBytes before the line, from the
+// first whole line in them. Past that window the scan starts as if outside a block.
+bool InFence(const ui::TextBuffer& buffer, size_t lineStart) {
+    const size_t from = lineStart > md::kFenceScanBytes ? lineStart - md::kFenceScanBytes : 0;
+    std::string before = buffer.Copy(from, lineStart - from);
+    if (from > 0) {
+        const size_t nl = before.find('\n');
+        before.erase(0, nl == std::string::npos ? before.size() : nl + 1);
+    }
+    return md::InsideFence(before);
+}
+
 // Whether [from, to) holds text other than blanks; past kLinePrefixBytes it counts as text.
 bool TextIn(const ui::TextBuffer& buffer, size_t from, size_t to) {
     if (to <= from) return false;
@@ -117,6 +130,8 @@ void EditorPopup::Filter(const std::string& filter) {
 }
 
 void EditorPopup::BeforeEditor(ui::Context& ctx, ui::TextEditor& editor, bool editorFocused) {
+    revisionBefore_ = editor.Revision();
+    handled_ = false;
     if (!editorFocused) {
         if (IsOpen()) Close();
         return;
@@ -146,6 +161,7 @@ void EditorPopup::BeforeEditor(ui::Context& ctx, ui::TextEditor& editor, bool ed
                 continue;
             }
             ctx.ConsumeEvent(i);
+            handled_ = true;
             Filter(filter_);
             reset_ = true;
         }
@@ -159,27 +175,33 @@ void EditorPopup::BeforeEditor(ui::Context& ctx, ui::TextEditor& editor, bool ed
         event = ui::PopupListKeys(ctx, kPopupId, static_cast<int>(items_.size()), !filter_.empty());
         // The code block's fence without a language: Enter goes into the block.
         if (event.action == ui::PopupAction::None && fenceTemplate_ && ctx.ConsumeKey(Key::Enter)) {
+            handled_ = true;
             const size_t caret = editor.Caret();
             Close();
             editor.Replace(caret, 0, "", 1);
             return;
         }
     }
+    if (event.action != ui::PopupAction::None) handled_ = true;
     if (event.action == ui::PopupAction::Pick) Pick(event.index, editor);
     else if (event.action == ui::PopupAction::Close) Close();
 }
 
-void EditorPopup::AfterEditor(ui::Context& ctx, ui::TextEditor& editor, ui::RectF editorRect) {
-    // Typing in this frame may have completed a trigger at the caret.
+void EditorPopup::AfterEditor(ui::Context& ctx, ui::TextEditor& editor, ui::RectF editorRect, bool editorFocused) {
+    // Typing the editor took in this frame may have completed a trigger at the caret. Not text
+    // the list took as its filter, nor an entry it put in, nor text another widget took.
     bool typed = false;
     for (const InputEvent& e : ctx.Events()) typed |= e.type == InputEvent::Type::Text;
-    if (typed && mode_ != Mode::Insert && mode_ != Mode::Callout && !editor.HasSelection()) {
+    if (typed && editorFocused && !handled_ && editor.Revision() != revisionBefore_ && mode_ != Mode::Insert &&
+        mode_ != Mode::Callout && !editor.HasSelection()) {
         const ui::TextBuffer& buffer = editor.Buffer();
         const size_t caret = editor.Caret();
         const size_t lineStart = buffer.LineStart(buffer.LineOf(caret));
         if (caret - lineStart <= md::kLinePrefixBytes) {
             const md::Completion kind = md::CompletionTrigger(buffer.Copy(lineStart, caret - lineStart), wikiLinks_);
-            if (kind != md::Completion::None) OpenCompletion(kind, caret, editor, false);
+            if (kind != md::Completion::None && !(kind == md::Completion::Fence && InFence(buffer, lineStart))) {
+                OpenCompletion(kind, caret, editor, false);
+            }
         }
     }
     if (mode_ == Mode::Completion) {

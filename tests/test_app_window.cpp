@@ -962,6 +962,28 @@ RGUI_TEST("app.insert_popup") {
     CHECK(w.Popup().CurrentMode() == Mode::Closed);
     CHECK_EQ(std::string(editor.Text()), std::string("```\n\n```\n"));
     CHECK_EQ(editor.Caret(), size_t(4));
+    // The filter's last letter and Enter in one frame: the code block's language list opens,
+    // not a typed fence's (which would add a second closing fence).
+    reset("", 0);
+    h.KeyDown(Key::I, rgui::kModCtrl);
+    h.Type("cod");
+    {
+        InputEvent e;
+        e.type = InputEvent::Type::Text;
+        e.text = "e";
+        h.app->OnInput(e);
+        e = InputEvent();
+        e.type = InputEvent::Type::KeyDown;
+        e.key = Key::Enter;
+        h.app->OnInput(e);
+        h.Frame();
+    }
+    CHECK(w.Popup().CurrentMode() == Mode::Completion);
+    CHECK_EQ(std::string(editor.Text()), std::string("```\n\n```\n"));
+    h.Type("go");
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()), std::string("```go\n\n```\n"));
+    CHECK_EQ(editor.Caret(), size_t(6));
 
     // Front matter goes to the top, the caret after `title: `; a second time only moves there.
     reset("Body\n", 5);
@@ -1076,6 +1098,47 @@ RGUI_TEST("app.completion") {
     CHECK(w.Popup().IsOpen());
     h.Type(" ");
     CHECK(!w.Popup().IsOpen());
+
+    // A fence that closes a block, or one typed inside a longer fence's block, opens no list;
+    // after the block a fence opens it again.
+    auto typeAtEnd = [&](const char* text, const char* typed) {
+        editor.SetText(text);
+        editor.Select(editor.Buffer().Size(), editor.Buffer().Size());
+        h.Frame();
+        h.Type(typed);
+    };
+    typeAtEnd("```py\ncode\n", "```");
+    CHECK(!w.Popup().IsOpen());
+    h.KeyDown(Key::Down);
+    h.KeyDown(Key::Enter);
+    CHECK_EQ(std::string(editor.Text()).substr(0, 15), std::string("```py\ncode\n```\n"));
+    typeAtEnd("```\ncode\n", "```");
+    CHECK(!w.Popup().IsOpen());
+    typeAtEnd("> ~~~\n> code\n", "> ```");
+    CHECK(!w.Popup().IsOpen());
+    typeAtEnd("````\ncode\n", "```");
+    CHECK(!w.Popup().IsOpen());
+    typeAtEnd("```\ncode\n```\n\n", "```");
+    CHECK(w.Popup().IsOpen());
+    typeAtEnd("~~~\n```\n~~~\n", "```");
+    CHECK(w.Popup().IsOpen());
+    h.KeyDown(Key::Escape);
+
+    // Text another widget takes (here the path prompt's field) opens nothing at the editor's
+    // caret, even after a trigger there.
+    editor.SetText("```");
+    editor.Select(3, 3);
+    h.Frame();
+    h.platform.ScriptDialog({rgui::FileDialogResult::Unavailable, {}});
+    h.KeyDown(Key::S, rgui::kModCtrl | rgui::kModShift);
+    h.platform.Pump();
+    h.Frame();
+    CHECK(w.PathPromptOpen());
+    h.Type("x");
+    CHECK(!w.Popup().IsOpen());
+    h.KeyDown(Key::Escape);
+    CHECK(!w.PathPromptOpen());
+    CHECK_EQ(std::string(editor.Text()), std::string("```"));
 
     // Alerts.
     reset();

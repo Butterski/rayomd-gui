@@ -75,6 +75,14 @@ const std::vector<std::string>& FenceNames();
 // GitHub's alert types: NOTE, TIP, IMPORTANT, WARNING, CAUTION.
 const std::vector<std::string>& AlertTypes();
 
+// Whether the text `before` (whole lines, ending where the caret's line starts) leaves a fenced
+// code block open: a forward pass over its lines, each read after its quote and list markers
+// (its first kLinePrefixBytes). The editor passes at most the last kFenceScanBytes before the
+// caret's line, from the first whole line in them: a block opened before that window is not
+// seen, and a fence typed in it opens the language list.
+constexpr size_t kFenceScanBytes = 256 * 1024;
+bool InsideFence(std::string_view before);
+
 // ---- Blocks on lines of their own ----
 // Where the caret is, for PlaceBlock: whether the line has text before and after the caret, and
 // whether the lines above and below have text (a missing line has none).

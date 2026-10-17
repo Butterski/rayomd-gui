@@ -214,6 +214,34 @@ const std::vector<std::string>& AlertTypes() {
     return types;
 }
 
+bool InsideFence(std::string_view before) {
+    bool open = false;
+    char fenceChar = 0;
+    size_t fenceLength = 0;
+    for (size_t s = 0; s < before.size();) {
+        size_t e = before.find('\n', s);
+        if (e == std::string_view::npos) e = before.size();
+        const std::string_view line = before.substr(s, std::min(e - s, kLinePrefixBytes));
+        s = e + 1;
+        const size_t i = SkipBlanks(line, ParseLinePrefix(line).markerEnd);
+        if (i >= line.size() || (line[i] != '`' && line[i] != '~')) continue;
+        size_t k = i;
+        while (k < line.size() && line[k] == line[i]) k++;
+        if (k - i < 3) continue;
+        const std::string_view rest = line.substr(k);
+        if (!open) {
+            // A backtick fence's info string has no backtick.
+            if (line[i] == '`' && rest.find('`') != std::string_view::npos) continue;
+            open = true;
+            fenceChar = line[i];
+            fenceLength = k - i;
+        } else if (line[i] == fenceChar && k - i >= fenceLength && !HasText(rest)) {
+            open = false;
+        }
+    }
+    return open;
+}
+
 // ---- Blocks ----
 
 TextEdit PlaceBlock(std::string_view block, size_t caretInBlock, bool caretAfter, const BlockSite& site) {

@@ -50,7 +50,10 @@ public:
     void BeforeEditor(ui::Context& ctx, ui::TextEditor& editor, bool editorFocused);
     // After it: a trigger typed in this frame opens its completion, the filter follows the
     // text, and the list is drawn at the caret of the editor in `editorRect`.
-    void AfterEditor(ui::Context& ctx, ui::TextEditor& editor, ui::RectF editorRect);
+    // Only text the editor took while focused (`editorFocused` as for BeforeEditor) opens a
+    // completion; ``` on a line inside a fenced block (md::InsideFence over the kFenceScanBytes
+    // before it) opens none.
+    void AfterEditor(ui::Context& ctx, ui::TextEditor& editor, ui::RectF editorRect, bool editorFocused);
 
 private:
     void OpenCompletion(ui::markdown::Completion kind, size_t start, ui::TextEditor& editor, bool fenceTemplate);
@@ -68,6 +71,8 @@ private:
     Mode mode_ = Mode::Closed;
     bool wikiLinks_ = false;
     bool reset_ = false;            // the list's highlight goes back to its first row
+    bool handled_ = false;          // this frame the list took text or keys that changed things
+    uint64_t revisionBefore_ = 0;   // the editor's revision before its frame
     std::vector<std::string> headings_;
     // The candidates and, after the filter, the rows and their candidates' indices.
     std::vector<std::string> all_;

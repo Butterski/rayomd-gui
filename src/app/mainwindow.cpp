@@ -256,7 +256,7 @@ void MainWindow::Frame(ui::Context& ctx) {
     const int zoomBefore = editor_.ZoomIndex();
     editor_.Frame(ctx, editorRect);
     if (editor_.ZoomIndex() != zoomBefore) hooks_.settingsChanged();
-    popup_.AfterEditor(ctx, editor_, editorRect);
+    popup_.AfterEditor(ctx, editor_, editorRect, editorKeys);
     // Typing, a press, the wheel or keys in the editor: it leads. A press shows its line in the
     // preview, at the caret's height (the panes start at the same y).
     if (editor_.Revision() != revisionSeen_ || editor_.UserScrolled() || editor_.PressedThisFrame()) {

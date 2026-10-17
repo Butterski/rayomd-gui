@@ -1224,6 +1224,30 @@ RGUI_TEST("ui.markdown_completion") {
     CHECK_EQ(md::AlertTypes().size(), size_t(5));
 }
 
+RGUI_TEST("ui.markdown_inside_fence") {
+    namespace md = rgui::ui::markdown;
+    CHECK(!md::InsideFence(""));
+    CHECK(md::InsideFence("```\n"));
+    CHECK(md::InsideFence("```py\ncode\n"));
+    CHECK(!md::InsideFence("```py\ncode\n```\n"));
+    // A closing fence has no info string and is at least as long as the opening one.
+    CHECK(md::InsideFence("````\n```\n"));
+    CHECK(md::InsideFence("```\n```py\n"));
+    CHECK(!md::InsideFence("````\n`````\n"));
+    // The other fence character is code; backticks in a backtick fence's info make no fence.
+    CHECK(!md::InsideFence("~~~\n```\n~~~\n"));
+    CHECK(!md::InsideFence("``` a`b\n"));
+    // In quotes and list items, after their markers.
+    CHECK(md::InsideFence("> ```\n> code\n"));
+    CHECK(md::InsideFence("- ~~~\n"));
+    CHECK(!md::InsideFence("text ```\n"));
+    // Linear over a megabyte of fences.
+    std::string many;
+    while (many.size() < (1u << 20)) many += "```\n";
+    CHECK(!md::InsideFence(many));
+    CHECK(md::InsideFence(many + "```\n"));
+}
+
 RGUI_TEST("ui.markdown_place_block") {
     namespace md = rgui::ui::markdown;
     md::BlockSite site;
