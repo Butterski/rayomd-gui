@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Markdown editor: a TextBuffer on a cell grid (the interface family, soft-wrapped), with
 // caret, selection, word motions, mouse selection, clipboard, undo/redo and IME preedit. No
-// highlighting: the preview shows the formatting. Metrics follow omawrite (src/Main.qml): 140 %
-// line height, 24 px side margins, 16 px top margin, `# Start writing` as the placeholder.
+// highlighting: the preview shows the formatting. Enter continues list items and quotes and Tab
+// indents list items (ui/markdownedit.h), each as one undo group. Metrics follow omawrite
+// (src/Main.qml): 140 % line height, 24 px side margins, 16 px top margin, `# Start writing` as the
+// placeholder.
 #pragma once
 
 #include "text/textlayout.h"
@@ -161,6 +163,11 @@ public:
     void Paste(Context& ctx);
     // Inserts as one paste: its own undo group.
     void PasteText(std::string_view utf8);
+    // Replaces [pos, pos + len) by `utf8` (CRLF and CR become LF) as one undo group of its own,
+    // ending the group before it, and puts the caret at pos + caretOffset: inside the inserted
+    // text, or past it into the text that follows (clamped to the text, back to a code point's
+    // start). Undo puts the caret back where it was. Nothing to replace only moves the caret.
+    void Replace(size_t pos, size_t len, std::string_view utf8, size_t caretOffset);
 
     // ---- Word classes -----------------------------------------------------------------------
     // 0: a word code point (ASCII alphanumerics, '_', any code point >= U+0080 outside
@@ -206,6 +213,11 @@ private:
     void WordAt(size_t pos, size_t& start, size_t& end) const;
     void LineAt(size_t pos, size_t& start, size_t& end) const;
     void ExtendDragTo(size_t pos, bool atRowEnd);
+    // The caret's line from its start, at most markdown::kLinePrefixBytes; `whole` when that is all of it.
+    std::string LinePrefixAtCaret(size_t& lineStart, bool& whole) const;
+    // Enter and Tab / Shift+Tab on Markdown lines (ui/markdownedit.h); false when they do not apply.
+    bool ContinueLine();
+    bool IndentLine(bool outdent);
 
     // Frame helpers.
     void HandleInput(Context& ctx, RectF rect, bool focused);

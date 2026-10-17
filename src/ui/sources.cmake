@@ -3,6 +3,7 @@ list(APPEND RGUI_CORE_SOURCES
     ui/compositor.cpp
     ui/displaylist.cpp
     ui/icons.cpp
+    ui/markdownedit.cpp
     ui/settingsfile.cpp
     ui/texteditor.cpp
     ui/textbuffer.cpp

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "runner.h"
 
+#include "ui/markdownedit.h"
 #include "ui/textbuffer.h"
 #include "ui/texteditor.h"
 #include "ui/textwrap.h"
@@ -1045,4 +1046,231 @@ RGUI_TEST("ui.editor_long_line_keystroke") {
     editor.HandleKey(Key::Enter, 0, nullptr);
     CHECK(!editor.Wrap().Pending());
     CHECK(matchesFresh());
+}
+
+// ---- Typing helpers --------------------------------------------------------------------------
+
+RGUI_TEST("ui.editor_replace") {
+    TextEditor editor;
+    Grid(editor, 40);
+    double now = 1000;
+    Type(editor, "ab", now, 10);
+    editor.SetNow(now += 10);
+    // One group of its own, the caret inside the inserted text, typing after it a new group.
+    editor.Replace(1, 0, "[[]]", 2);
+    CHECK(editor.CopyText() == "a[[]]b");
+    CHECK_EQ(editor.Caret(), size_t(3));
+    CHECK(!editor.HasSelection());
+    CHECK_EQ(editor.UndoGroups(), size_t(2));
+    Type(editor, "x", now, 10);
+    CHECK(editor.CopyText() == "a[[x]]b");
+    CHECK_EQ(editor.UndoGroups(), size_t(3));
+    CHECK(editor.Undo());
+    CHECK(editor.Undo());
+    CHECK(editor.CopyText() == "ab");
+    CHECK_EQ(editor.Caret(), size_t(2));   // where it was before the replace
+    CHECK(editor.Redo());
+    CHECK_EQ(editor.Caret(), size_t(3));   // where the replace put it
+    // Replacing a range; the caret may go past the inserted text, never into a code point.
+    editor.SetText("one \xC4\x85 two");
+    editor.Replace(0, 3, "ONE", 5);
+    CHECK(editor.CopyText() == "ONE \xC4\x85 two");
+    CHECK_EQ(editor.Caret(), size_t(4));
+    editor.Replace(0, 0, "", 100);
+    CHECK_EQ(editor.Caret(), editor.Buffer().Size());
+    CHECK_EQ(editor.UndoGroups(), size_t(1));
+    // Line endings are normalized; the offset counts the normalized text.
+    editor.SetText("");
+    editor.Replace(0, 0, "a\r\nb", 3);
+    CHECK(editor.CopyText() == "a\nb");
+    CHECK_EQ(editor.Caret(), size_t(3));
+}
+
+RGUI_TEST("ui.editor_list_continuation") {
+    TextEditor editor;
+    Grid(editor, 80);
+    auto enterAt = [&](const char* text, size_t caret) {
+        editor.SetText(text);
+        editor.Select(caret, caret);
+        editor.HandleKey(Key::Enter, 0, nullptr);
+        return editor.CopyText();
+    };
+    CHECK(enterAt("- one", 5) == "- one\n- ");
+    CHECK_EQ(editor.Caret(), size_t(8));
+    CHECK(enterAt("* one", 5) == "* one\n* ");
+    CHECK(enterAt("+ one", 5) == "+ one\n+ ");
+    CHECK(enterAt("1. one", 6) == "1. one\n2. ");
+    CHECK(enterAt("9) one", 6) == "9) one\n10) ");
+    CHECK(enterAt("- [x] done", 10) == "- [x] done\n- [ ] ");
+    CHECK(enterAt("> quoted", 8) == "> quoted\n> ");
+    CHECK(enterAt("> > deep", 8) == "> > deep\n> > ");
+    CHECK(enterAt("> - in a quote", 14) == "> - in a quote\n> - ");
+    CHECK(enterAt("    - nested", 12) == "    - nested\n    - ");
+    CHECK(enterAt("\t3. tabbed", 10) == "\t3. tabbed\n\t4. ");
+    // In the middle of an item the rest moves to the next one, without its leading blanks.
+    CHECK(enterAt("- one two", 5) == "- one\n- two");
+    CHECK_EQ(editor.Caret(), size_t(8));
+    // An empty item loses its marker (a quote keeps its own); an empty quote line ends the quote.
+    CHECK(enterAt("- one\n- ", 8) == "- one\n");
+    CHECK_EQ(editor.Caret(), size_t(6));
+    CHECK(enterAt("  1. ", 5) == "");
+    CHECK(enterAt("- [ ] ", 6) == "");
+    CHECK(enterAt("> - ", 4) == "> ");
+    CHECK(enterAt("> ", 2) == "");
+    // Plain lines, rules, a lone dash (a heading's underline), the caret inside the marker and
+    // Shift+Enter: a plain line break.
+    CHECK(enterAt("text", 4) == "text\n");
+    CHECK(enterAt("- - -", 5) == "- - -\n");
+    CHECK(enterAt("Title\n-", 7) == "Title\n-\n");
+    CHECK(enterAt("- one", 1) == "-\n one");
+    editor.SetText("- one");
+    editor.Select(5, 5);
+    editor.HandleKey(Key::Enter, rgui::kModShift, nullptr);
+    CHECK(editor.CopyText() == "- one\n");
+    // Each continuation is one undo group.
+    double now = 1000;
+    editor.SetText("");
+    Type(editor, "- a", now, 10);
+    editor.SetNow(now += 10);
+    editor.HandleKey(Key::Enter, 0, nullptr);
+    Type(editor, "b", now, 10);
+    CHECK(editor.CopyText() == "- a\n- b");
+    CHECK_EQ(editor.UndoGroups(), size_t(3));
+    editor.Undo();
+    editor.Undo();
+    CHECK(editor.CopyText() == "- a");
+    CHECK_EQ(editor.Caret(), size_t(3));
+    // A line longer than the part read: the marker still counts, the item is not empty.
+    std::string longItem = "- " + std::string(1000, 'x');
+    CHECK(enterAt(longItem.c_str(), longItem.size()) == longItem + "\n- ");
+}
+
+RGUI_TEST("ui.editor_list_indent") {
+    TextEditor editor;
+    Grid(editor, 80);
+    editor.SetText("- one\n- two");
+    editor.Select(9, 9);   // "- t|wo"
+    CHECK(editor.HandleKey(Key::Tab, 0, nullptr));
+    CHECK(editor.CopyText() == "- one\n    - two");
+    CHECK_EQ(editor.Caret(), size_t(13));
+    CHECK(editor.HandleKey(Key::Tab, rgui::kModShift, nullptr));
+    CHECK(editor.CopyText() == "- one\n- two");
+    CHECK_EQ(editor.Caret(), size_t(9));
+    // Nothing to outdent: Shift+Tab stays unused (it moves the focus).
+    CHECK(!editor.HandleKey(Key::Tab, rgui::kModShift, nullptr));
+    CHECK(editor.CopyText() == "- one\n- two");
+    // Tab-indented items take a tab; in a quote the indentation goes after its marker.
+    editor.SetText("\t- a");
+    editor.Select(4, 4);
+    editor.HandleKey(Key::Tab, 0, nullptr);
+    CHECK(editor.CopyText() == "\t\t- a");
+    editor.HandleKey(Key::Tab, rgui::kModShift, nullptr);
+    editor.HandleKey(Key::Tab, rgui::kModShift, nullptr);
+    CHECK(editor.CopyText() == "- a");
+    editor.SetText("> 1. a");
+    editor.Select(6, 6);
+    editor.HandleKey(Key::Tab, 0, nullptr);
+    CHECK(editor.CopyText() == "> " "    1. a");
+    CHECK_EQ(editor.UndoGroups(), size_t(1));
+    // Elsewhere Tab inserts a tab, and with a selection it replaces it.
+    editor.SetText("text");
+    editor.Select(4, 4);
+    editor.HandleKey(Key::Tab, 0, nullptr);
+    CHECK(editor.CopyText() == "text\t");
+    editor.SetText("- a");
+    editor.Select(0, 3);
+    editor.HandleKey(Key::Tab, 0, nullptr);
+    CHECK(editor.CopyText() == "\t");
+}
+
+RGUI_TEST("ui.markdown_completion") {
+    namespace md = rgui::ui::markdown;
+    using md::Completion;
+    CHECK(md::CompletionTrigger("```", false) == Completion::Fence);
+    CHECK(md::CompletionTrigger("  ```", false) == Completion::Fence);
+    CHECK(md::CompletionTrigger("- ```", false) == Completion::Fence);
+    CHECK(md::CompletionTrigger("> ```", false) == Completion::Fence);
+    CHECK(md::CompletionTrigger("a ```", false) == Completion::None);
+    CHECK(md::CompletionTrigger("````", false) == Completion::None);
+    CHECK(md::CompletionTrigger("``", false) == Completion::None);
+    CHECK(md::CompletionTrigger("> [!", false) == Completion::Alert);
+    CHECK(md::CompletionTrigger("> > [!", false) == Completion::Alert);
+    CHECK(md::CompletionTrigger(">[!", false) == Completion::Alert);
+    CHECK(md::CompletionTrigger("[!", false) == Completion::None);
+    CHECK(md::CompletionTrigger("> x [!", false) == Completion::None);
+    CHECK(md::CompletionTrigger("see [[", false) == Completion::None);
+    CHECK(md::CompletionTrigger("see [[", true) == Completion::WikiLink);
+    CHECK(md::CompletionTrigger("[[", true) == Completion::WikiLink);
+    CHECK(md::CompletionTrigger("![[", true) == Completion::None);
+    CHECK(md::CompletionTrigger("[[[", true) == Completion::None);
+    CHECK(md::FilterValid(Completion::Fence, "c++"));
+    CHECK(!md::FilterValid(Completion::Fence, "py thon"));
+    CHECK(!md::FilterValid(Completion::Fence, "`"));
+    CHECK(md::FilterValid(Completion::Alert, "WARN"));
+    CHECK(!md::FilterValid(Completion::Alert, "NOTE]"));
+    CHECK(md::FilterValid(Completion::WikiLink, "two words"));
+    CHECK(!md::FilterValid(Completion::WikiLink, "a]"));
+    CHECK(!md::FilterValid(Completion::WikiLink, std::string(md::kMaxFilterBytes + 1, 'a')));
+    CHECK(md::Matches("TypeScript", "scr"));
+    CHECK(md::Matches("anything", ""));
+    CHECK(!md::Matches("go", "golang"));
+    // The highlighter's languages, mermaid and math.
+    const auto& names = md::FenceNames();
+    for (const char* name : {"bash", "python", "cpp", "csharp", "rust", "diff", "dockerfile", "mermaid", "math"}) {
+        CHECK(std::find(names.begin(), names.end(), name) != names.end());
+    }
+    CHECK_EQ(md::AlertTypes().size(), size_t(5));
+}
+
+RGUI_TEST("ui.markdown_place_block") {
+    namespace md = rgui::ui::markdown;
+    md::BlockSite site;
+    // An empty document: the block and a line break; the caret after it on a fresh line.
+    site.atEnd = true;
+    md::TextEdit edit = md::PlaceBlock("\\pagebreak", 0, true, site);
+    CHECK(edit.text == "\\pagebreak\n\n");
+    CHECK_EQ(edit.caret, edit.text.size());
+    // Text before the caret and below: blank lines on both sides, the caret in the block.
+    site = {};
+    site.textBefore = true;
+    site.textBelow = true;
+    edit = md::PlaceBlock("$$\n\n$$", 3, false, site);
+    CHECK(edit.text == "\n\n$$\n\n$$\n");
+    CHECK_EQ(edit.caret, size_t(5));
+    // An empty line below text: one line break before; text after the caret: a blank line after.
+    site = {};
+    site.textAbove = true;
+    site.textAfter = true;
+    edit = md::PlaceBlock("[TOC]", 0, false, site);
+    CHECK(edit.text == "\n[TOC]\n\n");
+    CHECK(!md::HasText(" \t"));
+    CHECK(md::HasText(" x"));
+}
+
+RGUI_TEST("ui.markdown_headings") {
+    namespace md = rgui::ui::markdown;
+    const std::vector<std::string> headings = md::DocumentHeadings(
+        "---\ntitle: x\n# not a heading\n---\n# One\ntext #no\n## Two ##\n   ### Three\n    # code\n"
+        "```\n# in code\n```\n~~~~\n# in tilde code\n~~~\n# still code\n~~~~\n####### seven\n#tag\n# C#\n#\n###### Six\r\n");
+    const std::vector<std::string> expected = {"One", "Two", "Three", "C#", "Six"};
+    CHECK(headings == expected);
+    // Unclosed front matter is none.
+    CHECK(md::DocumentHeadings("---\n# Top\n") == std::vector<std::string>{"Top"});
+    // Bounded: counts, lengths and total bytes are capped; one pass over a megabyte.
+    std::string many;
+    while (many.size() < (1u << 20)) many += "# heading\n";
+    CHECK_EQ(md::DocumentHeadings(many).size(), md::kMaxHeadings);
+    std::string longOnes;
+    for (int i = 0; i < 600; i++) longOnes += "# " + std::string(300, 'x') + "\n";
+    const std::vector<std::string> cut = md::DocumentHeadings(longOnes);
+    size_t total = 0;
+    for (const std::string& h : cut) {
+        CHECK(h.size() <= md::kMaxHeadingBytes);
+        total += h.size();
+    }
+    CHECK(total <= md::kMaxHeadingTotal);
+    CHECK_EQ(cut.size(), md::kMaxHeadingTotal / md::kMaxHeadingBytes);
+    // A cut never splits a code point.
+    const std::string accented = "# " + std::string(199, 'a') + "\xC4\x85";
+    CHECK_EQ(md::DocumentHeadings(accented).front().size(), size_t(199));
 }

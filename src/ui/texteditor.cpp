@@ -4,6 +4,7 @@
 #include "common/exact_math.h"
 #include "common/text_utils.h"
 #include "text/unicode.h"
+#include "ui/markdownedit.h"
 
 #include <algorithm>
 
@@ -464,10 +465,14 @@ bool TextEditor::HandleKey(Key key, uint8_t mods, Context* ctx) {
         return true;
     case Key::Enter:
         if (ctrl) return false;
+        // Shift+Enter is a plain line break.
+        if (!shift && !HasSelection() && ContinueLine()) return true;
         HandleText("\n");
         return true;
     case Key::Tab:
-        if (ctrl || shift) return false;
+        if (ctrl) return false;
+        if (!HasSelection() && IndentLine(shift)) return true;
+        if (shift) return false;
         HandleText("\t");
         return true;
     case Key::Insert:
@@ -534,6 +539,54 @@ void TextEditor::PasteText(std::string_view utf8) {
     if (text.empty() && !HasSelection()) return;
     EndGroup();
     Edit(SelectionStart(), SelectionEnd() - SelectionStart(), text, Merge::None);
+}
+
+void TextEditor::Replace(size_t pos, size_t len, std::string_view utf8, size_t caretOffset) {
+    const size_t size = buffer_.Size();
+    pos = std::min(pos, size);
+    len = std::min(len, size - pos);
+    const std::string text = NormalizeEditorText(utf8);
+    preedit_.clear();
+    preeditCursor_ = -1;
+    EndGroup();
+    if (len == 0 && text.empty()) {
+        MoveTo(pos + std::min(caretOffset, size - pos), false);
+        return;
+    }
+    Edit(pos, len, text, Merge::None);
+    size_t caret = pos + std::min(caretOffset, buffer_.Size() - pos);
+    while (caret > 0 && caret < buffer_.Size() && (static_cast<unsigned char>(buffer_.At(caret)) & 0xC0) == 0x80) caret--;
+    caret_ = anchor_ = caret;
+    undo_.back().caretAfter = undo_.back().anchorAfter = caret;
+    EnsureCaretVisible();
+}
+
+std::string TextEditor::LinePrefixAtCaret(size_t& lineStart, bool& whole) const {
+    const size_t line = buffer_.LineOf(caret_);
+    lineStart = buffer_.LineStart(line);
+    const size_t length = buffer_.LineEnd(line) - lineStart;
+    whole = length <= markdown::kLinePrefixBytes;
+    return buffer_.Copy(lineStart, std::min(length, markdown::kLinePrefixBytes));
+}
+
+bool TextEditor::ContinueLine() {
+    size_t start = 0;
+    bool whole = false;
+    const std::string line = LinePrefixAtCaret(start, whole);
+    markdown::TextEdit edit;
+    if (!markdown::ContinueOnEnter(line, whole, caret_ - start, edit)) return false;
+    Replace(start + edit.pos, edit.len, edit.text, edit.caret);
+    return true;
+}
+
+bool TextEditor::IndentLine(bool outdent) {
+    size_t start = 0;
+    bool whole = false;
+    const std::string line = LinePrefixAtCaret(start, whole);
+    markdown::TextEdit edit;
+    if (!markdown::IndentListItem(line, caret_ - start, outdent, edit)) return false;
+    Replace(start + edit.pos, edit.len, edit.text, edit.caret);
+    return true;
 }
 
 void TextEditor::Copy(Context& ctx) const {
