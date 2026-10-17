@@ -130,6 +130,7 @@ void MainWindow::LoadSettings(const ui::SettingsFile& file) {
     syncScroll_ = file.GetBool("ui.syncScroll", true);
     lastDirectory_ = file.GetString("ui.lastDirectory");
     export_.Load(file);
+    popup_.SetWikiLinks(export_.dialect == ExportSettings::kObsidian);
     export_.imageCacheDirectory = platform_.ImageCacheDir().u8string();
 }
 
@@ -422,9 +423,15 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     static const std::vector<std::string> styles = Names(ExportSettings::kStyleNames, ExportSettings::kStyleCount);
     static const std::vector<std::string> margins = Names(ExportSettings::kMarginNames, ExportSettings::kMarginCount);
     static const std::vector<std::string> sizes = Names(ExportSettings::kPageSizeNames, ExportSettings::kPageSizeCount);
+    static const std::vector<std::string> breaks = Names(ExportSettings::kPageBreakNames, ExportSettings::kPageBreakCount);
+    static const std::vector<std::string> dialects = Names(ExportSettings::kDialectNames, ExportSettings::kDialectCount);
 
     // Document.
     ui::SectionHeader(ctx, "Document", column, true);
+    if (ui::Dropdown(ctx, "##dialect", export_.dialect, dialects, labeled("Markdown"))) {
+        SetWikiLinks(export_.dialect == ExportSettings::kObsidian);
+        changed = true;
+    }
     changed |= ui::Dropdown(ctx, "##style", export_.style, styles, labeled("Style"));
     changed |= ui::Dropdown(ctx, "##margin", export_.margin, margins, labeled("Margins"));
     if (export_.margin == ExportSettings::kCustomMargin) {
@@ -475,6 +482,16 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
         changed = true;
     }
     ctx.EndDisabled();
+    check("Number headings", export_.numberHeadings);
+    ctx.BeginDisabled(!export_.numberHeadings);
+    double numberDepth = export_.numberDepth;
+    if (ui::NumberField(ctx, "##numberDepth", numberDepth, ExportSettings::kMinNumberDepth,
+                        ExportSettings::kMaxNumberDepth, 1, 0, "", number(labeled("Depth")))) {
+        export_.numberDepth = static_cast<int>(numberDepth);
+        changed = true;
+    }
+    ctx.EndDisabled();
+    changed |= ui::Dropdown(ctx, "##pageBreakBefore", export_.pageBreakBefore, breaks, labeled("Page breaks"));
     check("Page numbers", export_.pageNumbers);
     check("Highlight code", export_.highlightCode);
 

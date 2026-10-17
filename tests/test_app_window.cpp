@@ -1175,6 +1175,26 @@ RGUI_TEST("app.completion") {
     CHECK(w.Popup().Headings().empty());
 }
 
+// Obsidian's dialect, kept in the settings, turns `[[` completion on; GitHub's leaves it off.
+RGUI_TEST("app.dialect_wiki_links") {
+    Harness h("dialect_wiki_links");
+    h.Start("ui.theme=tokyo-night\nexport.dialect=1\n");
+    h.Frame();
+    rgui::MainWindow& w = h.Window();
+    w.Editor().PasteText("# Alpha\n\nSee ");
+    CHECK(h.Settle());
+    CHECK_EQ(w.Popup().Headings().size(), size_t(1));
+    h.Type("[[");
+    CHECK(w.Popup().CompletionKind() == rgui::ui::markdown::Completion::WikiLink);
+    CHECK_EQ(w.Popup().Items().size(), size_t(1));
+
+    Harness github("dialect_github");
+    github.Start("ui.theme=tokyo-night\nexport.dialect=0\n");
+    github.Frame();
+    github.Type("[[");
+    CHECK(!github.Window().Popup().IsOpen());
+}
+
 // Lists and quotes continue on Enter through the window too, and an empty item ends the list.
 RGUI_TEST("app.list_continuation") {
     Harness h("list_continuation");

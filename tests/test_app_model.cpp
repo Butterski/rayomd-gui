@@ -74,6 +74,9 @@ RGUI_TEST("app.exportsettings.defaults") {
     CHECK_EQ(options.highlightCode, true);
     CHECK_EQ(options.toc, false);
     CHECK_EQ(options.tocDepth, 3);
+    CHECK_EQ(options.numberHeadings, engine.numberHeadings);
+    CHECK_EQ(options.pageBreakBeforeLevel, engine.pageBreakBeforeLevel);
+    CHECK(options.dialect == engine.dialect);
     CHECK(options.imageCacheDirectory.empty());
     CHECK(options.theme.fontPath.empty());
     CHECK_EQ(settings.openAfterExport, true);
@@ -139,6 +142,15 @@ RGUI_TEST("app.exportsettings.mapping") {
     TinyPdf::PdfOptions options = settings.ToPdfOptions("/doc/a.md", false);
     CHECK_EQ(options.toc, true);
     CHECK_EQ(options.tocDepth, 5);
+    // Numbering is off until checked, whatever its depth; the page-break index is the level.
+    settings.numberDepth = 4;
+    CHECK_EQ(settings.ToPdfOptions("", false).numberHeadings, 0);
+    settings.numberHeadings = true;
+    CHECK_EQ(settings.ToPdfOptions("", false).numberHeadings, 4);
+    settings.pageBreakBefore = ExportSettings::kBreakBeforeH2;
+    CHECK_EQ(settings.ToPdfOptions("", false).pageBreakBeforeLevel, 2);
+    settings.dialect = ExportSettings::kObsidian;
+    CHECK(settings.ToPdfOptions("", true).dialect == TinyPdf::MarkdownDialect::Obsidian);
     CHECK_EQ(options.pageNumbers, true);
     CHECK_EQ(options.compress, true);
     CHECK_EQ(options.fastImages, true);
@@ -203,6 +215,10 @@ RGUI_TEST("app.exportsettings.persist") {
     settings.customHeightMm = 432.1;
     settings.toc = true;
     settings.tocDepth = 6;
+    settings.numberHeadings = true;
+    settings.numberDepth = 2;
+    settings.pageBreakBefore = ExportSettings::kBreakBeforeH3;
+    settings.dialect = ExportSettings::kObsidian;
     settings.pageNumbers = true;
     settings.compress = true;
     settings.fastImages = true;
@@ -231,6 +247,10 @@ RGUI_TEST("app.exportsettings.persist") {
     CHECK_EQ(loaded.customHeightMm, settings.customHeightMm);
     CHECK_EQ(loaded.toc, true);
     CHECK_EQ(loaded.tocDepth, 6);
+    CHECK_EQ(loaded.numberHeadings, true);
+    CHECK_EQ(loaded.numberDepth, 2);
+    CHECK_EQ(loaded.pageBreakBefore, ExportSettings::kBreakBeforeH3);
+    CHECK_EQ(loaded.dialect, ExportSettings::kObsidian);
     CHECK_EQ(loaded.pageNumbers, true);
     CHECK_EQ(loaded.compress, true);
     CHECK_EQ(loaded.fastImages, true);
@@ -253,6 +273,9 @@ RGUI_TEST("app.exportsettings.persist") {
     edited.SetDouble("export.customWidthMm", 1);
     edited.SetDouble("export.customHeightMm", 99999);
     edited.SetInt("export.tocDepth", 0);
+    edited.SetInt("export.numberDepth", 9);
+    edited.SetInt("export.pageBreakBefore", 4);
+    edited.SetInt("export.dialect", -1);
     edited.SetString("export.highlightCode", "maybe");
     loaded.Load(edited);
     CHECK_EQ(loaded.style, ExportSettings::kElegant);
@@ -262,6 +285,9 @@ RGUI_TEST("app.exportsettings.persist") {
     CHECK_EQ(loaded.customWidthMm, 50.8);
     CHECK_EQ(loaded.customHeightMm, 5080.0);
     CHECK_EQ(loaded.tocDepth, 1);
+    CHECK_EQ(loaded.numberDepth, 6);
+    CHECK_EQ(loaded.pageBreakBefore, ExportSettings::kNoPageBreak);
+    CHECK_EQ(loaded.dialect, ExportSettings::kGitHub);
     CHECK_EQ(loaded.highlightCode, true);
     CHECK_EQ(loaded.landscape, false);
     CHECK(loaded.themeFile.empty());

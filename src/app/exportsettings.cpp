@@ -46,6 +46,9 @@ constexpr double kPointsPerMm = 72.0 / 25.4;
 const char* const ExportSettings::kStyleNames[kStyleCount] = {"Elegant", "Modern", "Tech"};
 const char* const ExportSettings::kMarginNames[kMarginCount] = {"Compact", "Normal", "Wide", "Custom"};
 const char* const ExportSettings::kPageSizeNames[kPageSizeCount] = {"A4", "A3", "A5", "Letter", "Legal", "Custom"};
+const char* const ExportSettings::kPageBreakNames[kPageBreakCount] = {"None", "Before H1", "Before H1\xE2\x80\x93H2",
+                                                                      "Before H1\xE2\x80\x93H3"};
+const char* const ExportSettings::kDialectNames[kDialectCount] = {"GitHub", "Obsidian"};
 
 void ExportSettings::Load(const ui::SettingsFile& file) {
     const ExportSettings defaults;
@@ -59,6 +62,10 @@ void ExportSettings::Load(const ui::SettingsFile& file) {
     customHeightMm = ClampDouble(file, "customHeightMm", defaults.customHeightMm, kMinPageMm, kMaxPageMm);
     toc = Bool(file, "toc", defaults.toc);
     tocDepth = ClampInt(file, "tocDepth", defaults.tocDepth, kMinTocDepth, kMaxTocDepth);
+    numberHeadings = Bool(file, "numberHeadings", defaults.numberHeadings);
+    numberDepth = ClampInt(file, "numberDepth", defaults.numberDepth, kMinNumberDepth, kMaxNumberDepth);
+    pageBreakBefore = Index(file, "pageBreakBefore", defaults.pageBreakBefore, kPageBreakCount);
+    dialect = Index(file, "dialect", defaults.dialect, kDialectCount);
     pageNumbers = Bool(file, "pageNumbers", defaults.pageNumbers);
     compress = Bool(file, "compress", defaults.compress);
     fastImages = Bool(file, "fastImages", defaults.fastImages);
@@ -82,6 +89,10 @@ void ExportSettings::Store(ui::SettingsFile& file) const {
     file.SetDouble(Key("customHeightMm"), customHeightMm);
     file.SetBool(Key("toc"), toc);
     file.SetInt(Key("tocDepth"), tocDepth);
+    file.SetBool(Key("numberHeadings"), numberHeadings);
+    file.SetInt(Key("numberDepth"), numberDepth);
+    file.SetInt(Key("pageBreakBefore"), pageBreakBefore);
+    file.SetInt(Key("dialect"), dialect);
     file.SetBool(Key("pageNumbers"), pageNumbers);
     file.SetBool(Key("compress"), compress);
     file.SetBool(Key("fastImages"), fastImages);
@@ -150,6 +161,9 @@ TinyPdf::PdfOptions ExportSettings::ToPdfOptions(const std::string& sourcePath, 
     options.highlightCode = highlightCode;
     options.toc = toc;
     options.tocDepth = tocDepth;
+    options.numberHeadings = numberHeadings ? numberDepth : 0;
+    options.pageBreakBeforeLevel = pageBreakBefore;
+    options.dialect = dialect == kObsidian ? TinyPdf::MarkdownDialect::Obsidian : TinyPdf::MarkdownDialect::GitHub;
     options.theme = theme;
     return options;
 }

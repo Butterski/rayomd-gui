@@ -179,9 +179,10 @@ indent and outdent a list item. `Ctrl+I`, or the footer's insert button, opens a
 page break, table of contents, table, callout (with GitHub's five types), Mermaid flowchart and
 sequence diagram, math block, code block, front matter and rule, each on lines of its own with the
 caret where you type next. Typing ```` ``` ```` at the start of a line lists the fence languages
-the PDF highlights (and `mermaid`, `math`), `> [!` the callout types; type to filter, Enter or a
-click picks, Escape closes. An image dropped on a saved document (PNG, JPEG or SVG) is copied into
-an `images` folder beside it, never over an existing file, and linked at the caret.
+the PDF highlights (and `mermaid`, `math`), `> [!` the callout types and, with the Obsidian
+dialect, `[[` the document's headings; type to filter, Enter or a click picks, Escape closes. An
+image dropped on a saved document (PNG, JPEG or SVG) is copied into an `images` folder beside it,
+never over an existing file, and linked at the caret.
 
 <img src="assets/screenshot-links-images.png" alt="Links and images: the Markdown on the left, the PDF page with a photo, reference links and quotes on the right">
 
@@ -211,10 +212,12 @@ The engine's export options, in the panel on the right (`Ctrl+,`):
 
 <img src="assets/screenshot-options.png" alt="A new document with the options panel: style, margins, page size, PDF theme, table of contents, page numbers, code highlighting, PDF/A-3b, PDF/UA-1, compression and the interface theme">
 
-- **Document:** style (Elegant, Modern, Tech), margins (also custom), page size (A4, A3, A5,
-  Letter, Legal or custom, in landscape too) and a PDF theme file: company fonts, colours,
-  header, footer and cover page.
-- **Contents:** a table of contents with its depth, page numbers, code coloured as on GitHub.
+- **Document:** the Markdown dialect (GitHub's, or Obsidian's: callouts with titles,
+  `==highlights==`, `%%comments%%`, `[[wiki links]]` and `![[images]]`), style (Elegant, Modern,
+  Tech), margins (also custom), page size (A4, A3, A5, Letter, Legal or custom, in landscape too)
+  and a PDF theme file: company fonts, colours, header, footer and cover page.
+- **Contents:** a table of contents with its depth, headings numbered 1, 1.1, 1.1.1 to a depth,
+  a new page before each heading of the top levels, page numbers, code coloured as on GitHub.
 - **Output:** PDF/A-3b, PDF/UA-1, compression, faster image encoding, the Markdown source
   embedded, URL images (Windows), opening the PDF after export.
 

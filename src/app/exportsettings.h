@@ -18,9 +18,14 @@ struct ExportSettings {
     enum Style : int { kElegant, kModern, kTech, kStyleCount };
     enum Margin : int { kCompact, kNormal, kWide, kCustomMargin, kMarginCount };
     enum PageSize : int { kA4, kA3, kA5, kLetter, kLegal, kCustomPage, kPageSizeCount };
+    // The index is the engine's PdfOptions::pageBreakBeforeLevel.
+    enum PageBreak : int { kNoPageBreak, kBreakBeforeH1, kBreakBeforeH2, kBreakBeforeH3, kPageBreakCount };
+    enum Dialect : int { kGitHub, kObsidian, kDialectCount };
     static const char* const kStyleNames[kStyleCount];        // Elegant, Modern, Tech
     static const char* const kMarginNames[kMarginCount];      // Compact, Normal, Wide, Custom
     static const char* const kPageSizeNames[kPageSizeCount];  // A4, A3, A5, Letter, Legal, Custom
+    static const char* const kPageBreakNames[kPageBreakCount];  // None, Before H1, ... H1-H2, ... H1-H3
+    static const char* const kDialectNames[kDialectCount];      // GitHub, Obsidian
 
     static constexpr double kMinMarginInches = 0.25;
     static constexpr double kMaxMarginInches = 2.0;
@@ -28,6 +33,8 @@ struct ExportSettings {
     static constexpr double kMaxPageMm = 5080.0;  // 14,400 pt, its largest
     static constexpr int kMinTocDepth = 1;
     static constexpr int kMaxTocDepth = 6;
+    static constexpr int kMinNumberDepth = 1;
+    static constexpr int kMaxNumberDepth = 6;
     static constexpr size_t kMaxThemeFileBytes = 1024 * 1024;
 
     // Stored: export.<name>.
@@ -40,6 +47,10 @@ struct ExportSettings {
     double customHeightMm = 297.0;
     bool toc = false;
     int tocDepth = 3;
+    bool numberHeadings = false;  // 1, 1.1, 1.1.1 before the headings, numberDepth levels deep
+    int numberDepth = 3;
+    int pageBreakBefore = kNoPageBreak;
+    int dialect = kGitHub;  // the Markdown the document is written in; Obsidian also completes `[[`
     bool pageNumbers = false;
     bool compress = false;
     bool fastImages = false;
