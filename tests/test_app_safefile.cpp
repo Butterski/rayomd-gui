@@ -17,6 +17,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -27,8 +29,15 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
 #include <csignal>
+#include <cstddef>
 #include <fcntl.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -270,6 +279,55 @@ RGUI_TEST("app.safefile.image_copy") {
 }
 
 #ifndef _WIN32
+
+// A file system without RENAME_NOREPLACE (renameat2 failing with EINVAL, or a kernel without
+// renameat2: ENOSYS): NewFile takes a hard link instead, which never replaces a name either. The
+// failure is made by a seccomp filter on one thread, which runs the writes.
+RGUI_TEST("app.safefile.new_file_link_fallback") {
+    const fs::path dir = TempDir("new-file-link");
+    for (const int code : {EINVAL, ENOSYS}) {
+        const std::string name = code == EINVAL ? "einval.png" : "enosys.png";
+        bool filtered = false, blocked = false, first = false, second = false;
+        std::string firstError, secondError;
+        std::thread thread([&] {
+            sock_filter filter[] = {
+                BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, arch)),
+                BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+                BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+                BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_renameat2, 0, 1),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (static_cast<uint32_t>(code) & SECCOMP_RET_DATA)),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            };
+            sock_fprog program{static_cast<unsigned short>(sizeof filter / sizeof filter[0]), filter};
+            // Both apply to this thread only.
+            if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 || prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) != 0) {
+                return;
+            }
+            filtered = true;
+            blocked = syscall(__NR_renameat2, AT_FDCWD, "/nonexistent-a", AT_FDCWD, "/nonexistent-b", 0) != 0 &&
+                      errno == code;
+            first = rgui::WriteFileAtomically(dir / name, "first", WriteMode::NewFile, &firstError);
+            second = rgui::WriteFileAtomically(dir / name, "second", WriteMode::NewFile, &secondError);
+        });
+        thread.join();
+        if (!filtered) {
+            std::printf("skip app.safefile.new_file_link_fallback: no seccomp filter\n");
+            return;
+        }
+        CHECK(blocked);
+        CHECK(first);
+        CHECK_EQ(firstError, std::string());
+        CHECK(!second);
+        CHECK_EQ(secondError, std::string(rgui::kFileExistsError));
+        CHECK_EQ(ReadFile(dir / name), std::string("first"));
+        // The link's temporary name is gone: one name, one link.
+        struct stat st {};
+        CHECK(stat((dir / name).c_str(), &st) == 0 && st.st_nlink == 1);
+    }
+    CHECK_EQ(TempFilesIn(dir), size_t(0));
+    CHECK_EQ(Entries(dir).size(), size_t(2));
+}
 
 RGUI_TEST("app.safefile.planted_names") {
     // Another user's symlinks (and a FIFO) at every name a predictable temporary file could
