@@ -1211,9 +1211,11 @@ RGUI_TEST("ui.markdown_completion") {
     CHECK(md::FilterValid(Completion::WikiLink, "two words"));
     CHECK(!md::FilterValid(Completion::WikiLink, "a]"));
     CHECK(!md::FilterValid(Completion::WikiLink, std::string(md::kMaxFilterBytes + 1, 'a')));
-    CHECK(md::Matches("TypeScript", "scr"));
-    CHECK(md::Matches("anything", ""));
-    CHECK(!md::Matches("go", "golang"));
+    CHECK_EQ(md::MatchRank("TypeScript", "scr"), 2);
+    CHECK_EQ(md::MatchRank("Python", "py"), 1);
+    CHECK_EQ(md::MatchRank("PY", "py"), 0);
+    CHECK_EQ(md::MatchRank("anything", ""), 0);
+    CHECK_EQ(md::MatchRank("go", "golang"), -1);
     // The highlighter's languages, mermaid and math.
     const auto& names = md::FenceNames();
     for (const char* name : {"bash", "python", "cpp", "csharp", "rust", "diff", "dockerfile", "mermaid", "math"}) {

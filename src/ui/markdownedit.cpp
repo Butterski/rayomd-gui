@@ -187,15 +187,15 @@ bool FilterValid(Completion kind, std::string_view filter) {
     return filter.find_first_of(refused) == std::string_view::npos;
 }
 
-bool Matches(std::string_view item, std::string_view filter) {
-    if (filter.empty()) return true;
-    if (filter.size() > item.size()) return false;
+int MatchRank(std::string_view item, std::string_view filter) {
+    if (filter.empty()) return 0;
+    if (filter.size() > item.size()) return -1;
     for (size_t i = 0; i + filter.size() <= item.size(); i++) {
         size_t k = 0;
         while (k < filter.size() && Lower(item[i + k]) == Lower(filter[k])) k++;
-        if (k == filter.size()) return true;
+        if (k == filter.size()) return i > 0 ? 2 : (item.size() == filter.size() ? 0 : 1);
     }
-    return false;
+    return -1;
 }
 
 const std::vector<std::string>& FenceNames() {

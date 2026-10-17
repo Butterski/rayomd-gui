@@ -65,8 +65,9 @@ std::string_view TriggerText(Completion kind);
 // kMaxFilterBytes; a fence's language or an alert's type has no space, backtick or bracket.
 constexpr size_t kMaxFilterBytes = 64;
 bool FilterValid(Completion kind, std::string_view filter);
-// Whether `item` matches `filter` (ASCII case-insensitive substring; empty matches all).
-bool Matches(std::string_view item, std::string_view filter);
+// How `item` matches `filter`, ASCII case-insensitive: 0 equal (or an empty filter), 1 starting
+// with it, 2 containing it, -1 not at all. Lists show the better matches first.
+int MatchRank(std::string_view item, std::string_view filter);
 
 // The fence names offered after ```: the engine's highlighted languages with their common
 // aliases (highlight.cpp's kSpecs), `mermaid` and `math`.
