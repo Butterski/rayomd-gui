@@ -1079,6 +1079,10 @@ RGUI_TEST("ui.editor_replace") {
     editor.Replace(0, 0, "", 100);
     CHECK_EQ(editor.Caret(), editor.Buffer().Size());
     CHECK_EQ(editor.UndoGroups(), size_t(1));
+    // Nothing replaced: the caret still lands on a code point's start (`ą` is bytes 4 and 5).
+    editor.Replace(4, 0, "", 1);
+    CHECK_EQ(editor.Caret(), size_t(4));
+    CHECK_EQ(editor.UndoGroups(), size_t(1));
     // Line endings are normalized; the offset counts the normalized text.
     editor.SetText("");
     editor.Replace(0, 0, "a\r\nb", 3);

@@ -549,13 +549,19 @@ void TextEditor::Replace(size_t pos, size_t len, std::string_view utf8, size_t c
     preedit_.clear();
     preeditCursor_ = -1;
     EndGroup();
+    // The caret at a code point's start, also when nothing is replaced.
+    auto snapped = [this](size_t caret) {
+        while (caret > 0 && caret < buffer_.Size() && (static_cast<unsigned char>(buffer_.At(caret)) & 0xC0) == 0x80) {
+            caret--;
+        }
+        return caret;
+    };
     if (len == 0 && text.empty()) {
-        MoveTo(pos + std::min(caretOffset, size - pos), false);
+        MoveTo(snapped(pos + std::min(caretOffset, size - pos)), false);
         return;
     }
     Edit(pos, len, text, Merge::None);
-    size_t caret = pos + std::min(caretOffset, buffer_.Size() - pos);
-    while (caret > 0 && caret < buffer_.Size() && (static_cast<unsigned char>(buffer_.At(caret)) & 0xC0) == 0x80) caret--;
+    const size_t caret = snapped(pos + std::min(caretOffset, buffer_.Size() - pos));
     caret_ = anchor_ = caret;
     undo_.back().caretAfter = undo_.back().anchorAfter = caret;
     EnsureCaretVisible();

@@ -3,7 +3,7 @@
 // insert list (Ctrl+I, the footer's button: page break, table of contents, table, callout with its
 // types, Mermaid flowchart and sequence diagram, math block, code block, front matter, rule) and
 // the completions that open as Markdown is typed: fence names after ```, alert types after `> [!`
-// and, with wiki links on (the Obsidian dialect), the document's headings after `[[`.
+// and, when the caller turns wiki links on, the document's headings after `[[`.
 //
 // The open list takes Up, Down, Enter and Escape before the editor's frame; the insert list also
 // takes the typed text as its filter. A completion filters by the text typed after its trigger,
@@ -29,7 +29,7 @@ class EditorPopup {
 public:
     enum class Mode : uint8_t { Closed, Insert, Callout, Completion };
 
-    // `[[` completes the document's headings (off by default; the Obsidian dialect turns it on).
+    // `[[` completes the document's headings (off by default; the caller turns it on).
     void SetWikiLinks(bool on) { wikiLinks_ = on; }
     bool WikiLinks() const { return wikiLinks_; }
     // The document's headings, from the last preview build.

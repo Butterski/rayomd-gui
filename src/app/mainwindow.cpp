@@ -813,6 +813,7 @@ void MainWindow::NewDocument() {
     doc_.New();
     editor_.SetText({});
     popup_.Close();
+    popup_.SetHeadings({});
     syncedRevision_ = editor_.Revision();
     stats_ = DocumentStats();
     ResetSourceSync();

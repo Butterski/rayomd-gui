@@ -103,7 +103,8 @@ bool HasText(std::string_view text);
 // ---- Headings ----
 // The document's ATX headings (`#` to `######`), outside fenced code and the front matter, their
 // text trimmed and without a closing `#` sequence: at most kMaxHeadings, each cut to
-// kMaxHeadingBytes (at a code point), kMaxHeadingTotal bytes in all. One forward pass.
+// kMaxHeadingBytes (at a code point), kMaxHeadingTotal bytes in all. Linear: a forward pass, and
+// before it one over a front matter's lines (to its end, or the text's when it is unclosed).
 constexpr size_t kMaxHeadings = 1000;
 constexpr size_t kMaxHeadingBytes = 200;
 constexpr size_t kMaxHeadingTotal = 64 * 1024;

@@ -126,7 +126,7 @@ public:
     // `ui.syncScroll`: scrolling one pane scrolls the other to the same place. Turning it on
     // brings the preview to the editor.
     void SetSyncScroll(bool on);
-    // `[[` completes the document's headings (default off; the Obsidian dialect turns it on).
+    // `[[` completes the document's headings (default off; the caller turns it on).
     void SetWikiLinks(bool on);
 
     // ---- State ----
