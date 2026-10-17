@@ -17,7 +17,7 @@ seconds=$2
 work=$3
 shift 3
 source_dir=$(cd "$(dirname "$0")/../.." && pwd)
-harnesses=${*:-"pdf jpeg font theme fontconf settings xkb compose dbus wl_wire"}
+harnesses=${*:-"pdf jpeg font theme fontconf settings markdown xkb compose dbus wl_wire"}
 
 mkdir -p "$work/logs"
 work=$(cd "$work" && pwd)

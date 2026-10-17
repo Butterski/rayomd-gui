@@ -3,8 +3,9 @@
 // <out dir>/<harness>/. PDFs the engine builds from the test corpus (preview options, and a few
 // export variants), the font programs embedded in them plus two system fonts, the JPEG test
 // data and the JPEGs inside the PDFs, the bundled Omarchy themes and the theme fixtures,
-// fontconfig files, a settings file, the XKB keymaps and Compose fixture, D-Bus messages built
-// with our encoder, and Wayland event streams for every event of every object FuzzWlWire makes.
+// fontconfig files, a settings file, Markdown for the editor's helpers, the XKB keymaps and
+// Compose fixture, D-Bus messages built with our encoder, and Wayland event streams for every
+// event of every object FuzzWlWire makes.
 #include "harness.h"
 
 #include "common/file_io.h"
@@ -304,6 +305,10 @@ int main(int argc, char** argv) {
           "# RayoMD GUI\nexport.style=1\nexport.customMarginInches=1.25\nexport.landscape=true\n"
           "export.themeFile=/home/user/Themes/company.theme\nui.theme=omarchy\nui.splitRatio=0.5\r\n"
           "ui.lastDirectory=/home/user/Documents/Notatki zażółć\n");
+    Write("markdown", "tester.md", Read(source / "external/rayomd/tester.md"));
+    Write("markdown", "typing.md",
+          "---\ntitle: x\n---\n# One ##\n\n- a\n  - [ ] b\n    1. c\n> > [!NOTE]\n> - d\n```py\n# no\n```\n"
+          "~~~~\n~~~\n## Two\n\t3) e\n- - -\n```\n[[#One]] [[\n");
     CopyDir("xkb", source / "tests/data/xkb", ".xkb");
     Write("compose", "Compose", Read(source / "tests/data/xkb/compose/Compose"));
     Write("compose", "self.Compose", Read(source / "tests/data/xkb/compose/locale/self.Compose"));

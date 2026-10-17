@@ -18,6 +18,7 @@ int FuzzFont(const uint8_t* data, size_t size);
 int FuzzTheme(const uint8_t* data, size_t size);
 int FuzzFontconf(const uint8_t* data, size_t size);
 int FuzzSettings(const uint8_t* data, size_t size);
+int FuzzMarkdown(const uint8_t* data, size_t size);
 #if defined(__linux__)
 int FuzzXkb(const uint8_t* data, size_t size);
 int FuzzCompose(const uint8_t* data, size_t size);

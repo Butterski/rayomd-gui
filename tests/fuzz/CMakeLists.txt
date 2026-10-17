@@ -10,6 +10,7 @@ add_library(rgui_fuzz_harnesses STATIC
     fuzz_theme.cpp
     fuzz_fontconf.cpp
     fuzz_settings.cpp
+    fuzz_markdown.cpp
     fuzz_xkb.cpp
     fuzz_compose.cpp
     fuzz_dbus.cpp
@@ -18,7 +19,7 @@ target_link_libraries(rgui_fuzz_harnesses PUBLIC rayomd_gui_linux)
 rgui_flags(rgui_fuzz_harnesses)
 
 foreach(entry pdf:FuzzPdf jpeg:FuzzJpeg font:FuzzFont theme:FuzzTheme fontconf:FuzzFontconf settings:FuzzSettings
-              xkb:FuzzXkb compose:FuzzCompose dbus:FuzzDbus wl_wire:FuzzWlWire)
+              markdown:FuzzMarkdown xkb:FuzzXkb compose:FuzzCompose dbus:FuzzDbus wl_wire:FuzzWlWire)
     string(REPLACE ":" ";" parts ${entry})
     list(GET parts 0 name)
     list(GET parts 1 function)

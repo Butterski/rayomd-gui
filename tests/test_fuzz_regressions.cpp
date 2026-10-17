@@ -28,6 +28,7 @@ const Harness kHarnesses[] = {
     {"theme", rgui::fuzz::FuzzTheme},
     {"fontconf", rgui::fuzz::FuzzFontconf},
     {"settings", rgui::fuzz::FuzzSettings},
+    {"markdown", rgui::fuzz::FuzzMarkdown},
 #if defined(__linux__)
     {"xkb", rgui::fuzz::FuzzXkb},
     {"compose", rgui::fuzz::FuzzCompose},
