@@ -21,7 +21,8 @@ bool IsPdfPath(const fs::path& path) {
 }
 
 // `text` with LF line ends, and whether it had CRLF ones. Every CR right before a LF goes, so
-// the result never holds "\r\n" (a run "\r\r\n" becomes "\n" too).
+// the result never holds "\r\n" (a run "\r\r\n" becomes "\n" too). A run of CRs is read once:
+// read again from each of its CRs, a file of lone CRs took time growing with its square.
 std::string ToLf(const std::string& text, bool& crlf) {
     crlf = false;
     std::string out;
@@ -32,9 +33,11 @@ std::string ToLf(const std::string& text, bool& crlf) {
             while (end < text.size() && text[end] == '\r') end++;
             if (end < text.size() && text[end] == '\n') {
                 crlf = true;
-                i = end - 1;  // the LF comes next
-                continue;
+            } else {
+                out.append(end - i, '\r');
             }
+            i = end - 1;  // the byte after the run comes next
+            continue;
         }
         out += text[i];
     }

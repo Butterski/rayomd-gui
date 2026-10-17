@@ -300,6 +300,15 @@ RGUI_TEST("app.document.crlf") {
     CHECK_EQ(doc.text, std::string("a\nb\rc"));
     CHECK_EQ(doc.crlf, true);
 
+    // A run of lone CRs is read once: read again from each of its CRs, these 256 KiB were 3 * 10^10
+    // steps on the loader thread.
+    const std::string crs(size_t(256) << 10, '\r');
+    CHECK(RayoMd::File::WriteAll(dir / "crs.md", crs + "x\r\r\ny"));
+    const auto opening = std::chrono::steady_clock::now();
+    CHECK(doc.Open(Utf8(dir / "crs.md"), status));
+    CHECK(std::chrono::steady_clock::now() - opening < std::chrono::seconds(5));
+    CHECK_EQ(doc.text, crs + "x\ny");
+
     // LF files stay LF, and saving over the file itself works.
     CHECK(RayoMd::File::WriteAll(dir / "unix.md", "one\ntwo\n"));
     CHECK(doc.Open(Utf8(dir / "unix.md"), status));
