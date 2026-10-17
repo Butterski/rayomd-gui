@@ -494,6 +494,7 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     changed |= ui::Dropdown(ctx, "##pageBreakBefore", export_.pageBreakBefore, breaks, labeled("Page breaks"));
     check("Page numbers", export_.pageNumbers);
     check("Highlight code", export_.highlightCode);
+    check("Mermaid diagrams", export_.diagrams);
 
     // Output.
     ui::SectionHeader(ctx, "Output", column);

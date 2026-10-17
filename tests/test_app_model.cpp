@@ -72,6 +72,7 @@ RGUI_TEST("app.exportsettings.defaults") {
     CHECK_EQ(options.pdfa, false);
     CHECK_EQ(options.pdfua, false);
     CHECK_EQ(options.highlightCode, true);
+    CHECK_EQ(options.diagrams, engine.diagrams);
     CHECK_EQ(options.toc, false);
     CHECK_EQ(options.tocDepth, 3);
     CHECK_EQ(options.numberHeadings, engine.numberHeadings);
@@ -138,6 +139,7 @@ RGUI_TEST("app.exportsettings.mapping") {
     settings.pdfua = true;
     settings.embedSource = true;
     settings.highlightCode = false;
+    settings.diagrams = false;
     settings.urlImages = true;
     TinyPdf::PdfOptions options = settings.ToPdfOptions("/doc/a.md", false);
     CHECK_EQ(options.toc, true);
@@ -158,6 +160,7 @@ RGUI_TEST("app.exportsettings.mapping") {
     CHECK_EQ(options.pdfua, true);
     CHECK_EQ(options.embedSource, true);
     CHECK_EQ(options.highlightCode, false);
+    CHECK_EQ(options.diagrams, false);
 #ifdef _WIN32
     CHECK_EQ(options.enableUrlImages, true);
 #else
@@ -226,6 +229,7 @@ RGUI_TEST("app.exportsettings.persist") {
     settings.pdfua = true;
     settings.embedSource = true;
     settings.highlightCode = false;
+    settings.diagrams = false;
     settings.urlImages = true;
     settings.themeFile = Utf8(dir / "zażółć.theme");
     settings.openAfterExport = false;
@@ -258,6 +262,7 @@ RGUI_TEST("app.exportsettings.persist") {
     CHECK_EQ(loaded.pdfua, true);
     CHECK_EQ(loaded.embedSource, true);
     CHECK_EQ(loaded.highlightCode, false);
+    CHECK_EQ(loaded.diagrams, false);
     CHECK_EQ(loaded.urlImages, true);
     CHECK_EQ(loaded.themeFile, settings.themeFile);
     CHECK_EQ(loaded.openAfterExport, false);

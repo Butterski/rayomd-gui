@@ -217,7 +217,8 @@ The engine's export options, in the panel on the right (`Ctrl+,`):
   Tech), margins (also custom), page size (A4, A3, A5, Letter, Legal or custom, in landscape too)
   and a PDF theme file: company fonts, colours, header, footer and cover page.
 - **Contents:** a table of contents with its depth, headings numbered 1, 1.1, 1.1.1 to a depth,
-  a new page before each heading of the top levels, page numbers, code coloured as on GitHub.
+  a new page before each heading of the top levels, page numbers, code coloured as on GitHub, and
+  ` ```mermaid ` blocks drawn as diagrams (flowcharts, sequence diagrams, pie charts).
 - **Output:** PDF/A-3b, PDF/UA-1, compression, faster image encoding, the Markdown source
   embedded, URL images (Windows), opening the PDF after export.
 

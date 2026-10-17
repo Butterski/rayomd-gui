@@ -58,6 +58,7 @@ struct ExportSettings {
     bool pdfua = false;
     bool embedSource = false;
     bool highlightCode = true;
+    bool diagrams = true;    // ```mermaid blocks drawn as diagrams; false shows their source
     bool urlImages = false;  // Windows only: the engine has no URL images on Linux
     std::string themeFile;   // UTF-8 path of a PDF theme file; empty for none
     bool openAfterExport = true;

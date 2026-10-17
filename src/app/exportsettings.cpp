@@ -73,6 +73,7 @@ void ExportSettings::Load(const ui::SettingsFile& file) {
     pdfua = Bool(file, "pdfua", defaults.pdfua);
     embedSource = Bool(file, "embedSource", defaults.embedSource);
     highlightCode = Bool(file, "highlightCode", defaults.highlightCode);
+    diagrams = Bool(file, "diagrams", defaults.diagrams);
     urlImages = Bool(file, "urlImages", defaults.urlImages);
     themeFile = file.GetString(Key("themeFile"));
     openAfterExport = Bool(file, "openAfterExport", defaults.openAfterExport);
@@ -100,6 +101,7 @@ void ExportSettings::Store(ui::SettingsFile& file) const {
     file.SetBool(Key("pdfua"), pdfua);
     file.SetBool(Key("embedSource"), embedSource);
     file.SetBool(Key("highlightCode"), highlightCode);
+    file.SetBool(Key("diagrams"), diagrams);
     file.SetBool(Key("urlImages"), urlImages);
     file.SetString(Key("themeFile"), themeFile);
     file.SetBool(Key("openAfterExport"), openAfterExport);
@@ -159,6 +161,7 @@ TinyPdf::PdfOptions ExportSettings::ToPdfOptions(const std::string& sourcePath, 
     options.pdfa = pdfa;
     options.pdfua = pdfua;
     options.highlightCode = highlightCode;
+    options.diagrams = diagrams;
     options.toc = toc;
     options.tocDepth = tocDepth;
     options.numberHeadings = numberHeadings ? numberDepth : 0;
