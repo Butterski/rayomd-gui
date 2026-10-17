@@ -50,6 +50,29 @@ bool Checkbox(Context& ctx, std::string_view label, bool& value, RectF row);
 // `selected` changed.
 bool Dropdown(Context& ctx, std::string_view id, int& selected, const std::vector<std::string>& items, RectF rect);
 
+// ---- PopupList ----
+// A list in a popup at a text caret, for menus and completions that open while another widget
+// (the editor) keeps the focus; built like the Dropdown's popup. The caller keeps whether it is
+// open and calls both parts each frame it is: PopupListKeys before the focused widget's frame,
+// PopupList after it.
+enum class PopupAction : uint8_t { None, Pick, Close };
+struct PopupEvent {
+    PopupAction action = PopupAction::None;
+    int index = -1;   // with Pick: the row picked
+};
+// Takes the frame's Up and Down (moving the highlight over `count` rows), Escape (Close) and
+// Enter (Pick of the highlighted row when there are rows and `enterPicks` or Up / Down moved the
+// highlight since ResetPopupList); Enter that picks nothing stays for the focused widget.
+PopupEvent PopupListKeys(Context& ctx, std::string_view id, int count, bool enterPicks);
+// Draws `items` below `anchor` (the caret's rectangle; above it when there is no room), at most 10
+// rows visible, 280 px wide within the window, `emptyText` muted in a row when there are no
+// items. The wheel scrolls it; a click picks a row, a press elsewhere closes it (and goes nowhere
+// else).
+PopupEvent PopupList(Context& ctx, std::string_view id, const std::vector<std::string>& items, RectF anchor,
+                     std::string_view emptyText = {});
+// The highlight back on the first row, not moved by keys (a list opened or filtered anew).
+void ResetPopupList(Context& ctx, std::string_view id);
+
 // ---- Text fields ----
 // The height of a one-line field: the body line plus input-padding-y above and below, at least
 // control-height.

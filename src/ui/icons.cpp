@@ -2,7 +2,7 @@
 // Icon paths and stroke widths copied from Omawrite (src/FooterIconButton.qml, open and save, at
 // a7da0b14e501d6aab5b67258564052727ae1d1d9) and Hype (src/AppIcon.qml, the rest, at
 // d5f1a3ce6a6c924e4e07e3390c7b28b7120da59d), both MIT, "Copyright (c) 2026 David Heinemeier
-// Hansson"; see third_party/omarchy/. Close, maximize and minimize are ours.
+// Hansson"; see third_party/omarchy/. Close, maximize, minimize and insert are ours.
 #include "ui/icons.h"
 
 #include "gfx/raster.h"
@@ -26,6 +26,8 @@ const IconInfo kIcons[kIconCount] = {
     {"close", 24, 1.8f, "M6 6L18 18 M18 6L6 18"},
     {"maximize", 24, 1.8f, "M5 5H19V19H5Z"},
     {"minimize", 24, 1.8f, "M5 12H19"},
+    // A plus in a box: the insert list.
+    {"insert", 24, 1.8f, "M4.5 4.5H19.5V19.5H4.5Z M12 8V16 M8 12H16"},
 };
 
 class MaskSink final : public gfx::SpanSink {

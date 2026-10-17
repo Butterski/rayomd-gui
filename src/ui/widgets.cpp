@@ -470,6 +470,16 @@ struct DropdownState {
     bool keyboard = false;   // the highlight moved by key: keep it in view
 };
 
+struct PopupListState {
+    int highlight = 0;
+    bool moved = false;      // Up / Down moved the highlight since the reset
+    bool keyboard = false;   // the highlight moved by key: keep it in view
+    SmoothScroll scroll;
+};
+
+constexpr int kPopupListRows = 10;
+constexpr float kPopupListWidth = 280;
+
 } // namespace
 
 // ---- IconButton and Tooltip ----
@@ -723,6 +733,125 @@ bool Dropdown(Context& ctx, std::string_view idLabel, int& selected, const std::
         ctx.PopLayer();
     }
     return selected != before;
+}
+
+// ---- PopupList ----
+
+PopupEvent PopupListKeys(Context& ctx, std::string_view id, int count, bool enterPicks) {
+    PopupListState& st = ctx.State<PopupListState>(ctx.MakeId(id));
+    st.highlight = count > 0 ? std::min(std::max(st.highlight, 0), count - 1) : 0;
+    PopupEvent event;
+    ForEachKey(ctx, [&](const InputEvent& ev) {
+        if (ev.mods != 0 || event.action != PopupAction::None) return false;
+        switch (ev.key) {
+        case Key::Up:
+        case Key::Down:
+            if (count > 0) {
+                st.highlight = ev.key == Key::Up ? (st.highlight + count - 1) % count : (st.highlight + 1) % count;
+                st.moved = true;
+                st.keyboard = true;
+            }
+            return true;
+        case Key::Escape:
+            event.action = PopupAction::Close;
+            return true;
+        case Key::Enter:
+            if (count == 0 || !(enterPicks || st.moved)) return false;
+            event.action = PopupAction::Pick;
+            event.index = st.highlight;
+            return true;
+        default:
+            return false;
+        }
+    });
+    return event;
+}
+
+void ResetPopupList(Context& ctx, std::string_view id) {
+    PopupListState& st = ctx.State<PopupListState>(ctx.MakeId(id));
+    st.highlight = 0;
+    st.moved = false;
+    st.keyboard = true;
+}
+
+PopupEvent PopupList(Context& ctx, std::string_view idLabel, const std::vector<std::string>& items, RectF anchor,
+                     std::string_view emptyText) {
+    const Tokens& t = T(ctx);
+    const Id id = ctx.MakeId(idLabel);
+    PopupListState& st = ctx.State<PopupListState>(id);
+    const int count = static_cast<int>(items.size());
+    st.highlight = count > 0 ? std::min(std::max(st.highlight, 0), count - 1) : 0;
+    PopupEvent event;
+    if (count == 0 && emptyText.empty()) return event;
+
+    const float rowH = static_cast<float>(t.spacing.popupRowHeight);
+    const float border = static_cast<float>(std::max(0, t.popups.borderWidth));
+    const float gap = static_cast<float>(t.spacing.xxs);
+    const int shown = std::max(count, 1);
+    const float below = ctx.Height() - (anchor.Bottom() + gap) - border * 2;
+    const float above = anchor.y - gap - border * 2;
+    int rows = std::min(shown, kPopupListRows);
+    const bool down = below >= rows * rowH || below >= above;
+    rows = std::max(1, std::min(rows, static_cast<int>((down ? below : above) / rowH)));
+    const float h = rows * rowH + 2 * border;
+    const float w = std::min(kPopupListWidth, ctx.Width());
+    const float x = Clampf(anchor.x, 0, std::max(0.0f, ctx.Width() - w));
+    const RectF popup{x, down ? anchor.Bottom() + gap : anchor.y - gap - h, w, h};
+    const RectF list = Inset(popup, border);
+
+    ctx.PushLayer(ctx.CurrentLayer() + 1);
+    ctx.PushId(id);
+    ctx.Block(ctx.WindowRect());
+    st.scroll.SetMax(shown * rowH - list.h);
+    float pixels = 0;
+    const float notches = ctx.ConsumeWheel(list, pixels);
+    if (notches != 0) st.scroll.AddNotches(notches, ctx.NowMs());
+    if (pixels != 0) st.scroll.AddPixels(pixels);
+    if (st.keyboard) {
+        const float top = st.highlight * rowH;
+        const float target = st.scroll.Target();
+        if (top < target) st.scroll.JumpTo(top);
+        else if (top + rowH > target + list.h) st.scroll.JumpTo(top + rowH - list.h);
+        st.keyboard = false;
+    }
+    if (st.scroll.Animating(ctx.NowMs())) ctx.RequestAnimation();
+    const float offset = st.scroll.Value(ctx.NowMs(), ctx.Scale());
+    // Hover moves the highlight only when the pointer moves, so keys work under a still one.
+    bool pointerMoved = false;
+    for (const InputEvent& ev : ctx.Events()) pointerMoved |= ev.type == InputEvent::Type::PointerMove;
+
+    const float radius = static_cast<float>(t.radius);
+    const float padX = static_cast<float>(t.spacing.controlPaddingX);
+    ctx.FillRoundRect(popup, radius, t.popups.background);
+    ctx.PushClip(list);
+    if (count == 0) {
+        ctx.DrawTextInRect(emptyText, Inset(RectF{list.x, list.y, list.w, rowH}, padX, 0), BodySize(ctx),
+                           t.colors.mutedText);
+    }
+    const int first = std::max(0, static_cast<int>(offset / rowH));
+    for (int i = first; i < count; i++) {
+        const RectF r{list.x, list.y + i * rowH - offset, list.w, rowH};
+        if (r.y >= list.Bottom()) break;
+        const Interaction rowIn = ctx.Interact(ctx.MakeId(static_cast<uint64_t>(i)), r);
+        if (rowIn.hovered) {
+            if (pointerMoved) st.highlight = i;
+            ctx.SetCursor(Cursor::Hand);
+        }
+        if (rowIn.clicked) {
+            event.action = PopupAction::Pick;
+            event.index = i;
+        }
+        if (i == st.highlight) ctx.FillRect(r, t.menu.selectedBackground);
+        const Rgba color = i == st.highlight ? t.menu.selectedText : t.popups.text;
+        ctx.DrawTextInRect(items[static_cast<size_t>(i)], Inset(r, padX, 0), BodySize(ctx), color);
+    }
+    ctx.PopClip();
+    if (border > 0) ctx.StrokeRoundRect(popup, radius, border, t.popups.border);
+    const Interaction outside = ctx.Interact(ctx.MakeId("outside"), ctx.WindowRect());
+    if (outside.pressed && event.action == PopupAction::None) event.action = PopupAction::Close;
+    ctx.PopId();
+    ctx.PopLayer();
+    return event;
 }
 
 // ---- Text fields ----

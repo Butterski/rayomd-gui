@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // The interface icons: stroked SVG paths from Omawrite and Hype (MIT, third_party/omarchy/), and
-// three window-control icons of ours, rasterized into alpha masks per device size.
+// four of ours (the window controls and insert), rasterized into alpha masks per device size.
 #pragma once
 
 #include <cstddef>
@@ -10,8 +10,8 @@
 
 namespace rgui::ui {
 
-enum class Icon : uint8_t { Open, Save, Export, Options, ChevronDown, Check, Close, Maximize, Minimize };
-inline constexpr int kIconCount = 9;
+enum class Icon : uint8_t { Open, Save, Export, Options, ChevronDown, Check, Close, Maximize, Minimize, Insert };
+inline constexpr int kIconCount = 10;
 
 // An icon's source: the path in a `grid` x `grid` box, stroked `stroke` grid units wide with
 // round caps and joins.
