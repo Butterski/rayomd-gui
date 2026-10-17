@@ -50,8 +50,8 @@ constexpr size_t kMaxDroppedImageBytes = size_t(64) << 20;
 
 // Copies the image at `source` into the `images` folder beside `document` (made when missing):
 // read with ReadRegularFile (at most kMaxDroppedImageBytes), written with WriteMode::NewFile under
-// its name made safe for a Markdown link (ASCII letters, digits, `.`, `-`, `_` and non-ASCII
-// UTF-8 kept, anything else `-`, the extension in lower case), as `name-2.png`, `name-3.png` and on
+// its name made safe for a Markdown link (ASCII letters, digits, `.`, `-`, `_` and well-formed
+// UTF-8 kept, any other byte `-`, the extension in lower case), as `name-2.png`, `name-3.png` and on
 // when the name is taken; an existing file is never replaced. An image that is already in that
 // folder under that name is linked as it is. Fills `copied` (not its id or documentPath).
 void CopyImageBeside(const std::filesystem::path& source, const std::filesystem::path& document, ImageCopied& copied);

@@ -1225,11 +1225,16 @@ RGUI_TEST("app.image_drop") {
     CHECK_EQ(std::string(w.Editor().Text()), std::string("Text\n![Screen-Shot](images/Screen-Shot.png)"));
     CHECK_EQ(ReadFile(h.dir / "images" / "Screen-Shot.png"), std::string("not really a png"));
     CHECK(w.Doc().modified);
-    // Once more: a new name, one undo group each.
+    // Once more: a new name, one undo group each. A selection made while it copies stays: the
+    // link goes in at the caret.
     CHECK(h.Settle());
     h.app->OnDropFile(picture.u8string());
+    w.Editor().Select(0, 4);
     CHECK(h.RunUntil([&] { return StartsWith(w.ShownStatus(), "Copied "); }));
-    CHECK(std::string(w.Editor().Text()).find("](images/Screen-Shot-2.png)") != std::string::npos);
+    CHECK_EQ(std::string(w.Editor().Text()),
+             std::string("Text![Screen-Shot](images/Screen-Shot-2.png)\n![Screen-Shot](images/Screen-Shot.png)"));
+    CHECK_EQ(w.Editor().Caret(), size_t(44));
+    CHECK(!w.Editor().HasSelection());
     CHECK(fs::exists(h.dir / "images" / "Screen-Shot-2.png"));
     CHECK(w.Editor().Undo());
     CHECK_EQ(std::string(w.Editor().Text()), std::string("Text\n![Screen-Shot](images/Screen-Shot.png)"));
@@ -1244,6 +1249,37 @@ RGUI_TEST("app.image_drop") {
     CHECK(w.Doc().modified);
     h.app->OnDropFile(other.u8string());
     CHECK(w.UnsavedPromptOpen());
+}
+
+// A copy that finishes after another document was opened (or a new one started) keeps the file
+// and puts no link into the document now shown.
+RGUI_TEST("app.image_drop_document_changed") {
+    Harness h("image_drop_document_changed");
+    rgui::test::CancellableBuild engine;
+    h.build = engine.Function();
+    h.Start("ui.theme=tokyo-night\n");
+    rgui::MainWindow& w = h.Window();
+    const fs::path md = h.dir / "notes.md";
+    RayoMd::File::WriteAll(md, "Text\n");
+    w.Open(md.u8string());
+    CHECK(h.WaitLoaded());
+    CHECK(h.Settle());
+    // No preview status comes in between.
+    engine.hold = true;
+    const fs::path picture = h.dir / "shot.png";
+    RayoMd::File::WriteAll(picture, "png");
+    h.app->OnDropFile(picture.u8string());
+    h.KeyDown(Key::N, rgui::kModCtrl);   // unmodified: a new document at once
+    CHECK(w.Doc().filePath.empty());
+    StatusKind kind = StatusKind::Info;
+    CHECK(h.RunUntil([&] { return StartsWith(w.ShownStatus(), "Copied "); }));
+    CHECK_EQ(w.ShownStatus(&kind),
+             std::string("Copied shot.png into images/; the document changed, so no link was inserted"));
+    CHECK(kind == StatusKind::Warning);
+    CHECK(w.Editor().Text().empty());
+    CHECK(!w.Doc().modified);
+    CHECK_EQ(ReadFile(h.dir / "images" / "shot.png"), std::string("png"));
+    engine.hold = false;
 }
 
 } // namespace

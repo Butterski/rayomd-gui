@@ -3,7 +3,10 @@
 
 #include "app/platform.h"
 #include "app/safefile.h"
+#include "common/text_utils.h"
 
+#include <cstdint>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -18,20 +21,38 @@ constexpr int kMaxNameTries = 999;
 // The safe name's stem keeps at most this many bytes (cut at a code point).
 constexpr size_t kMaxStemBytes = 100;
 
-bool SafeByte(char c) {
-    const unsigned char u = static_cast<unsigned char>(c);
-    return u >= 0x80 || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
-           c == '-' || c == '_';
+bool SafeAscii(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' ||
+           c == '_';
 }
 
-std::string SafeStem(std::string stem) {
+// `name` with what a Markdown link takes as it is: ASCII letters, digits, `.`, `-`, `_` and
+// well-formed UTF-8 sequences; any other byte becomes `-` (a Latin-1 `\xE9` too, which the
+// editor would show as U+FFFD, so the link would not name the file).
+std::string SafeName(std::string_view name) {
+    std::string out;
+    out.reserve(name.size());
+    for (size_t i = 0; i < name.size();) {
+        const unsigned char u = static_cast<unsigned char>(name[i]);
+        uint32_t cp = 0;
+        size_t length = 1;
+        if (u >= 0x80 && RayoMd::Text::DecodeUtf8(name, i, cp, length)) {
+            out.append(name.data() + i, length);
+            i += length;
+            continue;
+        }
+        out += SafeAscii(name[i]) ? name[i] : '-';
+        i++;
+    }
+    return out;
+}
+
+std::string SafeStem(std::string_view name) {
+    std::string stem = SafeName(name);
     if (stem.size() > kMaxStemBytes) {
         size_t keep = kMaxStemBytes;
         while (keep > 0 && (static_cast<unsigned char>(stem[keep]) & 0xC0) == 0x80) keep--;
         stem.resize(keep);
-    }
-    for (char& c : stem) {
-        if (!SafeByte(c)) c = '-';
     }
     // No hidden file.
     if (!stem.empty() && stem[0] == '.') stem[0] = '-';
@@ -49,10 +70,9 @@ void CopyImageBeside(const fs::path& source, const fs::path& document, ImageCopi
         copied.status = "Cannot copy " + shown + ": " + error;
         return;
     }
-    std::string extension = source.extension().u8string();
+    std::string extension = SafeName(source.extension().u8string());
     for (char& c : extension) {
         if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-        else if (!SafeByte(c)) c = '-';
     }
     const std::string stem = SafeStem(source.stem().u8string());
     const fs::path folder = document.parent_path() / "images";

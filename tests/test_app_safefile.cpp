@@ -234,6 +234,21 @@ RGUI_TEST("app.safefile.image_copy") {
     CHECK_EQ(copied.status, std::string("Cannot copy big.png: too large"));
     CHECK(!fs::exists(dir / "images" / "big.png"));
 #ifndef _WIN32
+    // A name that is not UTF-8 (Latin-1 `caf\xE9`): the byte becomes `-` in the file's name as in
+    // its link, so the link names the file; UTF-8 names stay as they are.
+    CHECK(RayoMd::File::WriteAll(dir / "elsewhere" / "caf\xE9.png", "latin"));
+    rgui::CopyImageBeside(dir / "elsewhere" / "caf\xE9.png", document, copied);
+    CHECK(copied.ok);
+    CHECK_EQ(copied.markdown, std::string("![caf-](images/caf-.png)"));
+    CHECK_EQ(ReadFile(dir / "images" / "caf-.png"), std::string("latin"));
+    CHECK(RayoMd::File::WriteAll(dir / "elsewhere" / "za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87 \xC3.png", "utf8"));
+    rgui::CopyImageBeside(dir / "elsewhere" / "za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87 \xC3.png", document, copied);
+    CHECK_EQ(copied.markdown, std::string("![za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87--](images/za\xC5\xBC\xC3\xB3\xC5\x82\xC4\x87--.png)"));
+    // Already in images/ under a name that is not UTF-8: copied under the safe name, not linked.
+    CHECK(RayoMd::File::WriteAll(dir / "images" / "x\xE9.svg", "<svg/>"));
+    rgui::CopyImageBeside(dir / "images" / "x\xE9.svg", document, copied);
+    CHECK_EQ(copied.markdown, std::string("![x-](images/x-.svg)"));
+    CHECK_EQ(ReadFile(dir / "images" / "x-.svg"), std::string("<svg/>"));
     // A link planted at the name is passed over, its target untouched.
     const fs::path victim = dir / "victim.txt";
     CHECK(RayoMd::File::WriteAll(victim, "victim\n"));

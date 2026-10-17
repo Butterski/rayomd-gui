@@ -864,8 +864,8 @@ void MainWindow::OnImageCopied(ImageCopied copied) {
         // Another document is open now: the copy stays, the link is not put into it.
         SetStatus(copied.status + "; the document changed, so no link was inserted", StatusKind::Warning);
     } else {
-        const size_t start = editor_.SelectionStart();
-        editor_.Replace(start, editor_.SelectionEnd() - start, copied.markdown, copied.markdown.size());
+        // At the caret; a selection made since the drop stays text.
+        editor_.Replace(editor_.Caret(), 0, copied.markdown, copied.markdown.size());
         SetStatus(std::move(copied.status), StatusKind::Info);
     }
     if (hooks_.requestFrame) hooks_.requestFrame();
