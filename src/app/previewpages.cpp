@@ -150,27 +150,28 @@ void PreviewPages::LayOutStrips(PageSlot& slot, int widthPx, int count) {
     slot.strips.resize(static_cast<size_t>(count));
 }
 
-void PreviewPages::WantPiece(int page, int widthPx, int strip, std::vector<Job>& jobs, std::vector<CacheKey>& wanted) {
+bool PreviewPages::WantPiece(int page, int widthPx, int strip, std::vector<Job>& jobs, std::vector<CacheKey>& wanted) {
     PageSlot& slot = pages_[static_cast<size_t>(page)];
     const CacheKey key{slot.key, widthPx, strip};
     wanted.push_back(key);
-    if (strip < 0 ? Current(page, widthPx) : StripCurrent(slot, strip)) return;
+    if (strip < 0 ? Current(page, widthPx) : StripCurrent(slot, strip)) return false;
     std::shared_ptr<const gfx::Image> image;
     if (Lookup(key, image)) {
         Assign(slot, key, std::move(image));
-        return;
+        return true;
     }
     for (const InFlight& running : inFlight_) {
-        if (running.key == key && !running.cancel->load()) return;
+        if (running.key == key && !running.cancel->load()) return false;
     }
     for (const Job& job : jobs) {
-        if (job.key == key.pageKey && job.widthPx == widthPx && job.strip == strip) return;
+        if (job.key == key.pageKey && job.widthPx == widthPx && job.strip == strip) return false;
     }
     jobs.push_back({pdf_, page, widthPx, strip, slot.key, generation_});
+    return false;
 }
 
-void PreviewPages::Request(const std::vector<Want>& pages, int widthPx) {
-    if (!pdf_ || widthPx < 1) return;
+bool PreviewPages::Request(const std::vector<Want>& pages, int widthPx) {
+    if (!pdf_ || widthPx < 1) return false;
     wantedWidth_ = widthPx;
     for (const Want& want : pages) {
         if (want.page < 0 || want.page >= PageCount()) continue;
@@ -184,7 +185,7 @@ void PreviewPages::Request(const std::vector<Want>& pages, int widthPx) {
     std::vector<CacheKey> wanted;
     // The strips next to those in view: after everything in view.
     std::vector<std::pair<int, int>> later;
-    bool wake = false;
+    bool wake = false, assigned = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const Want& want : pages) {
@@ -192,7 +193,7 @@ void PreviewPages::Request(const std::vector<Want>& pages, int widthPx) {
             PageSlot& slot = pages_[static_cast<size_t>(want.page)];
             const int count = StripCount(slot.widthPt, slot.heightPt, widthPx);
             if (count == 0) {
-                WantPiece(want.page, widthPx, -1, jobs, wanted);
+                assigned |= WantPiece(want.page, widthPx, -1, jobs, wanted);
                 continue;
             }
             LayOutStrips(slot, widthPx, count);
@@ -202,8 +203,8 @@ void PreviewPages::Request(const std::vector<Want>& pages, int widthPx) {
             const int64_t middle = (int64_t(std::max(want.top, 0)) + std::max(want.bottom, want.top)) / 2;
             const int center = static_cast<int>(std::min<int64_t>(std::max<int64_t>(middle / kStripRows, first), last));
             for (int d = 0; center - d >= first || center + d <= last; d++) {
-                if (center + d <= last) WantPiece(want.page, widthPx, center + d, jobs, wanted);
-                if (d > 0 && center - d >= first) WantPiece(want.page, widthPx, center - d, jobs, wanted);
+                if (center + d <= last) assigned |= WantPiece(want.page, widthPx, center + d, jobs, wanted);
+                if (d > 0 && center - d >= first) assigned |= WantPiece(want.page, widthPx, center - d, jobs, wanted);
             }
             if (want.bottom > want.top) {
                 if (first > 0) later.push_back({want.page, first - 1});
@@ -222,7 +223,7 @@ void PreviewPages::Request(const std::vector<Want>& pages, int widthPx) {
                 if (s < first - 2 || s > last + 2) slot.strips[static_cast<size_t>(s)] = StripSlot();
             }
         }
-        for (const auto& [page, strip] : later) WantPiece(page, widthPx, strip, jobs, wanted);
+        for (const auto& [page, strip] : later) assigned |= WantPiece(page, widthPx, strip, jobs, wanted);
         // An older build's render nobody wants any more is abandoned.
         for (const InFlight& running : inFlight_) {
             if (running.generation >= generation_) continue;
@@ -234,6 +235,7 @@ void PreviewPages::Request(const std::vector<Want>& pages, int widthPx) {
         wake = !queue_.empty();
     }
     if (wake) wake_.notify_all();
+    return assigned;
 }
 
 const gfx::Image* PreviewPages::Image(int page) const {

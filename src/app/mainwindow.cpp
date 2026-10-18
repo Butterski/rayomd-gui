@@ -751,9 +751,11 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
             if (visible.back() + d < count) neighbour(visible.back() + d);
         }
     }
-    preview_->Request(wanted_, widthPx);
+    // Images the cache had are drawn in the next frame: this one is not settled.
+    const bool assigned = preview_->Request(wanted_, widthPx);
+    if (assigned) Dirty();
 
-    bool current = count > 0 && !visible.empty() && !previewDirty_ && !previewInFlight_ && !loading_ &&
+    bool current = count > 0 && !visible.empty() && !assigned && !previewDirty_ && !previewInFlight_ && !loading_ &&
                    shownGeneration_ == requestedGeneration_ && preview_->Generation() == shownGeneration_;
     for (size_t v = 0; v < shown; v++) {
         const PreviewPages::Want& w = wanted_[v];

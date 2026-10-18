@@ -91,11 +91,12 @@ public:
     // Wants `pages` (the most urgent first) at `widthPx` device pixels across: whole pages, and
     // of pages drawn in strips the strips holding the rows in view (the one nearest their middle
     // first), after all of them the strip above and below those. Pages and strips whose image is
-    // in the cache get it now; the others are queued for the preview threads in this order,
+    // in the cache get it now (true: draw them again, the frame drawn before this call shows
+    // older images); the others are queued for the preview threads in this order,
     // replacing whatever was queued before (whatever is no longer wanted is dropped before it
     // starts). Renders of an older build that are not wanted now are abandoned
     // (pdf::RenderEnvironment::cancel): typing never waits behind a page no longer shown.
-    void Request(const std::vector<Want>& pages, int widthPx);
+    bool Request(const std::vector<Want>& pages, int widthPx);
 
     // What to draw for `page`: its image, or while that renders the one it showed before;
     // nullptr when it has none yet (or its render failed: a blank page). A page drawn in strips
@@ -191,9 +192,9 @@ private:
     // Lays the page's strips out for `widthPx` (`count` of them): those of another width go
     // under the new ones while they have images.
     static void LayOutStrips(PageSlot& slot, int widthPx, int count);
-    // Wants (page, widthPx, strip) of the shown build: assigned from the cache, or added to `jobs`
-    // unless being drawn or queued; its key goes to `wanted`. Needs mutex_.
-    void WantPiece(int page, int widthPx, int strip, std::vector<Job>& jobs, std::vector<CacheKey>& wanted);
+    // Wants (page, widthPx, strip) of the shown build: assigned from the cache (true), or added to
+    // `jobs` unless being drawn or queued; its key goes to `wanted`. Needs mutex_.
+    bool WantPiece(int page, int widthPx, int strip, std::vector<Job>& jobs, std::vector<CacheKey>& wanted);
 
     Platform& platform_;
     const text::FontIndex* fontIndex_;
