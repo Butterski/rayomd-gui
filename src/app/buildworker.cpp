@@ -4,6 +4,8 @@
 #include "app/exportsettings.h"
 #include "app/platform.h"
 #include "app/safefile.h"
+#include "common/file_io.h"
+#include "core/book.h"
 #include "pdf/reader.h"
 #include "ui/markdownedit.h"
 
@@ -94,7 +96,7 @@ void BuildWorker::RequestPreview(std::string utf8, std::string sourcePath, TinyP
 }
 
 void BuildWorker::RequestExport(std::string utf8, std::string sourcePath, TinyPdf::PdfOptions options,
-                                std::string outputPath, bool openAfter, std::string themeFile) {
+                                std::string outputPath, bool openAfter, std::string themeFile, int linkDepth) {
     Job job;
     job.utf8 = std::move(utf8);
     job.sourcePath = std::move(sourcePath);
@@ -102,6 +104,7 @@ void BuildWorker::RequestExport(std::string utf8, std::string sourcePath, TinyPd
     job.outputPath = std::move(outputPath);
     job.openAfter = openAfter;
     job.themeFile = std::move(themeFile);
+    job.linkDepth = linkDepth;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         exports_.push_back(std::move(job));
@@ -132,13 +135,61 @@ void BuildWorker::CancelPreview() {
     });
 }
 
+void BuildWorker::SetOnEmbedsChanged(std::function<void()> onChanged) {
+    callbacks_->onEmbedsChanged = std::move(onChanged);
+}
+
+void BuildWorker::SetFocused(bool focused) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (focused == focused_) return;
+        focused_ = focused;
+        checkEmbeds_ = checkEmbeds_ || focused;
+    }
+    wake_.notify_one();
+}
+
+void BuildWorker::CheckEmbeds() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        checkEmbeds_ = true;
+    }
+    wake_.notify_one();
+}
+
+void BuildWorker::CheckWatched() {
+    if (embedsReported_ || embeds_.Empty() || !embeds_.Changed()) return;
+    embedsReported_ = true;
+    platform_.PostToUi([callbacks = callbacks_] {
+        if (callbacks->alive && callbacks->onEmbedsChanged) callbacks->onEmbedsChanged();
+    });
+}
+
 void BuildWorker::Run() {
     for (;;) {
         Job job;
         bool isExport = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            wake_.wait(lock, [this] { return stop_ || !exports_.empty() || preview_.has_value(); });
+            for (;;) {
+                if (stop_ || !exports_.empty() || preview_.has_value()) break;
+                if (checkEmbeds_) {
+                    checkEmbeds_ = false;
+                    lock.unlock();
+                    CheckWatched();
+                    lock.lock();
+                    continue;
+                }
+                // Embedded notes to watch, unchanged so far, in a focused window: a look every
+                // kEmbedCheckMs. Otherwise the worker sleeps until asked.
+                if (focused_ && !embeds_.Empty() && !embedsReported_) {
+                    if (wake_.wait_for(lock, std::chrono::milliseconds(kEmbedCheckMs)) == std::cv_status::timeout) {
+                        checkEmbeds_ = true;
+                    }
+                } else {
+                    wake_.wait(lock);
+                }
+            }
             if (stop_) return;
             if (!exports_.empty()) {
                 job = std::move(exports_.front());
@@ -192,6 +243,9 @@ void BuildWorker::RunPreview(Job& job) {
     PreviewReady ready;
     ready.themeFile = job.themeFile;
     ready.themeError = ApplyTheme(job);
+    // The notes it embeds, stamped before the build reads them: a later edit shows as a change.
+    embeds_.Update(job.utf8, job.options);
+    embedsReported_ = false;
     std::string bytes;
     // Where each top-level block is laid out, for the source sync; fake builds leave it empty.
     std::vector<TinyPdf::SourceBlock> blocks;
@@ -259,13 +313,33 @@ void BuildWorker::RunExport(Job& job) {
     finished.themeFile = job.themeFile;
     finished.themeError = ApplyTheme(job);
     std::string bytes;
-    const TinyPdf::BuildResult result = build_(job.utf8, job.options, bytes);
+    TinyPdf::BuildResult result;
+    std::string bookError;
+    if (job.linkDepth > 0 && !job.sourcePath.empty()) {
+        // The book of the note and the notes it links to; the note's text is the editor's.
+        TinyPdf::Book book;
+        size_t leftOut = 0;
+        if (RayoMd::Book::ReadLinkedBook(RayoMd::File::PathFromUtf8(job.sourcePath), job.options, job.linkDepth, book,
+                                         leftOut, bookError) &&
+            !book.chapters.empty()) {
+            book.chapters[0].markdown = job.utf8;
+            finished.linkedNotes = book.chapters.size() - 1;
+            finished.leftOut = leftOut;
+            result = TinyPdf::BuildBookPdf(book, job.options, bytes);
+        } else if (bookError.empty()) {
+            bookError = "the note cannot be read";
+        }
+    } else {
+        result = build_(job.utf8, job.options, bytes);
+    }
     finished.path = job.outputPath;
     finished.pages = result.pages;
     finished.missingCharacters = result.missingCharacters;
     finished.failedImages = result.failedImages;
     const fs::path output = fs::u8path(job.outputPath);
-    if (!result.Ok()) {
+    if (!bookError.empty()) {
+        finished.message = "Export failed: " + bookError;
+    } else if (!result.Ok()) {
         finished.message = std::string("Export failed: ") + BuildErrorText(result.error);
     } else {
         if (!WriteFileAtomically(output, bytes, WriteMode::Output, nullptr)) {
@@ -278,6 +352,14 @@ void BuildWorker::RunExport(Job& job) {
     if (finished.ok) {
         finished.message = "Exported " + output.filename().u8string() + " (" + Pages(result.pages) + ", " +
                            FormatMs(finished.ms) + ")";
+        if (job.linkDepth > 0 && !job.sourcePath.empty()) {
+            finished.message += finished.linkedNotes == 0 ? std::string(" with no linked notes")
+                                : " with " + std::to_string(finished.linkedNotes) +
+                                      (finished.linkedNotes == 1 ? " linked note" : " linked notes");
+            if (finished.leftOut > 0) finished.message += "; " + std::to_string(finished.leftOut) + " left out";
+        } else if (job.linkDepth > 0) {
+            finished.message += "; save the document to add its linked notes";
+        }
     }
     const bool open = finished.ok && job.openAfter;
     Platform* platform = &platform_;

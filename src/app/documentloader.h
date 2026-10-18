@@ -3,7 +3,8 @@
 // 128 MiB of text and its CRLF pass, or a reversible PDF's recovery, up to 256 MiB through
 // PdfSource::Inspect) and counts the words and lines, so the window keeps drawing while a file
 // opens. It also copies the images dropped on a saved document into the `images` folder beside it
-// (CopyImageBeside). Results go back through Platform::PostToUi.
+// (CopyImageBeside), and lists the note names under a folder for `[[` completion (ListNoteNames).
+// Results go back through Platform::PostToUi.
 #pragma once
 
 #include "app/document.h"
@@ -19,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace rgui {
 
@@ -45,6 +47,11 @@ struct ImageCopied {
     std::string status;
 };
 
+struct NotesListed {
+    std::string folder;               // as requested (UTF-8)
+    std::vector<std::string> names;   // ListNoteNames of it
+};
+
 // The largest image CopyImageBeside copies.
 constexpr size_t kMaxDroppedImageBytes = size_t(64) << 20;
 
@@ -60,12 +67,14 @@ class DocumentLoader {
 public:
     using Callback = std::function<void(DocumentLoaded)>;
     using ImageCallback = std::function<void(ImageCopied)>;
+    using NotesCallback = std::function<void(NotesListed)>;
     // Copies waiting at most; more are refused.
     static constexpr size_t kMaxPendingCopies = 32;
 
-    // Starts the thread. `onLoaded` and `onImage` run on the UI thread, never after the loader is
-    // destroyed. `platform` must outlive the loader.
-    DocumentLoader(Platform& platform, Callback onLoaded, ImageCallback onImage = nullptr);
+    // Starts the thread. `onLoaded`, `onImage` and `onNotes` run on the UI thread, never after the
+    // loader is destroyed. `platform` must outlive the loader.
+    DocumentLoader(Platform& platform, Callback onLoaded, ImageCallback onImage = nullptr,
+                   NotesCallback onNotes = nullptr);
     // Drops a pending request and joins the thread (after the file it reads, if any).
     ~DocumentLoader();
     DocumentLoader(const DocumentLoader&) = delete;
@@ -78,6 +87,9 @@ public:
     // before it; the open waits for them. Returns the id its ImageCopied carries, or 0 when
     // kMaxPendingCopies are waiting already.
     uint64_t CopyImage(std::string source, std::string documentPath);
+    // Lists the note names under `folder` (UTF-8) on the thread, after the copies and the open
+    // asked for; replaces a listing not yet started.
+    void ListNotes(std::string folder);
 
 private:
     struct Request {
@@ -90,6 +102,7 @@ private:
         bool alive = true;  // UI thread only
         Callback onLoaded;
         ImageCallback onImage;
+        NotesCallback onNotes;
     };
 
     void Run();
@@ -100,6 +113,7 @@ private:
     std::condition_variable wake_;
     std::optional<Request> pending_;  // guarded by mutex_
     std::deque<Request> copies_;      // guarded by mutex_
+    std::optional<std::string> notes_;   // guarded by mutex_: the folder to list
     bool stop_ = false;               // guarded by mutex_
     uint64_t nextId_ = 0;             // UI thread only
     std::thread thread_;

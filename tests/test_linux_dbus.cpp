@@ -1472,6 +1472,25 @@ RGUI_TEST("linux.dbus_portal_file_chooser") {
           std::string::npos);
     fake.errorReply = false;
 
+    // The vault: OpenFile with `directory` and no filters, the folder itself as current_folder.
+    char vaultTemp[] = "/tmp/rgui-portal-XXXXXX";
+    CHECK(mkdtemp(vaultTemp) != nullptr);
+    const std::string vault = vaultTemp;
+    fake.responseCode = 0;
+    fake.uri = "file://" + vault;
+    r = show(rgui::FileDialog::ChooseVault, vault + "/");
+    CHECK_EQ(r.kind, rgui::FileDialogResult::Chosen);
+    CHECK_EQ(r.path, vault);
+    CHECK_EQ(fake.member, std::string("OpenFile"));
+    CHECK_EQ(fake.title, std::string("Choose vault folder"));
+    std::string vaultBytes;
+    for (char c : vault) vaultBytes += std::to_string(static_cast<unsigned char>(c)) + ",";
+    vaultBytes += "0";
+    CHECK_EQ(fake.options, std::string("[{\"handle_token\":<s>\"") + fake.token +
+                               "\"},{\"modal\":<b>true},{\"directory\":<b>true},{\"current_folder\":<ay>[" +
+                               vaultBytes + "]}]");
+    rmdir(vaultTemp);
+
     // A portal that picks its own request path: the Response there is still followed.
     fake.otherHandle = true;
     fake.uri = "file:///tmp/old.md";

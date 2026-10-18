@@ -74,7 +74,8 @@ public:
     // The portal's unique name as far as we know it; empty when it is not running.
     const std::string& PortalOwner() const { return portalOwner_; }
 
-    // The portal's OpenFile (OpenDocument, ChooseTheme) or SaveFile (SaveMarkdown, ExportPdf).
+    // The portal's OpenFile (OpenDocument, ChooseTheme; ChooseVault with `directory`, its
+    // suggestion the folder itself) or SaveFile (SaveMarkdown, ExportPdf).
     // Unavailable without a bus or when the call fails; Cancelled for Response 1; Failed for
     // any other response or a result without a usable file URI.
     void ShowFileDialog(FileDialog kind, const std::string& suggestedPath,

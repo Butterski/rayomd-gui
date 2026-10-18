@@ -3,7 +3,8 @@
 // insert list (Ctrl+I, the footer's button: page break, table of contents, table, callout with its
 // types, Mermaid flowchart and sequence diagram, math block, code block, front matter, rule) and
 // the completions that open as Markdown is typed: fence names after ```, alert types after `> [!`
-// and, when the caller turns wiki links on, the document's headings after `[[`.
+// and, when the caller turns wiki links on, the document's headings (`#Heading`) and the note
+// names around it after `[[`, the note names after `![[`.
 //
 // The open list takes Up, Down, Enter and Escape before the editor's frame; the insert list also
 // takes the typed text as its filter. A completion filters by the text typed after its trigger,
@@ -11,7 +12,7 @@
 // Down, else it stays a line break. A completion without matches hides until the filter matches
 // again. Every insertion is one undo group (TextEditor::Replace). Each frame reads at most a
 // line's first kLinePrefixBytes and the filter's bytes, never the document; the headings come
-// from the preview build's worker.
+// from the preview build's worker, the note names from the document loader's thread.
 #pragma once
 
 #include "ui/markdownedit.h"
@@ -29,12 +30,22 @@ class EditorPopup {
 public:
     enum class Mode : uint8_t { Closed, Insert, Callout, Completion };
 
-    // `[[` completes the document's headings (off by default; the caller turns it on).
+    // `[[` and `![[` complete (off by default; the caller turns it on).
     void SetWikiLinks(bool on) { wikiLinks_ = on; }
     bool WikiLinks() const { return wikiLinks_; }
     // The document's headings, from the last preview build.
     void SetHeadings(std::vector<std::string> headings);
     const std::vector<std::string>& Headings() const { return headings_; }
+    // The note names (ListNoteNames), shown after the headings.
+    void SetNotes(std::vector<std::string> notes);
+    const std::vector<std::string>& Notes() const { return notes_; }
+    // Whether a wiki-link completion opened since the last call (the caller then refreshes the
+    // note names); clears it.
+    bool TakeWikiLinkOpened() {
+        const bool opened = wikiLinkOpened_;
+        wikiLinkOpened_ = false;
+        return opened;
+    }
 
     // Opens the insert list at the caret.
     void OpenInsert();
@@ -57,6 +68,8 @@ public:
 
 private:
     void OpenCompletion(ui::markdown::Completion kind, size_t start, ui::TextEditor& editor, bool fenceTemplate);
+    // A wiki-link completion's candidates: `#` and the headings (not after `![[`), then the notes.
+    void WikiLinkCandidates();
     // The completion's typed filter; false when the text no longer belongs to it.
     bool CompletionFilter(const ui::TextEditor& editor, std::string& filter) const;
     void Filter(const std::string& filter);
@@ -74,6 +87,9 @@ private:
     bool handled_ = false;          // this frame the list took text or keys that changed things
     uint64_t revisionBefore_ = 0;   // the editor's revision before its frame
     std::vector<std::string> headings_;
+    std::vector<std::string> notes_;
+    bool wikiLinkOpened_ = false;
+    bool embed_ = false;            // the wiki-link completion follows `![[`
     // The candidates and, after the filter, the rows and their candidates' indices.
     std::vector<std::string> all_;
     std::vector<std::string> items_;

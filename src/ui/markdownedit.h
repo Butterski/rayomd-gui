@@ -57,7 +57,7 @@ bool IndentListItem(std::string_view line, size_t caret, bool outdent, TextEdit&
 enum class Completion : uint8_t { None, Fence, Alert, WikiLink };
 // What the line before the caret (its last bytes, at most kLinePrefixBytes) opens: a fence (```
 // after nothing but indentation), an alert (`[!` after `>` markers) or, when `wikiLinks`, a wiki
-// link (`[[`, not after `!` or another `[`).
+// link or embed (`[[` or `![[`, not after another `[`).
 Completion CompletionTrigger(std::string_view beforeCaret, bool wikiLinks);
 // The trigger's bytes ("```", "[!", "[[").
 std::string_view TriggerText(Completion kind);

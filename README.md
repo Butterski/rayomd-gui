@@ -183,7 +183,8 @@ page break, table of contents, table, callout (with GitHub's five types), Mermai
 sequence diagram, math block, code block, front matter and rule, each on lines of its own with the
 caret where you type next. Typing ```` ``` ```` at the start of a line lists the fence languages
 the PDF highlights (and `mermaid`, `math`), `> [!` the callout types and, with the Obsidian
-dialect, `[[` the document's headings; type to filter, Enter or a click picks, Escape closes. An
+dialect, `[[` the document's headings and the names of the notes in its vault (`![[` the note
+names alone); type to filter, Enter or a click picks, Escape closes. An
 image dropped on a saved document (PNG, JPEG or SVG) is copied into an `images` folder beside it,
 never over an existing file, and linked at the caret.
 
@@ -219,11 +220,20 @@ The engine's export options, in the panel on the right (`Ctrl+,`):
   `==highlights==`, `%%comments%%`, `[[wiki links]]` and `![[images]]`), style (Elegant, Modern,
   Tech), margins (also custom), page size (A4, A3, A5, Letter, Legal or custom, in landscape too)
   and a PDF theme file: company fonts, colours, header, footer and cover page.
+- **Embedded notes** (Obsidian): `![[Note]]` alone on a line prints the note (*Embeds: Content*)
+  or stays a link (*Link*); the preview builds again when an embedded note changes on disk.
+- **Vault:** the folder embedded and linked notes are found in, by path or by name; by default
+  the document's folder.
+- **Auto height:** with a custom page size, one long page as tall as its content, for screens.
+- **Footnotes:** at the end of the document, or at the foot of the page of their reference.
 - **Contents:** a table of contents with its depth, headings numbered 1, 1.1, 1.1.1 to a depth,
   a new page before each heading of the top levels, page numbers, code coloured as on GitHub, and
   ` ```mermaid ` blocks drawn as diagrams (flowcharts, sequence diagrams, pie charts).
 - **Output:** PDF/A-3b, PDF/UA-1, compression, faster image encoding, the Markdown source
   embedded, URL images (Windows), opening the PDF after export.
+- **Linked notes:** the export is a book of the note and the notes it links to, 1 to 3 links
+  deep; the status line says how many notes it added and how many it left out.
+- **Backlinks:** with linked notes, each note of the book ends with the notes that link to it.
 
 The options are remembered, with the window's size and the editor's text size.
 

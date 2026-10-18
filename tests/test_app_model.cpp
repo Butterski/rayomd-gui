@@ -8,6 +8,7 @@
 #include "app/buildworker.h"
 #include "app/document.h"
 #include "app/exportsettings.h"
+#include "app/notes.h"
 #include "common/file_io.h"
 #include "core/rayomd_pdf_source.h"
 #include "pdf/reader.h"
@@ -174,6 +175,42 @@ RGUI_TEST("app.exportsettings.mapping") {
     CHECK_EQ(options.pdfa, true);
     CHECK_EQ(options.toc, true);
     CHECK_EQ(options.sourcePath, std::string("/doc/a.md"));
+
+    // The options of notes and long pages.
+    CHECK(options.footnotes == TinyPdf::FootnotePlacement::End);
+    CHECK_EQ(options.embedsAsLinks, false);
+    CHECK(options.vaultRoot.empty());
+    CHECK_EQ(options.backlinks, false);
+    CHECK_EQ(settings.LinkDepth(), 0);
+    settings.footnotes = ExportSettings::kFootnotesPage;
+    settings.embeds = ExportSettings::kEmbedLink;
+    settings.vaultFolder = "/vault";
+    settings.backlinks = true;
+    options = settings.ToPdfOptions("/doc/a.md", false);
+    CHECK(options.footnotes == TinyPdf::FootnotePlacement::Page);
+    CHECK_EQ(options.embedsAsLinks, true);
+    CHECK_EQ(options.vaultRoot, std::string("/vault"));
+    CHECK_EQ(options.backlinks, false);   // only with linked notes
+    settings.linkedNotes = ExportSettings::kLinked2;
+    CHECK_EQ(settings.LinkDepth(), 2);
+    CHECK_EQ(settings.ToPdfOptions("/doc/a.md", false).backlinks, true);
+    CHECK_EQ(settings.ToPdfOptions("/doc/a.md", true).backlinks, false);   // never in a preview
+
+    // Auto height: the custom width, a nominal height of width x sqrt(2), no landscape swap.
+    settings.pageSize = ExportSettings::kCustomPage;
+    settings.customWidthMm = 210;
+    settings.customHeightMm = 100;
+    settings.landscape = true;
+    settings.autoHeight = true;
+    TinyPdf::PdfPageSize page = settings.ToPdfOptions("", true).pageSize;
+    CHECK(page.autoHeight);
+    CHECK_NEAR(page.width, 595.28, 0.005);
+    CHECK_NEAR(page.height, 595.28 * 1.41421356, 0.01);
+    // Only the custom size has it.
+    settings.pageSize = ExportSettings::kA4;
+    page = settings.ToPdfOptions("", true).pageSize;
+    CHECK(!page.autoHeight);
+    CHECK_EQ(page.width, 842.0);
 }
 
 RGUI_TEST("app.exportsettings.theme") {
@@ -216,6 +253,12 @@ RGUI_TEST("app.exportsettings.persist") {
     settings.landscape = true;
     settings.customWidthMm = 123.4;
     settings.customHeightMm = 432.1;
+    settings.autoHeight = true;
+    settings.footnotes = ExportSettings::kFootnotesPage;
+    settings.embeds = ExportSettings::kEmbedLink;
+    settings.vaultFolder = Utf8(dir / "Vault ż");
+    settings.linkedNotes = ExportSettings::kLinked3;
+    settings.backlinks = true;
     settings.toc = true;
     settings.tocDepth = 6;
     settings.numberHeadings = true;
@@ -249,6 +292,12 @@ RGUI_TEST("app.exportsettings.persist") {
     CHECK_EQ(loaded.landscape, true);
     CHECK_EQ(loaded.customWidthMm, settings.customWidthMm);
     CHECK_EQ(loaded.customHeightMm, settings.customHeightMm);
+    CHECK_EQ(loaded.autoHeight, true);
+    CHECK_EQ(loaded.footnotes, ExportSettings::kFootnotesPage);
+    CHECK_EQ(loaded.embeds, ExportSettings::kEmbedLink);
+    CHECK_EQ(loaded.vaultFolder, settings.vaultFolder);
+    CHECK_EQ(loaded.linkedNotes, ExportSettings::kLinked3);
+    CHECK_EQ(loaded.backlinks, true);
     CHECK_EQ(loaded.toc, true);
     CHECK_EQ(loaded.tocDepth, 6);
     CHECK_EQ(loaded.numberHeadings, true);
@@ -281,6 +330,9 @@ RGUI_TEST("app.exportsettings.persist") {
     edited.SetInt("export.numberDepth", 9);
     edited.SetInt("export.pageBreakBefore", 4);
     edited.SetInt("export.dialect", -1);
+    edited.SetInt("export.footnotes", 2);
+    edited.SetInt("export.embeds", 5);
+    edited.SetInt("export.linkedNotes", 4);
     edited.SetString("export.highlightCode", "maybe");
     loaded.Load(edited);
     CHECK_EQ(loaded.style, ExportSettings::kElegant);
@@ -296,6 +348,12 @@ RGUI_TEST("app.exportsettings.persist") {
     CHECK_EQ(loaded.highlightCode, true);
     CHECK_EQ(loaded.landscape, false);
     CHECK(loaded.themeFile.empty());
+    CHECK_EQ(loaded.footnotes, ExportSettings::kFootnotesEnd);
+    CHECK_EQ(loaded.embeds, ExportSettings::kEmbedContent);
+    CHECK_EQ(loaded.linkedNotes, ExportSettings::kLinkedOff);
+    CHECK(loaded.vaultFolder.empty());
+    CHECK_EQ(loaded.autoHeight, false);
+    CHECK_EQ(loaded.backlinks, false);
     CHECK(loaded.themeError.empty());
 }
 
@@ -903,6 +961,214 @@ RGUI_TEST("app.export_bytes") {
     CHECK(StartsWith(ReadFile(fs::u8path(output)), "%PDF-"));
     CHECK_EQ(platform.openedExternally.size(), size_t(1));
     std::printf("  %s\n", exports[0].message.c_str());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Notes: linked notes in an export, the names `[[` completes, embedded notes that change on disk.
+
+bool WriteNote(const fs::path& path, const std::string& text) {
+    std::error_code error;
+    fs::create_directories(path.parent_path(), error);
+    return RayoMd::File::WriteAll(path, text);
+}
+
+// Rewrites a note so its stamp surely changes: other bytes, a later time.
+void TouchNote(const fs::path& path, const std::string& text, int seconds) {
+    const fs::file_time_type before = fs::last_write_time(path);
+    CHECK(RayoMd::File::WriteAll(path, text));
+    fs::last_write_time(path, before + std::chrono::seconds(seconds));
+}
+
+RGUI_TEST("app.notes.linked_export") {
+    const fs::path dir = TempDir("linked-notes");
+    const fs::path a = dir / "a.md";
+    const std::string aText = "# Alpha\n\nSee [[b]].\n";
+    CHECK(WriteNote(a, aText));
+    CHECK(WriteNote(dir / "notes" / "b.md", "# Beta\n\nBack to [[a]], on to [c](../c.md).\n"));
+    CHECK(WriteNote(dir / "c.md", "# Gamma\n\nThe end.\n"));
+    rgui::test::HeadlessPlatform platform;
+    std::vector<rgui::ExportFinished> exports;
+    rgui::BuildWorker worker(platform, nullptr,
+                             [&](rgui::ExportFinished finished) { exports.push_back(std::move(finished)); });
+    ExportSettings settings;
+    settings.dialect = ExportSettings::kObsidian;
+    settings.backlinks = true;
+    auto exportWith = [&](int depth, const std::string& source, const char* name) {
+        settings.linkedNotes = depth;
+        exports.clear();
+        worker.RequestExport(aText, source, settings.ToPdfOptions(source, false), Utf8(dir / name), false, {},
+                             settings.LinkDepth());
+        CHECK(platform.PumpUntil([&] { return !exports.empty(); }, 30000));
+        return exports.empty() ? rgui::ExportFinished() : exports[0];
+    };
+
+    // One link deep: a and b (found by name in a subfolder), each from a new page.
+    rgui::ExportFinished one = exportWith(ExportSettings::kLinked1, Utf8(a), "one.pdf");
+    CHECK(one.ok);
+    CHECK_EQ(one.linkedNotes, size_t(1));
+    CHECK_EQ(one.leftOut, size_t(0));
+    CHECK(one.pages >= 2);
+    CHECK(one.message.find(") with 1 linked note") != std::string::npos);
+    const auto pdf = rgui::pdf::PdfFile::Parse(ReadFile(dir / "one.pdf"), nullptr);
+    CHECK(pdf != nullptr);
+    if (pdf) CHECK_EQ(static_cast<uint32_t>(pdf->PageCount()), one.pages);
+
+    // Two deep: c too, once, though both a and b lead to it or back.
+    rgui::ExportFinished two = exportWith(ExportSettings::kLinked2, Utf8(a), "two.pdf");
+    CHECK(two.ok);
+    CHECK_EQ(two.linkedNotes, size_t(2));
+    CHECK(two.pages > one.pages);
+    CHECK(two.message.find(") with 2 linked notes") != std::string::npos);
+
+    // Off: the note alone, as BuildPdf makes it.
+    rgui::ExportFinished alone = exportWith(ExportSettings::kLinkedOff, Utf8(a), "alone.pdf");
+    CHECK(alone.ok);
+    CHECK_EQ(alone.linkedNotes, size_t(0));
+    CHECK_EQ(alone.pages, 1u);
+    CHECK(alone.message.find("linked") == std::string::npos);
+
+    // An unsaved note has no links to follow.
+    rgui::ExportFinished unsaved = exportWith(ExportSettings::kLinked1, "", "unsaved.pdf");
+    CHECK(unsaved.ok);
+    CHECK(unsaved.message.find("; save the document to add its linked notes") != std::string::npos);
+
+    // A note that cannot be read.
+    rgui::ExportFinished missing = exportWith(ExportSettings::kLinked1, Utf8(dir / "gone.md"), "gone.pdf");
+    CHECK(!missing.ok);
+    CHECK(StartsWith(missing.message, "Export failed: could not read"));
+}
+
+RGUI_TEST("app.notes.names") {
+    const fs::path dir = TempDir("note-names");
+    CHECK(WriteNote(dir / "Alpha.md", "a"));
+    CHECK(WriteNote(dir / "beta.MD", "b"));
+    CHECK(WriteNote(dir / "sub" / "Gamma note.md", "c"));
+    CHECK(WriteNote(dir / "sub" / "alpha.md", "a again"));
+    CHECK(WriteNote(dir / ".obsidian" / "hidden.md", "no"));
+    CHECK(WriteNote(dir / ".secret.md", "no"));
+    CHECK(WriteNote(dir / "notes.txt", "no"));
+    CHECK(WriteNote(dir / "bad#name.md", "no"));
+    CHECK(WriteNote(dir / "x.markdown", "no"));
+    // kMaxNoteDepth folders down is listed, one more is not.
+    fs::path deep = dir;
+    for (int i = 0; i < rgui::kMaxNoteDepth; i++) deep /= "d";
+    CHECK(WriteNote(deep / "Deepest.md", "yes"));
+    CHECK(WriteNote(deep / "d" / "Too deep.md", "no"));
+    const std::vector<std::string> names = rgui::ListNoteNames(dir);
+    const std::vector<std::string> expected = {"Alpha", "alpha", "beta", "Deepest", "Gamma note"};
+    CHECK_EQ(names.size(), expected.size());
+    for (size_t i = 0; i < names.size() && i < expected.size(); i++) CHECK_EQ(names[i], expected[i]);
+    CHECK(rgui::ListNoteNames(dir / "missing").empty());
+
+    // Bounded: kMaxNoteNames names at most.
+    const fs::path many = TempDir("note-names-many");
+    for (size_t i = 0; i < rgui::kMaxNoteNames + 20; i++) {
+        CHECK(RayoMd::File::WriteAll(many / ("n" + std::to_string(i) + ".md"), ""));
+    }
+    CHECK_EQ(rgui::ListNoteNames(many).size(), rgui::kMaxNoteNames);
+}
+
+// The notes a preview embeds are stamped; a change on disk, also of a nested embed, asks for a
+// new preview: on CheckEmbeds, on gaining the focus, and every kEmbedCheckMs while focused.
+RGUI_TEST("app.notes.embed_staleness") {
+    const fs::path dir = TempDir("embed-staleness");
+    const fs::path note = dir / "note.md";
+    const fs::path inner = dir / "parts" / "inner.md";
+    CHECK(WriteNote(note, "Note text.\n\n![[inner]]\n"));
+    CHECK(WriteNote(inner, "Inner text.\n"));
+    const std::string text = "# Doc\n\n![[note]]\n\n```\n![[not a note.png]]\n```\n";
+    const std::string source = Utf8(dir / "doc.md");
+    rgui::test::HeadlessPlatform platform;
+    std::vector<rgui::PreviewReady> previews;
+    int changed = 0;
+    rgui::BuildWorker worker(platform, [&](rgui::PreviewReady ready) { previews.push_back(std::move(ready)); }, nullptr);
+    worker.SetOnEmbedsChanged([&changed] { changed++; });
+    worker.SetFocused(false);
+    ExportSettings settings;
+    settings.dialect = ExportSettings::kObsidian;
+    int generation = 0;
+    auto preview = [&](const ExportSettings& with) {
+        previews.clear();
+        worker.RequestPreview(text, source, with.ToPdfOptions(source, true), ++generation);
+        CHECK(platform.PumpUntil([&] { return !previews.empty(); }, 20000));
+        if (!previews.empty()) CHECK(previews[0].pdf != nullptr);
+    };
+
+    preview(settings);
+    worker.CheckEmbeds();
+    CHECK(!platform.PumpUntil([&] { return changed > 0; }, 300));
+    // The embedded note changes: one request, until the next preview.
+    TouchNote(note, "Note text, edited.\n\n![[inner]]\n", 2);
+    worker.CheckEmbeds();
+    CHECK(platform.PumpUntil([&] { return changed == 1; }, 5000));
+    worker.CheckEmbeds();
+    CHECK(!platform.PumpUntil([&] { return changed > 1; }, 300));
+
+    // Built again: the new stamps hold. The nested note changes; gaining the focus checks.
+    preview(settings);
+    worker.CheckEmbeds();
+    CHECK(!platform.PumpUntil([&] { return changed > 1; }, 300));
+    TouchNote(inner, "Inner text, edited.\n", 2);
+    worker.SetFocused(true);
+    CHECK(platform.PumpUntil([&] { return changed == 2; }, 5000));
+
+    // While focused, the worker looks by itself.
+    preview(settings);
+    TouchNote(inner, "Inner text, edited again.\n", 4);
+    CHECK(platform.PumpUntil([&] { return changed == 3; }, rgui::BuildWorker::kEmbedCheckMs * 3));
+
+    // Embeds as links, or GitHub's dialect: nothing is watched.
+    ExportSettings links = settings;
+    links.embeds = ExportSettings::kEmbedLink;
+    preview(links);
+    TouchNote(note, "Note text, edited twice.\n", 6);
+    worker.CheckEmbeds();
+    CHECK(!platform.PumpUntil([&] { return changed > 3; }, 300));
+    ExportSettings github;
+    preview(github);
+    TouchNote(note, "Note text, edited thrice.\n", 8);
+    worker.CheckEmbeds();
+    CHECK(!platform.PumpUntil([&] { return changed > 3; }, 300));
+}
+
+// The watch alone: what it finds and how it stays bounded.
+RGUI_TEST("app.notes.embed_watch") {
+    const fs::path dir = TempDir("embed-watch");
+    CHECK(WriteNote(dir / "a.md", "![[b]]\n![[a]]\n"));   // b, and a cycle back
+    CHECK(WriteNote(dir / "sub" / "b.md", "![[c#Part]]\n"));
+    CHECK(WriteNote(dir / "c.md", "# Part\n"));
+    TinyPdf::PdfOptions options;
+    options.dialect = TinyPdf::MarkdownDialect::Obsidian;
+    options.sourcePath = Utf8(dir / "doc.md");
+    rgui::EmbedWatch watch;
+    watch.Update("![[a|alias]]\n ![[indented]]\ntext ![[inline]]\n![[img.png]]\n![[missing]]\n", options);
+    CHECK_EQ(watch.Count(), size_t(3));   // a, b, c
+    CHECK(!watch.Changed());
+    // What a preview build of a large note with embeds pays once they are known: a scan of its
+    // `![[` lines and a stat a note.
+    std::string large;
+    for (int i = 0; i < 40000; i++) large += "Some words of a paragraph, written to fill a page of notes.\n\n";
+    large += "![[a]]\n";
+    watch.Update(large, options);
+    CHECK_EQ(watch.Count(), size_t(3));
+    const auto start = std::chrono::steady_clock::now();
+    constexpr int kRounds = 50;
+    for (int i = 0; i < kRounds; i++) watch.Update(large, options);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    std::printf("app.notes.embed_watch: %zu bytes, 3 notes: %.3f ms an update\n", large.size(), ms / kRounds);
+    // Many embed lines: kMaxWatched notes at most.
+    std::string many;
+    for (size_t i = 0; i < rgui::EmbedWatch::kMaxWatched + 10; i++) {
+        const std::string name = "n" + std::to_string(i);
+        CHECK(RayoMd::File::WriteAll(dir / (name + ".md"), "x"));
+        many += "![[" + name + "]]\n";
+    }
+    watch.Update(many, options);
+    CHECK_EQ(watch.Count(), rgui::EmbedWatch::kMaxWatched);
+    // No source path: nothing.
+    options.sourcePath.clear();
+    watch.Update(many, options);
+    CHECK(watch.Empty());
 }
 
 } // namespace

@@ -86,9 +86,26 @@ std::string Today() {
 void EditorPopup::SetHeadings(std::vector<std::string> headings) {
     headings_ = std::move(headings);
     if (mode_ == Mode::Completion && kind_ == md::Completion::WikiLink) {
-        all_ = headings_;
+        WikiLinkCandidates();
         Filter(filter_);
     }
+}
+
+void EditorPopup::SetNotes(std::vector<std::string> notes) {
+    notes_ = std::move(notes);
+    if (mode_ == Mode::Completion && kind_ == md::Completion::WikiLink) {
+        WikiLinkCandidates();
+        Filter(filter_);
+    }
+}
+
+void EditorPopup::WikiLinkCandidates() {
+    all_.clear();
+    all_.reserve((embed_ ? 0 : headings_.size()) + notes_.size());
+    if (!embed_) {
+        for (const std::string& heading : headings_) all_.push_back("#" + heading);
+    }
+    all_.insert(all_.end(), notes_.begin(), notes_.end());
 }
 
 void EditorPopup::OpenInsert() {
@@ -119,10 +136,18 @@ void EditorPopup::Reset(ui::Context& ctx) {
 void EditorPopup::Filter(const std::string& filter) {
     items_.clear();
     rows_.clear();
+    // A wiki link's `#Heading` matches by its text unless the filter starts with `#` too.
+    const bool headingText = kind_ == md::Completion::WikiLink && (filter.empty() || filter[0] != '#');
+    std::vector<int8_t> ranks(all_.size());
+    for (size_t i = 0; i < all_.size(); i++) {
+        std::string_view item = all_[i];
+        if (headingText && !item.empty() && item[0] == '#') item.remove_prefix(1);
+        ranks[i] = static_cast<int8_t>(md::MatchRank(item, filter));
+    }
     // Exact matches first, then those that start with the filter, then the rest; in list order.
-    for (int rank = 0; rank <= 2; rank++) {
+    for (int8_t rank = 0; rank <= 2; rank++) {
         for (size_t i = 0; i < all_.size(); i++) {
-            if (md::MatchRank(all_[i], filter) != rank) continue;
+            if (ranks[i] != rank) continue;
             items_.push_back(all_[i]);
             rows_.push_back(i);
         }
@@ -240,7 +265,12 @@ void EditorPopup::OpenCompletion(md::Completion kind, size_t start, ui::TextEdit
     switch (kind) {
     case md::Completion::Fence: all_ = md::FenceNames(); break;
     case md::Completion::Alert: all_ = md::AlertTypes(); break;
-    case md::Completion::WikiLink: all_ = headings_; break;
+    case md::Completion::WikiLink:
+        // `![[` embeds a note: no headings of this document then.
+        embed_ = start >= 3 && buffer.At(start - 3) == '!';
+        wikiLinkOpened_ = true;
+        WikiLinkCandidates();
+        break;
     case md::Completion::None: all_.clear(); break;
     }
     filter_.clear();
@@ -347,7 +377,7 @@ void EditorPopup::PickCompletion(const std::string& item, ui::TextEditor& editor
         caretOffset = text.size();
         break;
     case md::Completion::WikiLink:
-        text = "#" + item + "]]";
+        text = item + "]]";
         caretOffset = text.size();
         break;
     case md::Completion::None:

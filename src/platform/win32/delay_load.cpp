@@ -79,6 +79,23 @@ extern "C" HRESULT WINAPI __wrap_SHGetFolderPathW(HWND window, int folder, HANDL
                      : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
 }
 
+// Without shell32 the folder dialog is unavailable: no folder is chosen.
+extern "C" PIDLIST_ABSOLUTE WINAPI __wrap_SHBrowseForFolderW(LPBROWSEINFOW info) {
+    RAYOMD_DELAY_PROC(L"shell32.dll", SHBrowseForFolderW);
+    return procedure ? procedure(info) : nullptr;
+}
+
+extern "C" BOOL WINAPI __wrap_SHGetPathFromIDListEx(PCIDLIST_ABSOLUTE list, PWSTR path, DWORD size,
+                                                    GPFIDL_FLAGS options) {
+    RAYOMD_DELAY_PROC(L"shell32.dll", SHGetPathFromIDListEx);
+    return procedure ? procedure(list, path, size, options) : FALSE;
+}
+
+extern "C" void WINAPI __wrap_ILFree(PIDLIST_RELATIVE list) {
+    RAYOMD_DELAY_PROC(L"shell32.dll", ILFree);
+    if (procedure) procedure(list);
+}
+
 // dwmapi.
 extern "C" HRESULT WINAPI __wrap_DwmSetWindowAttribute(HWND window, DWORD attribute, LPCVOID value,
                                                        DWORD size) {

@@ -1214,9 +1214,11 @@ RGUI_TEST("app.completion") {
     h.KeyDown(Key::Enter);
     CHECK(StartsWith(std::string(editor.Text()).substr(editor.Buffer().Size() - 17), "See [[#Beta Two]]"));
     CHECK_EQ(editor.Caret(), editor.Buffer().Size());
-    // `![[` (an embed) does not complete headings.
+    // `![[` (an embed) completes note names, never the headings: none here, for an unsaved
+    // document without a vault.
     h.Type(" ![[");
-    CHECK(!w.Popup().IsOpen());
+    CHECK(w.Popup().CompletionKind() == Completion::WikiLink);
+    CHECK(w.Popup().Items().empty());
     w.SetWikiLinks(false);
     CHECK(w.Popup().Headings().empty());
 }
@@ -1239,6 +1241,38 @@ RGUI_TEST("app.dialect_wiki_links") {
     github.Frame();
     github.Type("[[");
     CHECK(!github.Window().Popup().IsOpen());
+}
+
+// `[[` lists the headings and the vault's note names (listed on the loader's thread), `![[` the
+// names alone.
+RGUI_TEST("app.wiki_link_notes") {
+    Harness h("wiki_link_notes");
+    const fs::path vault = h.dir / "vault";
+    std::error_code error;
+    fs::create_directories(vault / "sub", error);
+    CHECK(RayoMd::File::WriteAll(vault / "Alpha Note.md", "a"));
+    CHECK(RayoMd::File::WriteAll(vault / "sub" / "Beta.md", "b"));
+    h.Start("ui.theme=tokyo-night\nexport.dialect=1\nexport.vaultFolder=" + vault.u8string() + "\n");
+    h.Frame();
+    rgui::MainWindow& w = h.Window();
+    rgui::ui::TextEditor& editor = w.Editor();
+    editor.PasteText("# Head\n\nSee ");
+    CHECK(h.Settle());
+    h.Type("[[");
+    CHECK(w.Popup().CompletionKind() == rgui::ui::markdown::Completion::WikiLink);
+    CHECK(h.RunUntil([&] { return w.Popup().Notes().size() == 2; }, 10000));
+    CHECK(w.Popup().Items() == (std::vector<std::string>{"#Head", "Alpha Note", "Beta"}));
+    h.Type("be");
+    CHECK(w.Popup().Items() == (std::vector<std::string>{"Beta"}));
+    h.KeyDown(Key::Enter);
+    std::string text(editor.Text());
+    CHECK(text.size() >= 12 && text.substr(text.size() - 12) == "See [[Beta]]");
+    h.KeyDown(Key::Enter);
+    h.KeyDown(Key::Enter);
+    h.Type("![[");
+    CHECK(w.Popup().Items() == (std::vector<std::string>{"Alpha Note", "Beta"}));
+    h.Type("he");
+    CHECK(w.Popup().Items().empty());
 }
 
 // Lists and quotes continue on Enter through the window too, and an empty item ends the list.

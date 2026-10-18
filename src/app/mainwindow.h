@@ -26,8 +26,15 @@
 //
 // Typing helpers: the editor continues lists and quotes itself; the popup list at the caret
 // (EditorPopup: the insert list on Ctrl+I and the footer's button, the completions after ```,
-// `> [!` and `[[`) takes its keys before the editor's frame. With wiki links on, preview builds
-// also collect the document's headings for `[[` (the worker, from the text it builds).
+// `> [!`, `[[` and `![[`) takes its keys before the editor's frame. With wiki links on, preview
+// builds also collect the document's headings for `[[` (the worker, from the text it builds), and
+// a wiki-link completion lists the note names of the vault or the document's folder, listed on
+// the loader's thread and listed again when the completion opens kNotesMaxAgeMs after the last.
+//
+// Embedded notes (Obsidian's `![[note]]`): the worker stamps the notes a preview embeds; when one
+// changes on disk (checked on focus-in and every BuildWorker::kEmbedCheckMs while focused, on the
+// worker's thread) the preview is built again. An export with linked notes is the book of the note
+// and the notes it links to (the worker); the preview stays the note.
 //
 // Source sync (the preview's SourceMap): a press in the editor shows its line in the preview,
 // marked for a moment; a double click on a page puts the editor's caret on the line it shows;
@@ -235,6 +242,11 @@ private:
     void ExportPdf(bool ask);
     void StartExport(const std::string& path);
     void ChooseThemeFile();
+    void ChooseVaultFolder();
+    // Where `[[` finds note names: the vault, else the document's folder; empty for neither.
+    std::string NotesFolder() const;
+    // A wiki-link completion opened: list the note names again unless they are fresh.
+    void RefreshNoteNames();
     // Asks for a path with the system dialog (or the fallback prompt when it is unavailable).
     void AskPath(FileDialog kind, std::string suggested, std::function<void(std::string)> onChosen);
     void OptionsChanged();
@@ -256,6 +268,7 @@ private:
     void OnPreview(PreviewReady ready);
     void OnExport(ExportFinished finished);
     void OnLoaded(DocumentLoaded loaded);
+    void OnNotesListed(NotesListed listed);
     void OnImageCopied(ImageCopied copied);
 
     // The page at the top of the preview and how far into it the view is, by the last frame.
@@ -317,6 +330,12 @@ private:
     Trace trace_;
     std::chrono::steady_clock::time_point requestedAt_;   // when requestedGeneration_ was asked for
     std::optional<Anchor> anchor_;
+    bool windowFocused_ = true;       // the last frame's ui::Context::WindowFocused
+    // The note names for `[[`: whose folder, when listed, and whether a listing is on its way.
+    static constexpr int kNotesMaxAgeMs = 5000;
+    std::string notesFolder_;
+    std::optional<std::chrono::steady_clock::time_point> notesListedAt_;
+    bool notesPending_ = false;
     std::vector<float> pageTops_;     // the last frame's layout, logical px from the content top
     std::vector<float> pageHeights_;
     float pageWidth_ = 0;

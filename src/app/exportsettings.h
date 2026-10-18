@@ -21,11 +21,19 @@ struct ExportSettings {
     // The index is the engine's PdfOptions::pageBreakBeforeLevel.
     enum PageBreak : int { kNoPageBreak, kBreakBeforeH1, kBreakBeforeH2, kBreakBeforeH3, kPageBreakCount };
     enum Dialect : int { kGitHub, kObsidian, kDialectCount };
+    enum Footnotes : int { kFootnotesEnd, kFootnotesPage, kFootnotesCount };
+    // Obsidian's `![[note]]` alone on a line: the note printed in its place, or a link to it.
+    enum Embeds : int { kEmbedContent, kEmbedLink, kEmbedsCount };
+    // Export: the note alone, or a book of it and the notes it links to, this many links deep.
+    enum LinkedNotes : int { kLinkedOff, kLinked1, kLinked2, kLinked3, kLinkedNotesCount };
     static const char* const kStyleNames[kStyleCount];        // Elegant, Modern, Tech
     static const char* const kMarginNames[kMarginCount];      // Compact, Normal, Wide, Custom
     static const char* const kPageSizeNames[kPageSizeCount];  // A4, A3, A5, Letter, Legal, Custom
     static const char* const kPageBreakNames[kPageBreakCount];  // None, Before H1, ... H1-H2, ... H1-H3
     static const char* const kDialectNames[kDialectCount];      // GitHub, Obsidian
+    static const char* const kFootnotesNames[kFootnotesCount];  // End of document, Foot of page
+    static const char* const kEmbedsNames[kEmbedsCount];        // Content, Link
+    static const char* const kLinkedNotesNames[kLinkedNotesCount];  // Off, 1, 2, 3
 
     static constexpr double kMinMarginInches = 0.25;
     static constexpr double kMaxMarginInches = 2.0;
@@ -42,15 +50,25 @@ struct ExportSettings {
     int margin = kNormal;
     double customMarginInches = 1.0;
     int pageSize = kA4;
-    bool landscape = false;
+    bool landscape = false;  // not with autoHeight
     double customWidthMm = 210.0;
     double customHeightMm = 297.0;
+    // The custom page size only: one long page for screens, its height grown to the content
+    // (PdfPageSize::autoHeight); customHeightMm is not used then.
+    bool autoHeight = false;
     bool toc = false;
     int tocDepth = 3;
     bool numberHeadings = false;  // 1, 1.1, 1.1.1 before the headings, numberDepth levels deep
     int numberDepth = 3;
     int pageBreakBefore = kNoPageBreak;
     int dialect = kGitHub;  // the Markdown the document is written in; Obsidian also completes `[[`
+    int footnotes = kFootnotesEnd;
+    int embeds = kEmbedContent;  // Obsidian's dialect only
+    // UTF-8 folder the notes a document embeds or links to are found in (PdfOptions::vaultRoot);
+    // empty for the document's folder.
+    std::string vaultFolder;
+    int linkedNotes = kLinkedOff;  // export only
+    bool backlinks = false;        // export only, with linkedNotes: "Linked from:" ends each note
     bool pageNumbers = false;
     bool compress = false;
     bool fastImages = false;
@@ -84,8 +102,11 @@ struct ExportSettings {
     bool ReloadTheme();
 
     // The engine's options for a document at `sourcePath` (UTF-8; relative images resolve from
-    // it). A preview never compresses and never embeds the source.
+    // it). A preview never compresses and never embeds the source. `backlinks` is set only with
+    // linked notes, whose book (LinkDepth) BuildBookPdf exports.
     TinyPdf::PdfOptions ToPdfOptions(const std::string& sourcePath, bool forPreview) const;
+    // How many links deep an export follows (ReadLinkedBook); 0 exports the note alone.
+    int LinkDepth() const { return linkedNotes; }
 };
 
 } // namespace rgui

@@ -1205,7 +1205,9 @@ RGUI_TEST("ui.markdown_completion") {
     CHECK(md::CompletionTrigger("see [[", false) == Completion::None);
     CHECK(md::CompletionTrigger("see [[", true) == Completion::WikiLink);
     CHECK(md::CompletionTrigger("[[", true) == Completion::WikiLink);
-    CHECK(md::CompletionTrigger("![[", true) == Completion::None);
+    CHECK(md::CompletionTrigger("![[", true) == Completion::WikiLink);
+    CHECK(md::CompletionTrigger("see ![[", true) == Completion::WikiLink);
+    CHECK(md::CompletionTrigger("![[", false) == Completion::None);
     CHECK(md::CompletionTrigger("[[[", true) == Completion::None);
     CHECK(md::FilterValid(Completion::Fence, "c++"));
     CHECK(!md::FilterValid(Completion::Fence, "py thon"));

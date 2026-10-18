@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app/documentloader.h"
 
+#include "app/notes.h"
 #include "app/platform.h"
 #include "app/safefile.h"
 #include "common/text_utils.h"
@@ -111,10 +112,11 @@ void CopyImageBeside(const fs::path& source, const fs::path& document, ImageCopi
     copied.status = "Cannot copy " + shown + ": no free name in images/";
 }
 
-DocumentLoader::DocumentLoader(Platform& platform, Callback onLoaded, ImageCallback onImage)
+DocumentLoader::DocumentLoader(Platform& platform, Callback onLoaded, ImageCallback onImage, NotesCallback onNotes)
     : platform_(platform), callbacks_(std::make_shared<Callbacks>()) {
     callbacks_->onLoaded = std::move(onLoaded);
     callbacks_->onImage = std::move(onImage);
+    callbacks_->onNotes = std::move(onNotes);
     thread_ = std::thread([this] { Run(); });
 }
 
@@ -124,6 +126,7 @@ DocumentLoader::~DocumentLoader() {
         stop_ = true;
         pending_.reset();
         copies_.clear();
+        notes_.reset();
     }
     wake_.notify_all();
     thread_.join();
@@ -157,24 +160,45 @@ uint64_t DocumentLoader::CopyImage(std::string source, std::string documentPath)
     return nextId_;
 }
 
+void DocumentLoader::ListNotes(std::string folder) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        notes_ = std::move(folder);
+    }
+    wake_.notify_one();
+}
+
 void DocumentLoader::Run() {
     for (;;) {
         Request request;
         bool copy = false;
+        std::optional<std::string> notes;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            wake_.wait(lock, [this] { return stop_ || pending_.has_value() || !copies_.empty(); });
+            wake_.wait(lock, [this] { return stop_ || pending_.has_value() || !copies_.empty() || notes_.has_value(); });
             if (stop_) return;
             // Copies first: they are small, and their links go into the document they were
-            // dropped on.
+            // dropped on. Note names last: an open is waited for.
             if (!copies_.empty()) {
                 request = std::move(copies_.front());
                 copies_.pop_front();
                 copy = true;
-            } else {
+            } else if (pending_) {
                 request = std::move(*pending_);
                 pending_.reset();
+            } else {
+                notes = std::move(notes_);
+                notes_.reset();
             }
+        }
+        if (notes) {
+            NotesListed listed;
+            listed.names = ListNoteNames(fs::u8path(*notes));
+            listed.folder = std::move(*notes);
+            platform_.PostToUi([callbacks = callbacks_, listed = std::move(listed)]() mutable {
+                if (callbacks->alive && callbacks->onNotes) callbacks->onNotes(std::move(listed));
+            });
+            continue;
         }
         if (copy) {
             ImageCopied copied;

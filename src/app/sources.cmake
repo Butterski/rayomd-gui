@@ -8,6 +8,7 @@ list(APPEND RGUI_CORE_SOURCES
     app/editorpopup.cpp
     app/exportsettings.cpp
     app/mainwindow.cpp
+    app/notes.cpp
     app/previewpages.cpp
     app/safefile.cpp
     app/sourcemap.cpp

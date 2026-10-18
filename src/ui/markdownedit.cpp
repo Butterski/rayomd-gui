@@ -158,8 +158,7 @@ Completion CompletionTrigger(std::string_view beforeCaret, bool wikiLinks) {
         const LinePrefix p = ParseLinePrefix(head);
         if (p.quote && !p.list && !HasText(head.substr(p.quoteEnd))) return Completion::Alert;
     }
-    if (wikiLinks && n >= 2 && beforeCaret.substr(n - 2) == "[[" &&
-        (n == 2 || (beforeCaret[n - 3] != '[' && beforeCaret[n - 3] != '!'))) {
+    if (wikiLinks && n >= 2 && beforeCaret.substr(n - 2) == "[[" && (n == 2 || beforeCaret[n - 3] != '[')) {
         return Completion::WikiLink;
     }
     return Completion::None;

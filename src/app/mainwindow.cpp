@@ -43,6 +43,7 @@ const char* DialogTitle(FileDialog kind) {
     case FileDialog::SaveMarkdown: return "Save Markdown";
     case FileDialog::ExportPdf: return "Export PDF";
     case FileDialog::ChooseTheme: return "Choose PDF theme file";
+    case FileDialog::ChooseVault: return "Choose vault folder";
     }
     return "";
 }
@@ -98,12 +99,15 @@ MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hoo
     worker_ = std::make_unique<BuildWorker>(
         platform_, [this](PreviewReady ready) { OnPreview(std::move(ready)); },
         [this](ExportFinished finished) { OnExport(std::move(finished)); }, std::move(build));
+    // A note the preview embeds changed on disk: build it again.
+    worker_->SetOnEmbedsChanged([this] { MarkPreviewDirty(); });
     preview_ = std::make_unique<PreviewPages>(platform_, fontIndex, [this] {
         if (hooks_.requestFrame) hooks_.requestFrame();
     });
     loader_ = std::make_unique<DocumentLoader>(
         platform_, [this](DocumentLoaded loaded) { OnLoaded(std::move(loaded)); },
-        [this](ImageCopied copied) { OnImageCopied(std::move(copied)); });
+        [this](ImageCopied copied) { OnImageCopied(std::move(copied)); },
+        [this](NotesListed listed) { OnNotesListed(std::move(listed)); });
     SetOmarchyAvailable(platform_.OmarchyThemeDir().has_value());
 }
 
@@ -153,7 +157,11 @@ void MainWindow::SetOmarchyAvailable(bool available) {
 void MainWindow::SetWikiLinks(bool on) {
     if (on == popup_.WikiLinks()) return;
     popup_.SetWikiLinks(on);
-    if (!on) popup_.SetHeadings({});
+    if (!on) {
+        popup_.SetHeadings({});
+        popup_.SetNotes({});
+        notesFolder_.clear();
+    }
     // The next build collects the headings.
     MarkPreviewDirty();
 }
@@ -208,6 +216,11 @@ void MainWindow::Frame(ui::Context& ctx) {
     dirty_ = false;
     inFrame_ = true;
     RectF win = ctx.WindowRect();
+    // Back in the window: the notes the preview embeds may have changed meanwhile.
+    if (ctx.WindowFocused() != windowFocused_) {
+        windowFocused_ = ctx.WindowFocused();
+        worker_->SetFocused(windowFocused_);
+    }
     const bool csd = platform_.NeedsClientDecorations();
     if (csd && !platform_.IsMaximized()) ResizeEdges(ctx);
     if (csd) Header(ctx, ui::CutTop(win, kHeaderHeight));
@@ -258,6 +271,7 @@ void MainWindow::Frame(ui::Context& ctx) {
     editor_.Frame(ctx, editorRect);
     if (editor_.ZoomIndex() != zoomBefore) hooks_.settingsChanged();
     popup_.AfterEditor(ctx, editor_, editorRect, editorKeys);
+    if (popup_.TakeWikiLinkOpened()) RefreshNoteNames();
     // Typing, a press, the wheel or keys in the editor: it leads. A press shows its line in the
     // preview, at the caret's height (the panes start at the same y).
     if (editor_.Revision() != revisionSeen_ || editor_.UserScrolled() || editor_.PressedThisFrame()) {
@@ -425,6 +439,13 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     static const std::vector<std::string> sizes = Names(ExportSettings::kPageSizeNames, ExportSettings::kPageSizeCount);
     static const std::vector<std::string> breaks = Names(ExportSettings::kPageBreakNames, ExportSettings::kPageBreakCount);
     static const std::vector<std::string> dialects = Names(ExportSettings::kDialectNames, ExportSettings::kDialectCount);
+    static const std::vector<std::string> footnotes =
+        Names(ExportSettings::kFootnotesNames, ExportSettings::kFootnotesCount);
+    static const std::vector<std::string> embeds = Names(ExportSettings::kEmbedsNames, ExportSettings::kEmbedsCount);
+    static const std::vector<std::string> linked =
+        Names(ExportSettings::kLinkedNotesNames, ExportSettings::kLinkedNotesCount);
+    bool exportOnly = false;  // an option the preview does not use changed
+    const bool obsidian = export_.dialect == ExportSettings::kObsidian;
 
     // Document.
     ui::SectionHeader(ctx, "Document", column, true);
@@ -432,6 +453,30 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
         SetWikiLinks(export_.dialect == ExportSettings::kObsidian);
         changed = true;
     }
+    ctx.BeginDisabled(!obsidian);
+    changed |= ui::Dropdown(ctx, "##embeds", export_.embeds, embeds, labeled("Embeds"));
+    ctx.EndDisabled();
+    // The vault: where embedded and linked notes are found (Obsidian's embeds, and linked notes
+    // in either dialect).
+    ctx.BeginDisabled(!obsidian && export_.linkedNotes == ExportSettings::kLinkedOff);
+    {
+        std::string name =
+            export_.vaultFolder.empty() ? std::string() : fs::u8path(export_.vaultFolder).filename().u8string();
+        if (name.empty()) name = export_.vaultFolder;
+        ui::TextField(ctx, "##vaultFolder", name, labeled("Vault"), "Document's folder", true);
+        RectF r = row();
+        ui::CutLeft(r, kOptionsLabelWidth);
+        const char* choose = "Choose\xE2\x80\xA6##vault";
+        if (ui::Button(ctx, choose, ui::CutLeft(r, ui::ButtonWidth(ctx, choose)))) ChooseVaultFolder();
+        ui::CutLeft(r, static_cast<float>(t.spacing.sm));
+        if (!export_.vaultFolder.empty() &&
+            ui::IconButton(ctx, "##clearVault", ui::Icon::Close, ui::CutLeft(r, kIconHit),
+                           "Use the document's folder")) {
+            export_.vaultFolder.clear();
+            changed = true;
+        }
+    }
+    ctx.EndDisabled();
     changed |= ui::Dropdown(ctx, "##style", export_.style, styles, labeled("Style"));
     changed |= ui::Dropdown(ctx, "##margin", export_.margin, margins, labeled("Margins"));
     if (export_.margin == ExportSettings::kCustomMargin) {
@@ -439,13 +484,21 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
                                    ExportSettings::kMaxMarginInches, 0.05, 2, " in", number(labeled("")));
     }
     changed |= ui::Dropdown(ctx, "##pageSize", export_.pageSize, sizes, labeled("Page size"));
+    const bool custom = export_.pageSize == ExportSettings::kCustomPage;
+    // One long page has no landscape.
+    ctx.BeginDisabled(custom && export_.autoHeight);
     check("Landscape", export_.landscape);
-    if (export_.pageSize == ExportSettings::kCustomPage) {
+    ctx.EndDisabled();
+    if (custom) {
         changed |= ui::NumberField(ctx, "##pageWidth", export_.customWidthMm, ExportSettings::kMinPageMm,
                                    ExportSettings::kMaxPageMm, 1, 1, " mm", number(labeled("Width")));
+        ctx.BeginDisabled(export_.autoHeight);
         changed |= ui::NumberField(ctx, "##pageHeight", export_.customHeightMm, ExportSettings::kMinPageMm,
                                    ExportSettings::kMaxPageMm, 1, 1, " mm", number(labeled("Height")));
+        ctx.EndDisabled();
+        check("Auto height", export_.autoHeight);
     }
+    changed |= ui::Dropdown(ctx, "##footnotes", export_.footnotes, footnotes, labeled("Footnotes"));
     {
         std::string name = export_.themeFile.empty() ? std::string() : fs::u8path(export_.themeFile).filename().u8string();
         ui::TextField(ctx, "##themeFile", name, labeled("PDF theme"), "None", true);
@@ -511,6 +564,11 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     check("URL images", export_.urlImages);
 #endif
     check("Open after export", export_.openAfterExport);
+    // The export only: the preview stays the note itself.
+    exportOnly |= ui::Dropdown(ctx, "##linkedNotes", export_.linkedNotes, linked, labeled("Linked notes"));
+    ctx.BeginDisabled(export_.linkedNotes == ExportSettings::kLinkedOff);
+    exportOnly |= ui::Checkbox(ctx, "Backlinks", export_.backlinks, row());
+    ctx.EndDisabled();
 
     // Interface.
     ui::SectionHeader(ctx, "Interface", column);
@@ -525,7 +583,12 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     if (ui::Checkbox(ctx, "Sync scrolling", sync, row())) SetSyncScroll(sync);
 
     height = column.y - top;
-    if (changed) OptionsChanged();
+    if (changed) {
+        OptionsChanged();
+    } else if (exportOnly) {
+        hooks_.settingsChanged();
+        Dirty();
+    }
 }
 
 void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
@@ -982,7 +1045,7 @@ void MainWindow::StartExport(const std::string& path) {
     if (export_.themeFile.empty()) options.theme = TinyPdf::PdfTheme();
     // The worker reads the theme file; the preview build in flight, if any, waits for this.
     worker_->RequestExport(doc_.text, doc_.filePath, std::move(options), WithPdfExtension(path),
-                           export_.openAfterExport, export_.themeFile);
+                           export_.openAfterExport, export_.themeFile, export_.LinkDepth());
 }
 
 void MainWindow::ChooseThemeFile() {
@@ -992,6 +1055,47 @@ void MainWindow::ChooseThemeFile() {
                 export_.themeError.clear();  // the next build reads the file and says
                 OptionsChanged();
             });
+}
+
+void MainWindow::ChooseVaultFolder() {
+    std::string suggested = export_.vaultFolder;
+    if (suggested.empty() && !doc_.filePath.empty()) suggested = fs::u8path(doc_.filePath).parent_path().u8string();
+    // A folder's suggestion ends with a separator: the dialog opens in it.
+    suggested = suggested.empty() ? SuggestedFolder() : (fs::u8path(suggested) / "").u8string();
+    AskPath(FileDialog::ChooseVault, suggested, [this](std::string path) {
+        export_.vaultFolder = std::move(path);
+        OptionsChanged();
+    });
+}
+
+std::string MainWindow::NotesFolder() const {
+    if (!export_.vaultFolder.empty()) return export_.vaultFolder;
+    if (doc_.filePath.empty()) return {};
+    return fs::u8path(doc_.filePath).parent_path().u8string();
+}
+
+void MainWindow::RefreshNoteNames() {
+    const std::string folder = NotesFolder();
+    if (folder != notesFolder_) {
+        // Another folder's names are not this one's.
+        popup_.SetNotes({});
+        notesFolder_ = folder;
+        notesListedAt_.reset();
+    }
+    if (folder.empty() || notesPending_) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (notesListedAt_ && now - *notesListedAt_ < std::chrono::milliseconds(kNotesMaxAgeMs)) return;
+    notesPending_ = true;
+    loader_->ListNotes(folder);
+}
+
+void MainWindow::OnNotesListed(NotesListed listed) {
+    notesPending_ = false;
+    // The folder changed meanwhile: the next completion asks again.
+    if (listed.folder != notesFolder_ || !popup_.WikiLinks()) return;
+    notesListedAt_ = std::chrono::steady_clock::now();
+    popup_.SetNotes(std::move(listed.names));
+    if (hooks_.requestFrame) hooks_.requestFrame();
 }
 
 void MainWindow::AskPath(FileDialog kind, std::string suggested, std::function<void(std::string)> onChosen) {

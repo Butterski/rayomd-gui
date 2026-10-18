@@ -84,6 +84,8 @@ std::vector<Filter> FiltersFor(FileDialog kind) {
         return {{"PDF", {"*.pdf"}}};
     case FileDialog::ChooseTheme:
         return {{"Theme files", {"*.theme", "*.txt"}}, {"All files", {"*"}}};
+    case FileDialog::ChooseVault:
+        return {};
     }
     return {};
 }
@@ -94,6 +96,7 @@ const char* TitleFor(FileDialog kind) {
     case FileDialog::SaveMarkdown: return "Save Markdown";
     case FileDialog::ExportPdf: return "Export PDF";
     case FileDialog::ChooseTheme: return "Choose PDF theme file";
+    case FileDialog::ChooseVault: return "Choose vault folder";
     }
     return "";
 }
@@ -500,6 +503,7 @@ void Portal::ShowFileDialog(FileDialog kind, const std::string& suggestedPath,
     }
 
     const bool save = kind == FileDialog::SaveMarkdown || kind == FileDialog::ExportPdf;
+    const bool pickFolder = kind == FileDialog::ChooseVault;
     rgui_dbus_buf body{};
     rgui_dbus_put_string(&body, "");  // no parent window
     rgui_dbus_put_string(&body, TitleFor(kind));
@@ -508,24 +512,31 @@ void Portal::ShowFileDialog(FileDialog kind, const std::string& suggestedPath,
     rgui_dbus_put_string(&body, token.c_str());
     OpenOption(&body, "modal", "b");
     rgui_dbus_put_bool(&body, true);
-    OpenOption(&body, "filters", "a(sa(us))");
-    rgui_dbus_array filters = rgui_dbus_open_array(&body, '(');
-    for (const Filter& filter : FiltersFor(kind)) {
-        rgui_dbus_open_struct(&body);
-        rgui_dbus_put_string(&body, filter.name);
-        rgui_dbus_array globs = rgui_dbus_open_array(&body, '(');
-        for (const char* glob : filter.globs) {
+    if (pickFolder) {
+        // FileChooser version 3: the chosen URI is a folder.
+        OpenOption(&body, "directory", "b");
+        rgui_dbus_put_bool(&body, true);
+    } else {
+        OpenOption(&body, "filters", "a(sa(us))");
+        rgui_dbus_array filters = rgui_dbus_open_array(&body, '(');
+        for (const Filter& filter : FiltersFor(kind)) {
             rgui_dbus_open_struct(&body);
-            rgui_dbus_put_uint32(&body, 0);  // a glob pattern
-            rgui_dbus_put_string(&body, glob);
+            rgui_dbus_put_string(&body, filter.name);
+            rgui_dbus_array globs = rgui_dbus_open_array(&body, '(');
+            for (const char* glob : filter.globs) {
+                rgui_dbus_open_struct(&body);
+                rgui_dbus_put_uint32(&body, 0);  // a glob pattern
+                rgui_dbus_put_string(&body, glob);
+            }
+            rgui_dbus_close_array(&body, globs);
         }
-        rgui_dbus_close_array(&body, globs);
+        rgui_dbus_close_array(&body, filters);
     }
-    rgui_dbus_close_array(&body, filters);
-    if (save && !suggestedPath.empty()) {
+    // A folder's suggestion is the folder itself, written with a trailing separator.
+    if ((save || pickFolder) && !suggestedPath.empty()) {
         std::filesystem::path suggested(suggestedPath);
         std::string name = suggested.filename().string();
-        if (!name.empty() && IsDbusString(name)) {
+        if (save && !name.empty() && IsDbusString(name)) {
             OpenOption(&body, "current_name", "s");
             rgui_dbus_put_string(&body, name.c_str());
         }

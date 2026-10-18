@@ -24,7 +24,8 @@ enum class Cursor : uint8_t { Arrow, IBeam, Hand, ResizeH, ResizeV, ResizeNWSE, 
 // The window edge or corner a client-side resize starts from.
 enum class Edge : uint8_t { Top, Bottom, Left, Right, TopLeft, TopRight, BottomLeft, BottomRight };
 
-enum class FileDialog : uint8_t { OpenDocument, SaveMarkdown, ExportPdf, ChooseTheme };
+// ChooseVault picks a folder (the vault of Obsidian notes), the others a file.
+enum class FileDialog : uint8_t { OpenDocument, SaveMarkdown, ExportPdf, ChooseTheme, ChooseVault };
 
 struct FileDialogResult {
     // Unavailable: no portal, or the system dialog could not be shown; the app then asks for the

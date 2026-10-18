@@ -10,6 +10,7 @@ list(APPEND RGUI_WIN32_SOURCES
 set(RGUI_WIN32_DELAY_LOADED
     GetOpenFileNameW GetSaveFileNameW CommDlgExtendedError
     DragAcceptFiles DragQueryFileW DragFinish ShellExecuteExW SHGetFolderPathW
+    SHBrowseForFolderW SHGetPathFromIDListEx ILFree
     DwmSetWindowAttribute DwmGetCompositionTimingInfo
     ImmGetContext ImmReleaseContext ImmGetCompositionStringW ImmSetCompositionWindow
     ImmSetCandidateWindow ImmAssociateContextEx)

@@ -42,7 +42,8 @@ memory, so it is the PDF, not an approximation of it.
   the document, the build worker, preview pages, the source map (the engine's
   `PdfOptions::sourceMap` of a preview build, which the main window's source sync maps between
   editor lines and page positions), the editor's popup list (`editorpopup.h`: the insert list and
-  the completions), the main window, arguments and snapshot mode.
+  the completions), the notes around an Obsidian document (`notes.h`: the note names `[[`
+  completes, the embedded notes a preview watches), the main window, arguments and snapshot mode.
 - `src/platform/linux/` — Wayland, keyboard (XKB keymap, keysyms, Compose), D-Bus and the
   desktop portal, Omarchy and Hyprland integration, the event loop; all of it is the library
   `rayomd_gui_linux`, which the tests link too. `main_linux.cpp` is the executable
@@ -109,9 +110,12 @@ memory, so it is the PDF, not an approximation of it.
   `WriteMode::NewFile` never replaces anything: the dropped images copied beside a document).
   Never a predictable `<path>.tmp` or `RayoMd::File::WriteAll` for them.
 - Threads: the UI thread (platform event loop, UI, presenting); a tile pool of
-  `clamp(hardware_concurrency - 1, 1, 4)` threads; one build worker for the engine; a preview
+  `clamp(hardware_concurrency - 1, 1, 4)` threads; one build worker for the engine (it also
+  stats the notes a preview embeds, `EmbedWatch`, on focus-in and every 2 s while focused, and
+  builds the book of an export with linked notes); a preview
   pool of `clamp(hardware_concurrency / 2, 1, 3)` threads; one document loader that opens
-  files and copies dropped images (`CopyImageBeside`). Workers hand results to the UI thread only
+  files, copies dropped images (`CopyImageBeside`) and lists the note names `[[` completes
+  (`ListNoteNames`, bounded). Workers hand results to the UI thread only
   through `Platform::PostToUi`. The UI
   thread does no file I/O and no O(document) work per keystroke beyond the one copy of the text
   a preview build takes (`mainwindow.h` states the preview policy); `bench.preview_latency`
@@ -120,7 +124,8 @@ memory, so it is the PDF, not an approximation of it.
 - Typing helpers read at most a line's first `markdown::kLinePrefixBytes` (256) per keystroke and
   edit through `TextEditor::Replace`, one undo group each. Whatever they need of the whole
   document (the headings `[[` completes) the build worker collects from the text it builds and
-  hands back with the preview. A popup that opens over a focused widget (`ui::PopupList`) takes
+  hands back with the preview; the note names come from the loader. A popup that opens over a
+  focused widget (`ui::PopupList`) takes
   its keys before that widget's frame (`PopupListKeys`) and draws after it.
 - Nothing in startup or the UI thread waits for the font index's scan, which a cold font folder
   makes take up to a second. On Windows the interface font, the standard-font substitutes and

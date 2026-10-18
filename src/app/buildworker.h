@@ -3,10 +3,13 @@
 // exports. Requests come from the UI thread; results go back to it through
 // Platform::PostToUi. Besides the build, the worker does the request's other O(n) and I/O work
 // the UI thread must not: the text's word and line counts, and reading and parsing the PDF
-// theme file, and, when asked, the document's headings for the editor's `[[` completion.
+// theme file, and, when asked, the document's headings for the editor's `[[` completion. It
+// watches the notes a preview embeds (EmbedWatch) and says when one changed on disk; and it builds
+// the book of a note and the notes it links to for an export with linked notes.
 #pragma once
 
 #include "app/document.h"
+#include "app/notes.h"
 #include "app/sourcemap.h"
 #include "rayomd/tiny_pdf.h"
 
@@ -62,6 +65,10 @@ struct ExportFinished {
     double ms = 0;  // build and write
     std::string themeFile;   // the request's theme file
     std::string themeError;  // why it could not be used (ExportSettings::themeError)
+    // An export with linked notes (RequestExport's linkDepth): the notes the book adds to the
+    // document, and those its bounds left out (ReadLinkedBook's leftOut).
+    size_t linkedNotes = 0;
+    size_t leftOut = 0;
 };
 
 // What a build error means, as the status line says it after `Export failed: `.
@@ -73,6 +80,8 @@ class BuildWorker {
 public:
     using PreviewCallback = std::function<void(PreviewReady)>;
     using ExportCallback = std::function<void(ExportFinished)>;
+    // How often the embedded notes are checked while the window has the focus.
+    static constexpr int kEmbedCheckMs = 2000;
     // TinyPdf::BuildPdf's signature; tests substitute their own (which should honour
     // PdfOptions::cancel as the engine does).
     using BuildFunction =
@@ -101,11 +110,24 @@ public:
     // Exports run in request order, each before any pending preview; a preview being built is
     // cancelled and built again after the exports. With `openAfter`, a finished export is
     // opened with Platform::OpenExternally before onExport runs. `themeFile` as for previews.
+    // With `linkDepth` (1 to 6) and a `sourcePath`, the export is the book of the note and the
+    // notes it links to, that many links deep (RayoMd::Book::ReadLinkedBook, then
+    // TinyPdf::BuildBookPdf with the engine itself), the note's text `utf8`; the links are those
+    // of the note as saved.
     void RequestExport(std::string utf8, std::string sourcePath, TinyPdf::PdfOptions options,
-                       std::string outputPath, bool openAfter, std::string themeFile = {});
+                       std::string outputPath, bool openAfter, std::string themeFile = {}, int linkDepth = 0);
     // Drops the pending preview and cancels the preview being built; the PreviewReady of each
     // comes with BuildError::Cancelled (unless the build finished first). Exports go on.
     void CancelPreview();
+
+    // `onChanged` runs on the UI thread when a note the last preview embeds changed on disk
+    // (EmbedWatch), once until the next preview; set it before the first request.
+    void SetOnEmbedsChanged(std::function<void()> onChanged);
+    // The window's focus. Gaining it checks the embedded notes at once; while it lasts they are
+    // checked every kEmbedCheckMs (a stat each), on the worker's thread.
+    void SetFocused(bool focused);
+    // Checks the embedded notes now (on the worker's thread).
+    void CheckEmbeds();
 
 private:
     struct Job {
@@ -117,12 +139,14 @@ private:
         bool openAfter = false;
         std::string themeFile;
         bool headings = false;
+        int linkDepth = 0;
     };
     // Shared with the tasks posted to the UI thread, which may run after the worker is gone.
     struct Callbacks {
         bool alive = true;  // UI thread only
         PreviewCallback onPreview;
         ExportCallback onExport;
+        std::function<void()> onEmbedsChanged;
     };
     // The theme file last read (worker thread only).
     struct ThemeCache {
@@ -139,6 +163,8 @@ private:
     void RunExport(Job& job);
     // Sets job.options.theme from job.themeFile (when it has one); the theme's error.
     std::string ApplyTheme(Job& job);
+    // Stats the watched notes; tells the UI thread when one changed.
+    void CheckWatched();
 
     Platform& platform_;
     BuildFunction build_;
@@ -152,7 +178,11 @@ private:
     bool rerunPreview_ = false;   // guarded by mutex_: an export cancelled it; build it again
     // The cancel flag of the job being built (PdfOptions::cancel); reset when a job starts.
     std::atomic<bool> cancel_{false};
+    bool focused_ = true;         // guarded by mutex_
+    bool checkEmbeds_ = false;    // guarded by mutex_: CheckEmbeds asked
     ThemeCache themeCache_;
+    EmbedWatch embeds_;           // worker thread only: the last preview's embedded notes
+    bool embedsReported_ = false; // worker thread only: their change was told
     std::thread thread_;
 };
 

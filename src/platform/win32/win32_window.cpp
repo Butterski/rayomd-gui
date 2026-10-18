@@ -227,8 +227,16 @@ DialogSpec DialogFor(FileDialog kind) {
     case FileDialog::ChooseTheme:
         return {L"Choose PDF theme file", L"Theme files (*.theme;*.txt)\0*.theme;*.txt\0All files (*.*)\0*.*\0",
                 nullptr, false};
+    case FileDialog::ChooseVault:
+        return {L"Choose vault folder", L"", nullptr, false};
     }
     return {L"", L"All files (*.*)\0*.*\0", nullptr, false};
+}
+
+// The folder dialog starts at the folder its lParam names.
+int CALLBACK BrowseStart(HWND dialog, UINT message, LPARAM, LPARAM folder) {
+    if (message == BFFM_INITIALIZED && folder != 0) SendMessageW(dialog, BFFM_SETSELECTIONW, TRUE, folder);
+    return 0;
 }
 
 } // namespace
@@ -628,6 +636,35 @@ void Win32Window::ShowFileDialog(FileDialog kind, std::string suggestedPath,
 void Win32Window::RunDialog(FileDialog kind, const std::string& suggestedPath,
                             const std::function<void(FileDialogResult)>& callback) {
     const DialogSpec spec = DialogFor(kind);
+    if (kind == FileDialog::ChooseVault) {
+        // A folder: the shell's folder browser (shell32, loaded on first use).
+        std::wstring start = Widen(suggestedPath);
+        while (start.size() > 3 && (start.back() == L'\\' || start.back() == L'/')) start.pop_back();
+        BROWSEINFOW browse{};
+        browse.hwndOwner = window_;
+        browse.lpszTitle = spec.title;
+        browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+        browse.lpfn = &BrowseStart;
+        browse.lParam = start.empty() ? 0 : reinterpret_cast<LPARAM>(start.c_str());
+        EnterModal();
+        PIDLIST_ABSOLUTE chosen = SHBrowseForFolderW(&browse);
+        LeaveModal();
+        FileDialogResult result;
+        if (chosen) {
+            std::wstring folder(kDialogBufferChars, L'\0');
+            const BOOL named = SHGetPathFromIDListEx(chosen, folder.data(), static_cast<DWORD>(kDialogBufferChars),
+                                                     GPFIDL_DEFAULT);
+            ILFree(chosen);
+            folder.resize(named ? std::wcslen(folder.c_str()) : 0);
+            if (!folder.empty() && NarrowPath(folder, &result.path)) {
+                result.kind = FileDialogResult::Chosen;
+            } else if (client_) {
+                client_->OnPlatformError("The chosen folder has no file system path RayoMD can use");
+            }
+        }
+        if (callback) callback(std::move(result));
+        return;
+    }
     std::wstring buffer(kDialogBufferChars, L'\0');
     std::wstring initialDirectory;
     if (!suggestedPath.empty()) {

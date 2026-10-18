@@ -40,6 +40,7 @@ bool Bool(const ui::SettingsFile& file, std::string_view name, bool fallback) {
 }
 
 constexpr double kPointsPerMm = 72.0 / 25.4;
+constexpr double kSqrt2 = 1.4142135623730951;
 
 } // namespace
 
@@ -49,6 +50,10 @@ const char* const ExportSettings::kPageSizeNames[kPageSizeCount] = {"A4", "A3", 
 const char* const ExportSettings::kPageBreakNames[kPageBreakCount] = {"None", "Before H1", "Before H1\xE2\x80\x93H2",
                                                                       "Before H1\xE2\x80\x93H3"};
 const char* const ExportSettings::kDialectNames[kDialectCount] = {"GitHub", "Obsidian"};
+const char* const ExportSettings::kFootnotesNames[kFootnotesCount] = {"End of document", "Foot of page"};
+const char* const ExportSettings::kEmbedsNames[kEmbedsCount] = {"Content", "Link"};
+const char* const ExportSettings::kLinkedNotesNames[kLinkedNotesCount] = {"Off", "1 link deep", "2 links deep",
+                                                                          "3 links deep"};
 
 void ExportSettings::Load(const ui::SettingsFile& file) {
     const ExportSettings defaults;
@@ -60,12 +65,18 @@ void ExportSettings::Load(const ui::SettingsFile& file) {
     landscape = Bool(file, "landscape", defaults.landscape);
     customWidthMm = ClampDouble(file, "customWidthMm", defaults.customWidthMm, kMinPageMm, kMaxPageMm);
     customHeightMm = ClampDouble(file, "customHeightMm", defaults.customHeightMm, kMinPageMm, kMaxPageMm);
+    autoHeight = Bool(file, "autoHeight", defaults.autoHeight);
     toc = Bool(file, "toc", defaults.toc);
     tocDepth = ClampInt(file, "tocDepth", defaults.tocDepth, kMinTocDepth, kMaxTocDepth);
     numberHeadings = Bool(file, "numberHeadings", defaults.numberHeadings);
     numberDepth = ClampInt(file, "numberDepth", defaults.numberDepth, kMinNumberDepth, kMaxNumberDepth);
     pageBreakBefore = Index(file, "pageBreakBefore", defaults.pageBreakBefore, kPageBreakCount);
     dialect = Index(file, "dialect", defaults.dialect, kDialectCount);
+    footnotes = Index(file, "footnotes", defaults.footnotes, kFootnotesCount);
+    embeds = Index(file, "embeds", defaults.embeds, kEmbedsCount);
+    vaultFolder = file.GetString(Key("vaultFolder"));
+    linkedNotes = Index(file, "linkedNotes", defaults.linkedNotes, kLinkedNotesCount);
+    backlinks = Bool(file, "backlinks", defaults.backlinks);
     pageNumbers = Bool(file, "pageNumbers", defaults.pageNumbers);
     compress = Bool(file, "compress", defaults.compress);
     fastImages = Bool(file, "fastImages", defaults.fastImages);
@@ -88,12 +99,18 @@ void ExportSettings::Store(ui::SettingsFile& file) const {
     file.SetBool(Key("landscape"), landscape);
     file.SetDouble(Key("customWidthMm"), customWidthMm);
     file.SetDouble(Key("customHeightMm"), customHeightMm);
+    file.SetBool(Key("autoHeight"), autoHeight);
     file.SetBool(Key("toc"), toc);
     file.SetInt(Key("tocDepth"), tocDepth);
     file.SetBool(Key("numberHeadings"), numberHeadings);
     file.SetInt(Key("numberDepth"), numberDepth);
     file.SetInt(Key("pageBreakBefore"), pageBreakBefore);
     file.SetInt(Key("dialect"), dialect);
+    file.SetInt(Key("footnotes"), footnotes);
+    file.SetInt(Key("embeds"), embeds);
+    file.SetString(Key("vaultFolder"), vaultFolder);
+    file.SetInt(Key("linkedNotes"), linkedNotes);
+    file.SetBool(Key("backlinks"), backlinks);
     file.SetBool(Key("pageNumbers"), pageNumbers);
     file.SetBool(Key("compress"), compress);
     file.SetBool(Key("fastImages"), fastImages);
@@ -143,10 +160,17 @@ TinyPdf::PdfOptions ExportSettings::ToPdfOptions(const std::string& sourcePath, 
     case kA5: options.pageSize = TinyPdf::PdfPageSize::A5(); break;
     case kLetter: options.pageSize = TinyPdf::PdfPageSize::Letter(); break;
     case kLegal: options.pageSize = TinyPdf::PdfPageSize::Legal(); break;
-    case kCustomPage: options.pageSize = {customWidthMm * kPointsPerMm, customHeightMm * kPointsPerMm}; break;
+    case kCustomPage:
+        options.pageSize = {customWidthMm * kPointsPerMm, customHeightMm * kPointsPerMm};
+        if (autoHeight) {
+            // As ParsePageSize puts it: what is fitted to "a page" fits width * sqrt(2).
+            options.pageSize.height = options.pageSize.width * kSqrt2;
+            options.pageSize.autoHeight = true;
+        }
+        break;
     default: options.pageSize = TinyPdf::PdfPageSize::A4(); break;
     }
-    if (landscape) std::swap(options.pageSize.width, options.pageSize.height);
+    if (landscape && !options.pageSize.autoHeight) std::swap(options.pageSize.width, options.pageSize.height);
     options.sourcePath = sourcePath;
 #ifdef _WIN32
     options.enableUrlImages = urlImages;
@@ -167,6 +191,10 @@ TinyPdf::PdfOptions ExportSettings::ToPdfOptions(const std::string& sourcePath, 
     options.numberHeadings = numberHeadings ? numberDepth : 0;
     options.pageBreakBeforeLevel = pageBreakBefore;
     options.dialect = dialect == kObsidian ? TinyPdf::MarkdownDialect::Obsidian : TinyPdf::MarkdownDialect::GitHub;
+    options.footnotes = footnotes == kFootnotesPage ? TinyPdf::FootnotePlacement::Page : TinyPdf::FootnotePlacement::End;
+    options.embedsAsLinks = embeds == kEmbedLink;
+    options.vaultRoot = vaultFolder;
+    options.backlinks = !forPreview && backlinks && linkedNotes != kLinkedOff;
     options.theme = theme;
     return options;
 }
