@@ -28,6 +28,27 @@ std::string Pages(uint32_t pages) {
     return std::to_string(pages) + (pages == 1 ? " page" : " pages");
 }
 
+// An export with linked notes (rare, kept off the hot path's code): the book of the note at
+// `sourcePath` and the notes it links to, `depth` links deep, its first chapter the editor's
+// `utf8`. Sets `finished`'s counts; `error` when the note cannot be read.
+[[gnu::cold, gnu::noinline]] TinyPdf::BuildResult BuildLinkedBook(const std::string& utf8,
+                                                                  const std::string& sourcePath,
+                                                                  const TinyPdf::PdfOptions& options, int depth,
+                                                                  ExportFinished& finished, std::string& bytes,
+                                                                  std::string& error) {
+    TinyPdf::Book book;
+    size_t leftOut = 0;
+    if (!RayoMd::Book::ReadLinkedBook(RayoMd::File::PathFromUtf8(sourcePath), options, depth, book, leftOut, error) ||
+        book.chapters.empty()) {
+        if (error.empty()) error = "the note cannot be read";
+        return {};
+    }
+    book.chapters[0].markdown = utf8;
+    finished.linkedNotes = book.chapters.size() - 1;
+    finished.leftOut = leftOut;
+    return TinyPdf::BuildBookPdf(book, options, bytes);
+}
+
 } // namespace
 
 const char* BuildErrorText(TinyPdf::BuildError error) {
@@ -244,7 +265,10 @@ void BuildWorker::RunPreview(Job& job) {
     ready.themeFile = job.themeFile;
     ready.themeError = ApplyTheme(job);
     // The notes it embeds, stamped before the build reads them: a later edit shows as a change.
-    embeds_.Update(job.utf8, job.options);
+    // Only Obsidian's dialect embeds notes.
+    if (job.options.dialect == TinyPdf::MarkdownDialect::Obsidian || !embeds_.Empty()) {
+        embeds_.Update(job.utf8, job.options);
+    }
     embedsReported_ = false;
     std::string bytes;
     // Where each top-level block is laid out, for the source sync; fake builds leave it empty.
@@ -316,19 +340,7 @@ void BuildWorker::RunExport(Job& job) {
     TinyPdf::BuildResult result;
     std::string bookError;
     if (job.linkDepth > 0 && !job.sourcePath.empty()) {
-        // The book of the note and the notes it links to; the note's text is the editor's.
-        TinyPdf::Book book;
-        size_t leftOut = 0;
-        if (RayoMd::Book::ReadLinkedBook(RayoMd::File::PathFromUtf8(job.sourcePath), job.options, job.linkDepth, book,
-                                         leftOut, bookError) &&
-            !book.chapters.empty()) {
-            book.chapters[0].markdown = job.utf8;
-            finished.linkedNotes = book.chapters.size() - 1;
-            finished.leftOut = leftOut;
-            result = TinyPdf::BuildBookPdf(book, job.options, bytes);
-        } else if (bookError.empty()) {
-            bookError = "the note cannot be read";
-        }
+        result = BuildLinkedBook(job.utf8, job.sourcePath, job.options, job.linkDepth, finished, bytes, bookError);
     } else {
         result = build_(job.utf8, job.options, bytes);
     }

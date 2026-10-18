@@ -64,6 +64,7 @@ struct ExportSettings {
     int dialect = kGitHub;  // the Markdown the document is written in; Obsidian also completes `[[`
     int footnotes = kFootnotesEnd;
     int embeds = kEmbedContent;  // Obsidian's dialect only
+    bool hideTags = false;       // Obsidian's dialect only: its #tags left out
     // UTF-8 folder the notes a document embeds or links to are found in (PdfOptions::vaultRoot);
     // empty for the document's folder.
     std::string vaultFolder;
@@ -74,6 +75,7 @@ struct ExportSettings {
     bool fastImages = false;
     bool pdfa = false;
     bool pdfua = false;
+    bool blackText = false;  // for printing: black text, fills in light greys
     bool embedSource = false;
     bool highlightCode = true;
     bool diagrams = true;    // ```mermaid blocks drawn as diagrams; false shows their source

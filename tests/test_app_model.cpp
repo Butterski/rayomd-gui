@@ -181,11 +181,17 @@ RGUI_TEST("app.exportsettings.mapping") {
     CHECK_EQ(options.embedsAsLinks, false);
     CHECK(options.vaultRoot.empty());
     CHECK_EQ(options.backlinks, false);
+    CHECK_EQ(options.blackText, false);
+    CHECK_EQ(options.hideTags, false);
     CHECK_EQ(settings.LinkDepth(), 0);
     settings.footnotes = ExportSettings::kFootnotesPage;
     settings.embeds = ExportSettings::kEmbedLink;
     settings.vaultFolder = "/vault";
     settings.backlinks = true;
+    settings.blackText = true;
+    settings.hideTags = true;
+    CHECK_EQ(settings.ToPdfOptions("/doc/a.md", true).blackText, true);   // the preview shows the print too
+    CHECK_EQ(settings.ToPdfOptions("/doc/a.md", true).hideTags, true);
     options = settings.ToPdfOptions("/doc/a.md", false);
     CHECK(options.footnotes == TinyPdf::FootnotePlacement::Page);
     CHECK_EQ(options.embedsAsLinks, true);
@@ -259,6 +265,8 @@ RGUI_TEST("app.exportsettings.persist") {
     settings.vaultFolder = Utf8(dir / "Vault ż");
     settings.linkedNotes = ExportSettings::kLinked3;
     settings.backlinks = true;
+    settings.blackText = true;
+    settings.hideTags = true;
     settings.toc = true;
     settings.tocDepth = 6;
     settings.numberHeadings = true;
@@ -298,6 +306,8 @@ RGUI_TEST("app.exportsettings.persist") {
     CHECK_EQ(loaded.vaultFolder, settings.vaultFolder);
     CHECK_EQ(loaded.linkedNotes, ExportSettings::kLinked3);
     CHECK_EQ(loaded.backlinks, true);
+    CHECK_EQ(loaded.blackText, true);
+    CHECK_EQ(loaded.hideTags, true);
     CHECK_EQ(loaded.toc, true);
     CHECK_EQ(loaded.tocDepth, 6);
     CHECK_EQ(loaded.numberHeadings, true);
@@ -354,6 +364,8 @@ RGUI_TEST("app.exportsettings.persist") {
     CHECK(loaded.vaultFolder.empty());
     CHECK_EQ(loaded.autoHeight, false);
     CHECK_EQ(loaded.backlinks, false);
+    CHECK_EQ(loaded.blackText, false);
+    CHECK_EQ(loaded.hideTags, false);
     CHECK(loaded.themeError.empty());
 }
 

@@ -77,6 +77,8 @@ void ExportSettings::Load(const ui::SettingsFile& file) {
     vaultFolder = file.GetString(Key("vaultFolder"));
     linkedNotes = Index(file, "linkedNotes", defaults.linkedNotes, kLinkedNotesCount);
     backlinks = Bool(file, "backlinks", defaults.backlinks);
+    hideTags = Bool(file, "hideTags", defaults.hideTags);
+    blackText = Bool(file, "blackText", defaults.blackText);
     pageNumbers = Bool(file, "pageNumbers", defaults.pageNumbers);
     compress = Bool(file, "compress", defaults.compress);
     fastImages = Bool(file, "fastImages", defaults.fastImages);
@@ -111,6 +113,8 @@ void ExportSettings::Store(ui::SettingsFile& file) const {
     file.SetString(Key("vaultFolder"), vaultFolder);
     file.SetInt(Key("linkedNotes"), linkedNotes);
     file.SetBool(Key("backlinks"), backlinks);
+    file.SetBool(Key("hideTags"), hideTags);
+    file.SetBool(Key("blackText"), blackText);
     file.SetBool(Key("pageNumbers"), pageNumbers);
     file.SetBool(Key("compress"), compress);
     file.SetBool(Key("fastImages"), fastImages);
@@ -195,6 +199,8 @@ TinyPdf::PdfOptions ExportSettings::ToPdfOptions(const std::string& sourcePath, 
     options.embedsAsLinks = embeds == kEmbedLink;
     options.vaultRoot = vaultFolder;
     options.backlinks = !forPreview && backlinks && linkedNotes != kLinkedOff;
+    options.blackText = blackText;
+    options.hideTags = hideTags;   // the engine reads it under Obsidian's dialect only
     options.theme = theme;
     return options;
 }

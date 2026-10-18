@@ -224,6 +224,7 @@ The engine's export options, in the panel on the right (`Ctrl+,`):
   or stays a link (*Link*); the preview builds again when an embedded note changes on disk.
 - **Vault:** the folder embedded and linked notes are found in, by path or by name; by default
   the document's folder.
+- **Hide #tags** (Obsidian): the note's `#tags` are left out of the PDF.
 - **Auto height:** with a custom page size, one long page as tall as its content, for screens.
 - **Footnotes:** at the end of the document, or at the foot of the page of their reference.
 - **Contents:** a table of contents with its depth, headings numbered 1, 1.1, 1.1.1 to a depth,
@@ -231,6 +232,8 @@ The engine's export options, in the panel on the right (`Ctrl+,`):
   ` ```mermaid ` blocks drawn as diagrams (flowcharts, sequence diagrams, pie charts).
 - **Output:** PDF/A-3b, PDF/UA-1, compression, faster image encoding, the Markdown source
   embedded, URL images (Windows), opening the PDF after export.
+- **Black text for printing:** text, links and code in black, fills and diagrams in light greys,
+  for a black-and-white printer; images keep their colours.
 - **Linked notes:** the export is a book of the note and the notes it links to, 1 to 3 links
   deep; the status line says how many notes it added and how many it left out.
 - **Backlinks:** with linked notes, each note of the book ends with the notes that link to it.

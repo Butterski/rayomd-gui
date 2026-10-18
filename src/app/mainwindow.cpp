@@ -455,6 +455,7 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     }
     ctx.BeginDisabled(!obsidian);
     changed |= ui::Dropdown(ctx, "##embeds", export_.embeds, embeds, labeled("Embeds"));
+    check("Hide #tags", export_.hideTags);
     ctx.EndDisabled();
     // The vault: where embedded and linked notes are found (Obsidian's embeds, and linked notes
     // in either dialect).
@@ -555,6 +556,7 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     check("PDF/UA-1", export_.pdfua);
     check("Compress", export_.compress);
     check("Fast images", export_.fastImages);
+    check("Black text for printing", export_.blackText);
     {
         const RectF r = row();
         changed |= ui::Checkbox(ctx, "Embed Markdown source", export_.embedSource, r);
