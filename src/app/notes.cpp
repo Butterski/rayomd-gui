@@ -72,7 +72,7 @@ void ForEachEmbeddedNote(std::string_view text, size_t limit, Each each) {
 
 } // namespace
 
-std::vector<std::string> ListNoteNames(const fs::path& folder) {
+std::vector<std::string> ListNoteNames(const fs::path& folder, size_t maxNames) {
     std::vector<std::string> names;
     if (folder.empty()) return names;
     struct Folder {
@@ -82,13 +82,13 @@ std::vector<std::string> ListNoteNames(const fs::path& folder) {
     std::deque<Folder> folders;
     folders.push_back({folder, 0});
     size_t entries = 0;
-    while (!folders.empty() && names.size() < kMaxNoteNames && entries < kMaxNoteScanEntries) {
+    while (!folders.empty() && names.size() < maxNames && entries < kMaxNoteScanEntries) {
         Folder current = std::move(folders.front());
         folders.pop_front();
         std::error_code error;
         fs::directory_iterator it(current.path, fs::directory_options::skip_permission_denied, error);
         for (; !error && it != fs::directory_iterator(); it.increment(error)) {
-            if (++entries > kMaxNoteScanEntries || names.size() >= kMaxNoteNames) break;
+            if (++entries > kMaxNoteScanEntries || names.size() >= maxNames) break;
             const fs::directory_entry& entry = *it;
             const fs::path name = entry.path().filename();
             const std::string utf8 = name.u8string();

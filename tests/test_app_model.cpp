@@ -1072,12 +1072,14 @@ RGUI_TEST("app.notes.names") {
     for (size_t i = 0; i < names.size() && i < expected.size(); i++) CHECK_EQ(names[i], expected[i]);
     CHECK(rgui::ListNoteNames(dir / "missing").empty());
 
-    // Bounded: kMaxNoteNames names at most.
+    // Bounded: at most the names asked for (kMaxNoteNames in the app; 50 here, as 5,000 files are
+    // slow to make on Windows).
+    constexpr size_t kNames = 50;
     const fs::path many = TempDir("note-names-many");
-    for (size_t i = 0; i < rgui::kMaxNoteNames + 20; i++) {
+    for (size_t i = 0; i < kNames + 20; i++) {
         CHECK(RayoMd::File::WriteAll(many / ("n" + std::to_string(i) + ".md"), ""));
     }
-    CHECK_EQ(rgui::ListNoteNames(many).size(), rgui::kMaxNoteNames);
+    CHECK_EQ(rgui::ListNoteNames(many, kNames).size(), kNames);
 }
 
 // The notes a preview embeds are stamped; a change on disk, also of a nested embed, asks for a

@@ -22,11 +22,12 @@ constexpr int kMaxNoteDepth = 8;
 constexpr size_t kMaxNoteScanEntries = 50000;
 
 // The names of the notes under `folder`: the stems (UTF-8) of its `.md` files (any case),
-// breadth first, at most kMaxNoteDepth folders down and kMaxNoteNames names from at most
-// kMaxNoteScanEntries entries. Hidden files and folders (a name beginning with `.`: `.obsidian`,
-// `.trash`, `.git`) are passed over and links to folders not followed. A name a wiki link cannot
-// hold (`[`, `]`, `|`, `#`, `^`) is left out. Sorted ASCII case-insensitively, each once.
-std::vector<std::string> ListNoteNames(const std::filesystem::path& folder);
+// breadth first, at most kMaxNoteDepth folders down and `maxNames` names (kMaxNoteNames; lower in
+// tests, as thousands of files are slow to make on Windows) from at most kMaxNoteScanEntries
+// entries. Hidden files and folders (a name beginning with `.`: `.obsidian`, `.trash`, `.git`)
+// are passed over and links to folders not followed. A name a wiki link cannot hold (`[`, `]`,
+// `|`, `#`, `^`) is left out. Sorted ASCII case-insensitively, each once.
+std::vector<std::string> ListNoteNames(const std::filesystem::path& folder, size_t maxNames = kMaxNoteNames);
 
 // The notes a document embeds (Obsidian's `![[note]]` alone on a line), as the engine resolves
 // them (TinyPdf::Internal::Vault), nested embeds too, and the size and time of each file. Lines
