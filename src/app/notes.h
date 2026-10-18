@@ -5,6 +5,7 @@
 // Both work off the UI thread and are bounded.
 #pragma once
 
+#include "common/file_io.h"
 #include "rayomd/tiny_pdf.h"
 
 #include <cstddef>
@@ -30,8 +31,9 @@ constexpr size_t kMaxNoteScanEntries = 50000;
 std::vector<std::string> ListNoteNames(const std::filesystem::path& folder, size_t maxNames = kMaxNoteNames);
 
 // The notes a document embeds (Obsidian's `![[note]]` alone on a line), as the engine resolves
-// them (TinyPdf::Internal::Vault), nested embeds too, and the size and time of each file. Lines
-// inside fences count too: a note watched for nothing costs a stat. Worker thread only.
+// them (TinyPdf::Internal::Vault), nested embeds too, and the stamp of each file (one stat:
+// RayoMd::File::StampOf). Lines inside fences count too: a note watched for nothing costs a stat.
+// Worker thread only.
 class EmbedWatch {
 public:
     // Notes watched at most; past them the rest go unwatched.
@@ -42,27 +44,22 @@ public:
     // embed lines, the vault or the document's path changed, or a watched file did; else this
     // costs a stat a note. Nothing for a document that embeds no note (MayEmbedNotes).
     void Update(const std::string& text, const TinyPdf::PdfOptions& options);
-    // Whether a watched note's file changed (size, time, or came or went) since Update.
+    // Whether a watched note's file changed (RayoMd::File::Stamp: size, times, identity; or came
+    // or went) since Update.
     bool Changed() const;
-    bool Empty() const { return stamps_.empty(); }
-    size_t Count() const { return stamps_.size(); }
+    bool Empty() const { return watched_.empty(); }
+    size_t Count() const { return watched_.size(); }
     void Clear();
 
 private:
-    struct Stamp {
+    struct Watched {
         std::filesystem::path path;
-        bool exists = false;
-        uintmax_t size = 0;
-        std::filesystem::file_time_type modified;
-        bool operator==(const Stamp& other) const {
-            return exists == other.exists && size == other.size && modified == other.modified;
-        }
+        RayoMd::File::Stamp stamp;
     };
-    static Stamp StampOf(const std::filesystem::path& path);
     void Resolve(const std::string& text, const TinyPdf::PdfOptions& options);
 
     std::string key_;   // the vault, the document's path and its embed targets
-    std::vector<Stamp> stamps_;
+    std::vector<Watched> watched_;
 };
 
 } // namespace rgui

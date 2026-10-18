@@ -90,23 +90,21 @@ std::vector<std::string> ListNoteNames(const fs::path& folder, size_t maxNames) 
         for (; !error && it != fs::directory_iterator(); it.increment(error)) {
             if (++entries > kMaxNoteScanEntries || names.size() >= maxNames) break;
             const fs::directory_entry& entry = *it;
-            const fs::path name = entry.path().filename();
-            const std::string utf8 = name.u8string();
-            if (utf8.empty() || utf8[0] == '.') continue;
-            std::error_code statusError;
-            const fs::file_status status = entry.symlink_status(statusError);
-            if (statusError) continue;
-            if (fs::is_directory(status)) {
+            // As RayoMd::File::PathToUtf8 makes it: never a throw on a name that is not UTF-16.
+            const std::string name = RayoMd::File::PathToUtf8(entry.path().filename());
+            if (name.empty() || name[0] == '.') continue;
+            // A folder, by the type the listing gave where the file system tells it (no stat
+            // then); a link to one is not followed.
+            std::error_code typeError;
+            if (entry.is_directory(typeError) && !entry.is_symlink(typeError) && !typeError) {
                 if (current.depth < kMaxNoteDepth) folders.push_back({entry.path(), current.depth + 1});
                 continue;
             }
-            const std::string extension = name.extension().u8string();
-            if (extension.size() != 3 || extension[0] != '.' || Lower(extension[1]) != 'm' || Lower(extension[2]) != 'd') {
-                continue;
-            }
-            std::string stem = name.stem().u8string();
-            if (stem.empty() || stem.find_first_of("[]|#^") != std::string::npos) continue;
-            names.push_back(std::move(stem));
+            const size_t n = name.size();
+            if (n < 4 || name[n - 3] != '.' || Lower(name[n - 2]) != 'm' || Lower(name[n - 1]) != 'd') continue;
+            const std::string_view stem(name.data(), n - 3);
+            if (stem.find_first_of("[]|#^") != kNone) continue;
+            names.emplace_back(stem);
         }
     }
     std::sort(names.begin(), names.end(), LessIgnoringCase);
@@ -114,28 +112,14 @@ std::vector<std::string> ListNoteNames(const fs::path& folder, size_t maxNames) 
     return names;
 }
 
-EmbedWatch::Stamp EmbedWatch::StampOf(const fs::path& path) {
-    Stamp stamp;
-    stamp.path = path;
-    std::error_code sizeError, timeError;
-    stamp.size = fs::file_size(path, sizeError);
-    stamp.modified = fs::last_write_time(path, timeError);
-    stamp.exists = !sizeError && !timeError;
-    if (!stamp.exists) {
-        stamp.size = 0;
-        stamp.modified = fs::file_time_type();
-    }
-    return stamp;
-}
-
 void EmbedWatch::Clear() {
     key_.clear();
-    stamps_.clear();
+    watched_.clear();
 }
 
 bool EmbedWatch::Changed() const {
-    for (const Stamp& stamp : stamps_) {
-        if (!(StampOf(stamp.path) == stamp)) return true;
+    for (const Watched& note : watched_) {
+        if (RayoMd::File::StampOf(note.path) != note.stamp) return true;
     }
     return false;
 }
@@ -159,7 +143,7 @@ void EmbedWatch::Update(const std::string& text, const TinyPdf::PdfOptions& opti
 
 void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& options) {
     using TinyPdf::Internal::EmbedSet;
-    stamps_.clear();
+    watched_.clear();
     TinyPdf::Internal::Vault vault(options.vaultRoot, options.sourcePath);
     if (!vault.Valid()) return;
     fs::path folder = RayoMd::File::PathFromUtf8(options.sourcePath).parent_path();
@@ -178,14 +162,14 @@ void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& opt
     auto visit = [&](std::string_view from, const fs::path& in, int depth) {
         if (depth >= EmbedSet::kMaxDepth) return;
         ForEachEmbeddedNote(from, kMaxWatched, [&](std::string_view target) {
-            if (stamps_.size() >= kMaxWatched) return;
+            if (watched_.size() >= kMaxWatched) return;
             const fs::path path = vault.Find(in, target, true);
             if (path.empty()) return;
-            for (const Stamp& known : stamps_) {
+            for (const Watched& known : watched_) {
                 if (known.path == path) return;
             }
             // Stamped before it is read: a change after this shows as one.
-            stamps_.push_back(StampOf(path));
+            watched_.push_back({path, RayoMd::File::StampOf(path)});
             Note note;
             RayoMd::File::FileIdentity identity;
             if (budget > 0 && vault.Read(path, budget, note.text, identity)) {
@@ -197,7 +181,7 @@ void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& opt
         });
     };
     visit(text, folder, 0);
-    while (!notes.empty() && stamps_.size() < kMaxWatched) {
+    while (!notes.empty() && watched_.size() < kMaxWatched) {
         Note note = std::move(notes.front());
         notes.pop_front();
         visit(note.text, note.folder, note.depth);
