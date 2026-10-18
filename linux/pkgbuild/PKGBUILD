@@ -2,7 +2,7 @@
 # Builds the working tree this file sits in: the repository is private, so there is no source to
 # download. Run makepkg here (linux/pkgbuild) with the submodule checked out.
 pkgname=rayomd-gui
-pkgver=1.2.0
+pkgver=1.3.0
 pkgrel=1
 pkgdesc='RayoMD desktop app: write Markdown, see and export the PDF (Omarchy-native, Wayland)'
 arch=('x86_64')
