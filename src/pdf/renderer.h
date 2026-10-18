@@ -23,6 +23,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -127,16 +129,51 @@ bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, Ren
 // The same with DefaultRenderEnvironment().
 bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, RenderStats* stats);
 
+// What the bands of one tall page share (RenderPageRows): where on the page each `q ... Q` group
+// of its content stream (nested ones too) draws, so a band passes over the groups wholly above or
+// below it without reading them. The first band rendered with an empty index fills it as it
+// reads the whole content, as a band without one does; bands rendered meanwhile read the whole
+// content too. One per page of one PdfFile, for every width; any thread.
+class BandIndex {
+public:
+    // A group: its bytes in the page's content, from the end of the operator before its `q` to
+    // the end of its `Q`, and the rows it may draw in, in points down from the MediaBox's top:
+    // its paths' points (strokes grown by gfx::StrokeReach), images' corners and glyphs' em boxes
+    // grown to [-2, 3] em, which a band grows by kMarginPx.
+    struct Group {
+        uint32_t begin = 0;
+        uint32_t end = 0;
+        float top = 0;
+        float bottom = 0;
+    };
+    // What a group's rows are grown by: the 32 px glyphs are grown by when culled, and 2 px for
+    // anti-aliasing and rounding.
+    static constexpr double kMarginPx = 34;
+
+    // The groups once a band filled them, ordered by `begin`; else nullptr, and `fill` is true
+    // for the one caller that fills them now (it then calls Fill, or Fill(nullptr) to leave it).
+    std::shared_ptr<const std::vector<Group>> Get(bool& fill);
+    void Fill(std::shared_ptr<const std::vector<Group>> groups);
+    // Bytes the groups take.
+    size_t Bytes() const;
+
+private:
+    mutable std::mutex mutex_;
+    bool filling_ = false;
+    std::shared_ptr<const std::vector<Group>> groups_;
+};
+
 // A band of a page of any height up to kMaxPageRows: rows [top, top + rows) of the image
 // RenderPage would give at `widthPx` (`out` is widthPx x rows), drawn with the same base
 // transform into a surface whose first row is device row `top` (gfx::Canvas::SetTarget). The
 // pixels are RenderPage's, but in the rows next to the band's edges, where a path crossing one
-// is cut at it, by up to 1 per channel. The content is interpreted whole for every band, and
-// what lies outside the band is culled as outside any clip; the band spends the page's limits
-// (RenderLimits), its own pixels in place of the page's. False, with `out` unchanged, when `top`
-// and `rows` do not lie within the page's height, rows > kMaxRenderSide or widthPx * rows >
-// kMaxRenderPixels; otherwise as RenderPage.
+// is cut at it, by up to 1 per channel. The content is interpreted whole, but for the groups
+// `index` (nullptr: none) knows to lie wholly outside the band, and what lies outside the band is
+// culled as outside any clip; the band spends the page's limits (RenderLimits), its own pixels in
+// place of the page's. False, with `out` unchanged, when `top` and `rows` do not lie within the
+// page's height, rows > kMaxRenderSide or widthPx * rows > kMaxRenderPixels; otherwise as
+// RenderPage.
 bool RenderPageRows(const PdfFile& file, int page, int widthPx, int top, int rows, gfx::Image& out,
-                    RenderStats* stats, const RenderEnvironment& environment);
+                    RenderStats* stats, const RenderEnvironment& environment, BandIndex* index = nullptr);
 
 } // namespace rgui::pdf

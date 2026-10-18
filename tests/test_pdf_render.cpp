@@ -559,34 +559,42 @@ RGUI_TEST("pdf.render_strips") {
     Image image;
     CHECK(!RenderPage(*file, 0, 1200, image, nullptr, env));
 
-    // At 600 px (14,521 rows) it can be: every band of 2,048 rows is the whole page's rows.
+    // At 600 px (14,521 rows) it can be: every band of 2,048 rows is the whole page's rows. The
+    // bands share an index: the first reads every glyph, the others pass over the groups outside
+    // them and get the pixels of a band that reads them all.
     Image whole;
     RenderStats wholeStats;
     CHECK(RenderPage(*file, 0, 600, whole, &wholeStats, env));
     CHECK(wholeStats.unknown.empty());
     CHECK_EQ(whole.height, RenderHeight(595, 14400, 600));
+    rgui::pdf::BandIndex index;
     size_t differing = 0;
     int largest = 0;
     for (int top = 0; top < whole.height; top += 2048) {
-        Image band;
+        Image band, plain;
         RenderStats stats;
         const int rows = std::min(2048, whole.height - top);
-        CHECK(RenderPageRows(*file, 0, 600, top, rows, band, &stats, env));
+        CHECK(RenderPageRows(*file, 0, 600, top, rows, band, &stats, env, &index));
         CHECK(stats.unknown.empty());
         CHECK_EQ(band.width, 600);
         CHECK_EQ(band.height, rows);
-        CHECK(stats.glyphs == wholeStats.glyphs);
+        CHECK(top == 0 ? stats.glyphs == wholeStats.glyphs : stats.glyphs * 2 < wholeStats.glyphs);
+        CHECK(RenderPageRows(*file, 0, 600, top, rows, plain, nullptr, env));
+        CHECK(band.pixels == plain.pixels);
         const BandDiff diff = CompareRows(whole, top, band);
         differing += diff.pixels;
         largest = std::max(largest, diff.largest);
     }
-    std::printf("bands of a 600 x %d page: %zu of %zu pixels differ from the whole page's, by at most %d\n",
-                whole.height, differing, whole.pixels.size(), largest);
+    std::printf("bands of a 600 x %d page: %zu of %zu pixels differ from the whole page's, by at most %d; "
+                "index %zu bytes\n",
+                whole.height, differing, whole.pixels.size(), largest, index.Bytes());
     CHECK(largest <= 2);
     CHECK(differing * 10000 <= whole.pixels.size());
+    CHECK(index.Bytes() > 0);
 
-    // At 1,200 px: every strip of 2,048 rows draws; one across the boundary of two others gives
-    // their rows (no seam), and a band of the whole page's height is refused.
+    // At 1,200 px: every strip of 2,048 rows draws, with the index of 600 px as without one; one
+    // across the boundary of two others gives their rows (no seam), and a band of the whole
+    // page's height is refused.
     const int height = RenderHeight(595, 14400, 1200);
     std::vector<Image> strips;
     int inked = 0;
@@ -594,16 +602,19 @@ RGUI_TEST("pdf.render_strips") {
     for (int top = 0; top < height; top += 2048) {
         strips.emplace_back();
         const auto start = std::chrono::steady_clock::now();
-        CHECK(RenderPageRows(*file, 0, 1200, top, std::min(2048, height - top), strips.back(), nullptr, env));
+        CHECK(RenderPageRows(*file, 0, 1200, top, std::min(2048, height - top), strips.back(), nullptr, env, &index));
         slowest = std::max(slowest, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
         inked += HasInk(strips.back());
+        Image plain;
+        CHECK(RenderPageRows(*file, 0, 1200, top, std::min(2048, height - top), plain, nullptr, env));
+        CHECK(strips.back().pixels == plain.pixels);
     }
     std::printf("1200 x %d page: %zu strips, %d with ink, slowest %.1f ms\n", height, strips.size(), inked, slowest);
     CHECK_EQ(strips.size(), size_t(15));
     CHECK(inked >= 12);
     for (int boundary = 2048; boundary < height; boundary += 3 * 2048) {
         Image across;
-        CHECK(RenderPageRows(*file, 0, 1200, boundary - 512, 1024, across, nullptr, env));
+        CHECK(RenderPageRows(*file, 0, 1200, boundary - 512, 1024, across, nullptr, env, &index));
         const size_t k = static_cast<size_t>(boundary / 2048);
         Image above, below;
         above.width = below.width = 1200;
@@ -661,6 +672,60 @@ RGUI_TEST("pdf.render_strips_images") {
     CHECK(RenderPageRows(*file, 0, 100, 3900, 100, band, &stats, env));
     CHECK_EQ(stats.images, uint32_t(1));
     CHECK(Near(At(band, 50, 50), {64, 64, 64}));
+}
+
+// The groups a BandIndex passes over: a band with the index has the pixels of one without, for
+// groups that draw past their points (a thick stroke, glyph boxes, an image), nest, leave a path
+// or text matrices behind (never passed over), and a shading (anywhere).
+RGUI_TEST("pdf.render_strips_index") {
+    using rgui::pdf::RenderPageRows;
+    if (NoHelvetica("pdf.render_strips_index")) return;
+    const std::string content =
+        "q 0 0 1 rg 10 3990 80 5 re f Q\n"
+        "q 1 0 0 RG 40 w 10 3000 m 90 3000 l S Q\n"
+        "q 0 g BT /F1 60 Tf 10 2600 Td (Hg) Tj ET Q\n"
+        "q 10 2000 m 90 2000 l Q 0 0 1 RG 2 w S\n"
+        "q 1 0 0 1 0 1500 cm q 0 1 0 rg 0 0 100 10 re f Q 0 0 1 rg 0 20 100 10 re f Q\n"
+        "q BT /F1 30 Tf 10 1200 Td (A) Tj Q (B) Tj ET\n"
+        "BT /F1 30 Tf 10 1000 Td (C) Tj ET q (D) Tj Q\n"
+        "q 100 0 0 100 0 500 cm /I Do Q\n"
+        "q 0 0 100 300 re W n /S sh Q\n"
+        "q 0 0 1 rg 0 100 100 10 re f Q\n";
+    // Rules down the page, 100 points apart.
+    std::string rules;
+    for (int y = 50; y < 4000; y += 100) rules += "q 0.5 g 10 " + std::to_string(y) + " 80 4 re f Q\n";
+    const std::string gray(16 * 16, '\x40');
+    const std::string pdf =
+        PagePdf(content + rules,
+                "<< /XObject << /I 5 0 R >> /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> "
+                "/Shading << /S << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 0 300] "
+                "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >> >>",
+                100, 4000,
+                {Stream(gray, " /Type /XObject /Subtype /Image /Width 16 /Height 16 "
+                              "/ColorSpace /DeviceGray /BitsPerComponent 8")});
+    const auto file = PdfFile::Parse(pdf, nullptr);
+    CHECK(file != nullptr);
+    if (!file) return;
+    const auto& env = TestEnvironment();
+    for (const int width : {100, 250}) {
+        rgui::pdf::BandIndex index;
+        const int height = rgui::pdf::RenderHeight(100, 4000, width);
+        uint32_t operators = 0, plainOperators = 0;
+        for (const int rows : {37, 500}) {
+            for (int top = 0; top < height; top += rows) {
+                Image band, plain;
+                RenderStats stats, plainStats;
+                const int n = std::min(rows, height - top);
+                CHECK(RenderPageRows(*file, 0, width, top, n, band, &stats, env, &index));
+                CHECK(RenderPageRows(*file, 0, width, top, n, plain, &plainStats, env));
+                CHECK(band.pixels == plain.pixels);
+                operators += stats.operators;
+                plainOperators += plainStats.operators;
+            }
+        }
+        // The index passed over most groups.
+        CHECK(operators * 3 < plainOperators);
+    }
 }
 
 namespace {

@@ -7,7 +7,9 @@
 //
 // A tall page (StripCount: one long page, --page-size=WIDTHxauto) is drawn in strips of
 // kStripRows rows with pdf::RenderPageRows, and only the strips in view and next to it are
-// rendered; the LRU keys them by (PageKey, width, strip).
+// rendered; the LRU keys them by (PageKey, width, strip). The page's strips share a
+// pdf::BandIndex: the first strip drawn reads the whole content and notes where its groups
+// draw, the others pass over those outside them.
 #pragma once
 
 #include "gfx/surface.h"
@@ -30,6 +32,7 @@ namespace rgui {
 class Platform;
 
 namespace pdf {
+class BandIndex;
 class PdfFile;
 }
 namespace text {
@@ -141,6 +144,8 @@ private:
         int stripWidth = 0;
         std::vector<StripSlot> strips;
         std::vector<StripSlot> under;
+        // What its strips of this build share, at every width.
+        std::shared_ptr<pdf::BandIndex> bands;
     };
     struct Job {
         std::shared_ptr<const pdf::PdfFile> pdf;
@@ -149,6 +154,7 @@ private:
         int strip = -1;          // -1: the whole page
         pdf::PdfHash key;
         int generation = 0;
+        std::shared_ptr<pdf::BandIndex> bands;   // a strip's
     };
     struct CacheKey {
         pdf::PdfHash pageKey;

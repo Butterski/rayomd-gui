@@ -463,17 +463,36 @@ private:
     }
 };
 
+// sqrt|det m|, at least 1e-6: the scale of a zero-width stroke and of the flattening tolerance.
+double StrokeScale(const Matrix& m) {
+    const double s = ExactMath::Sqrt(m.a * m.d - m.b * m.c > 0 ? m.a * m.d - m.b * m.c : m.b * m.c - m.a * m.d);
+    return s >= 1e-6 ? s : 1e-6;  // NaN too
+}
+
+double HalfWidth(double width, double s) {
+    return width > 0 ? width / 2 : 0.5 / s;
+}
+
 } // namespace
+
+double StrokeReach(const Matrix& m, const StrokeStyle& style) {
+    // Half the width through the Frobenius norm of m (at least its largest stretch), times the
+    // miter limit for miter joins or 1.5 for square caps and round joins, plus the flattening
+    // tolerance.
+    const double hw = HalfWidth(style.width, StrokeScale(m));
+    const double norm = ExactMath::Sqrt(m.a * m.a + m.b * m.b + m.c * m.c + m.d * m.d);
+    const double factor = style.join == LineJoin::Miter && style.miterLimit > 1.5 ? style.miterLimit : 1.5;
+    return hw * norm * factor + 1.0;
+}
 
 void StrokeOutline(const Path& path, const Matrix& m, const StrokeStyle& style, Path& outline,
                    const StrokeLimits* limits) {
     outline.Clear();
-    double s = ExactMath::Sqrt(m.a * m.d - m.b * m.c > 0 ? m.a * m.d - m.b * m.c : m.b * m.c - m.a * m.d);
-    if (!(s >= 1e-6)) s = 1e-6;  // NaN too
+    const double s = StrokeScale(m);
     if (!(s < 1e12)) return;
     const double width = style.width;
     if (!(width < 1e12)) return;  // NaN and absurd widths draw nothing
-    const double hw = width > 0 ? width / 2 : 0.5 / s;
+    const double hw = HalfWidth(width, s);
     const double radiusPx = hw * s;
     int steps = static_cast<int>(ExactMath::Ceil(ExactMath::Sqrt(radiusPx) * 4));
     if (!(steps >= 4)) steps = 4;
@@ -481,18 +500,13 @@ void StrokeOutline(const Path& path, const Matrix& m, const StrokeStyle& style, 
     const float tolerance = static_cast<float>(kFlattenTolerance / s);
 
     Stroker stroker(style, hw, steps, outline);
-    // How far from its line the stroke reaches in device pixels: half the width (through the
-    // Frobenius norm of m, at least its largest stretch) times the miter limit for miter joins,
-    // or 1.5 for square caps and round joins, plus the flattening tolerance.
     FlattenCull cull;
     const FlattenCull* cullPtr = nullptr;
     if (limits) {
         const RectI* clip = nullptr;
         double reach = 0;
         if (!limits->clip.Empty()) {
-            const double norm = ExactMath::Sqrt(m.a * m.a + m.b * m.b + m.c * m.c + m.d * m.d);
-            const double factor = style.join == LineJoin::Miter && style.miterLimit > 1.5 ? style.miterLimit : 1.5;
-            reach = hw * norm * factor + 1.0;
+            reach = StrokeReach(m, style);
             if (reach < 1e9) {
                 clip = &limits->clip;
                 cull.toDevice = m;

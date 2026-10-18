@@ -650,7 +650,7 @@ RGUI_TEST("pdf.preview_strips") {
     rgui::test::HeadlessPlatform platform;
     // The first of the time is the fonts' and images' first use: measured after a warm-up, the
     // best of five.
-    double a4Ms = 1e9, tallMs = 1e9, middleMs = 1e9;
+    double a4Ms = 1e9, tallMs = 1e9, middleMs = 1e9, allMs = 1e9;
     size_t a4Bytes = 0, tallBytes = 0;
     for (int round = 0; round < 6; round++) {
         {
@@ -704,9 +704,20 @@ RGUI_TEST("pdf.preview_strips") {
         CHECK(strips.size() >= 2);
         CHECK(!pages.Current(0, 1200, 0, 1000));
     }
+    // Scrolling through the whole page: every strip, one thread.
+    const int height = rgui::pdf::RenderHeight(595, 14400, 1200);
+    for (int round = 0; round < 3; round++) {
+        PreviewPages pages(platform, &rgui::pdftest::TestFontIndex(), [] {}, 1);
+        pages.SetDocument(tall, 1);
+        const auto start = Clock::now();
+        pages.Request({{0, 0, height}}, 1200);
+        CHECK(platform.PumpUntil([&] { return pages.Current(0, 1200, 0, height); }, 60000));
+        allMs = std::min(allMs, MsSince(start));
+        CHECK_EQ(pages.RenderedCount(), uint64_t(15));
+    }
     std::printf("preview at 1200 px: A4 page whole %.1f ms, %.1f MiB; 595 x 14400 pt page: first strip %.1f ms, "
-                "%.1f MiB with its neighbour; two strips mid-page %.1f ms\n",
-                a4Ms, a4Bytes / 1048576.0, tallMs, tallBytes / 1048576.0, middleMs);
+                "%.1f MiB with its neighbour; two strips mid-page %.1f ms; all 15 strips %.1f ms\n",
+                a4Ms, a4Bytes / 1048576.0, tallMs, tallBytes / 1048576.0, middleMs, allMs);
     CHECK(tallMs < 2000 * kSlow);
     CHECK(tallBytes < 24u << 20);
 }

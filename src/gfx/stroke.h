@@ -47,4 +47,10 @@ struct StrokeLimits {
 void StrokeOutline(const Path& path, const Matrix& m, const StrokeStyle& style, Path& outline,
                    const StrokeLimits* limits = nullptr);
 
+// How far from its path, in device pixels, the outline StrokeOutline makes of a path under `m`
+// reaches: half the width (a zero-width stroke's under `m`) through the Frobenius norm of `m`,
+// times the miter limit for miter joins or 1.5 for square caps and round joins, plus 1. The
+// outline lies within this of the path's points (curve control points included) under `m`.
+double StrokeReach(const Matrix& m, const StrokeStyle& style);
+
 } // namespace rgui::gfx

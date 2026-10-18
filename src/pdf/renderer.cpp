@@ -8,6 +8,7 @@
 #include "text/glyphcache.h"
 
 #include <algorithm>
+#include <limits>
 #include <list>
 #include <memory>
 #include <unordered_map>
@@ -35,6 +36,13 @@ constexpr size_t kKeptScratchBytes = 8u << 20;
 
 bool Finite(double v) {
     return v == v && v - v == 0;
+}
+
+// `op` is the operator `name`: compared in place, whatever GCC inlines around the comparison
+// (std::string_view's operator== left out of line costs a call and a memcmp each).
+template <size_t N>
+__attribute__((always_inline)) inline bool Is(std::string_view op, const char (&name)[N]) {
+    return op.size() == N - 1 && __builtin_memcmp(op.data(), name, N - 1) == 0;
 }
 
 // A user-space coordinate as a float, kept in float's range.
@@ -129,24 +137,48 @@ Scratch& ThreadScratch() {
     return scratch;
 }
 
+constexpr double kInfinity = std::numeric_limits<double>::infinity();
+// Groups a band notes at most (BandIndex): 1 MiB of them.
+constexpr size_t kMaxGroups = size_t(1) << 16;
+
+// A band of a tall page (RenderPageRows): its device rows, and the groups of the page's content
+// it passes over or notes (BandIndex).
+struct Band {
+    double scale = 1;    // device pixels per point
+    double top = 0;      // device rows [top, bottom)
+    double bottom = 0;
+    const std::vector<BandIndex::Group>* skip = nullptr;
+    std::vector<BandIndex::Group>* fill = nullptr;
+};
+
 class Interpreter {
     using RectI = gfx::RectI;
 
 public:
-    // `band`: the surface holds only some rows of the page (RenderPageRows), so whole strings of
-    // text are often wholly above or below it.
+    // `band`: the surface holds only these rows of the page (RenderPageRows), so whole strings of
+    // text are often wholly above or below it; nullptr for a whole page.
     Interpreter(const PdfFile& file, const RenderEnvironment& env, RenderStats& stats, Scratch& scratch,
-                gfx::WorkBudget& budget, const Matrix& base, uint64_t maskLimit, bool band)
+                gfx::WorkBudget& budget, const Matrix& base, uint64_t maskLimit, const Band* band)
         : file_(file), env_(env), stats_(stats), s_(scratch), canvas_(scratch.canvas), budget_(budget),
-          maskLimit_(maskLimit), band_(band) {
+          maskLimit_(maskLimit), band_(band), fill_(band ? band->fill : nullptr) {
         gs_.ctm = base;
     }
 
+    bool Stopped() const { return stopped_; }
+
+    // Content at form depth `depth`. The page's (depth 0) in a band with a BandIndex: the groups
+    // the index knows to lie outside the band are passed over; or, filling it, every group is
+    // noted.
     void Run(std::string_view content, const PdfValue& resources, int depth) {
         ContentLexer lexer(content);
         std::string_view op;
         std::vector<PdfValue> operands;
-        while (!stopped_ && lexer.Next(op, operands)) {
+        const bool indexed = depth == 0 && band_ && (band_->skip || fill_);
+        size_t next = 0;   // the first of band_->skip not passed yet
+        while (!stopped_) {
+            const size_t at = lexer.Offset();
+            if (indexed && Pass(lexer, at, next)) continue;
+            if (!lexer.Next(op, operands)) break;
             if (++stats_.operators > RenderLimits::kOperators) {
                 stats_.AddUnknown("operators");
                 stopped_ = true;
@@ -156,13 +188,89 @@ public:
                 stopped_ = true;
                 break;
             }
+            if (indexed && fill_ && op.size() == 1 && op[0] == 'q') OpenGroup(at);
             Operator(op, operands, resources, depth);
+            if (indexed && fill_) CloseGroups(lexer.Offset());
             // A limit of the canvas, the rasterizer or the stroker ran out (RenderPage names it).
             if (budget_.Stopped()) stopped_ = true;
         }
     }
 
 private:
+    // ---- the groups of a band's BandIndex -------------------------------------------------
+
+    // At `at`, between two operators: true when the group of band_->skip there lies outside the
+    // band, and `lexer` now continues after it. `next` follows the groups passed.
+    __attribute__((noinline)) bool Pass(ContentLexer& lexer, size_t at, size_t& next) const {
+        const std::vector<BandIndex::Group>* skip = band_->skip;
+        if (!skip) return false;
+        while (next < skip->size() && (*skip)[next].begin < at) next++;
+        if (next == skip->size() || (*skip)[next].begin != at || (*skip)[next].end <= at) return false;
+        const BandIndex::Group& group = (*skip)[next];
+        const double s = band_->scale;
+        if (!(group.bottom * s + BandIndex::kMarginPx < band_->top || group.top * s - BandIndex::kMarginPx > band_->bottom)) {
+            return false;
+        }
+        lexer.Seek(group.end);
+        return true;
+    }
+
+    // A `q` at `at`: a group opens when its q saves the state and no path is being built, so that
+    // passing over it to its Q leaves the state as reading it does (CloseGroups checks the rest).
+    __attribute__((noinline)) void OpenGroup(size_t at) {
+        if (stack_.size() >= kMaxSaves || !path_.Empty() || hasCurrent_ || pendingClip_ || at > UINT32_MAX ||
+            fill_->size() >= kMaxGroups) {
+            return;
+        }
+        open_.push_back({fill_->size(), stack_.size(), tm_, tlm_, kInfinity, -kInfinity});
+        fill_->push_back({static_cast<uint32_t>(at), 0, 0, 0});
+    }
+
+    // After an operator that ends at `end`: the groups its Q closed get their end and rows, those
+    // that leave a path, a clip or text matrices behind none (Fill drops them); a group's rows
+    // count for the group around it.
+    __attribute__((noinline)) void CloseGroups(size_t end) {
+        while (!open_.empty() && stack_.size() <= open_.back().depth) {
+            const Open g = open_.back();
+            open_.pop_back();
+            BandIndex::Group& group = (*fill_)[g.group];
+            if (path_.Empty() && !hasCurrent_ && !pendingClip_ && SameMatrix(tm_, g.tm) && SameMatrix(tlm_, g.tlm) &&
+                end <= UINT32_MAX) {
+                group.end = static_cast<uint32_t>(end);
+                group.top = static_cast<float>(g.y0 / band_->scale);
+                group.bottom = static_cast<float>(g.y1 / band_->scale);
+            }
+            NoteRows(g.y0, g.y1);
+        }
+    }
+
+    // Drawing in device rows [y0, y1] (not finite: anywhere), for the group being read.
+    __attribute__((noinline)) void NoteRows(double y0, double y1) {
+        if (open_.empty()) return;
+        Open& g = open_.back();
+        if (!(y0 > -kInfinity && y1 < kInfinity)) {
+            y0 = -kInfinity;
+            y1 = kInfinity;
+        }
+        g.y0 = std::min(g.y0, y0);
+        g.y1 = std::max(g.y1, y1);
+    }
+
+    // The rows of path_'s points under the CTM, grown by the stroke's reach.
+    __attribute__((noinline)) void NotePath(bool stroke) {
+        const Matrix& m = gs_.ctm;
+        double y0 = kInfinity, y1 = -kInfinity;
+        for (const gfx::PointF& p : path_.Points()) {
+            const double y = m.b * p.x + m.d * p.y + m.f;
+            if (!Finite(y)) return NoteRows(-kInfinity, kInfinity);
+            y0 = std::min(y0, y);
+            y1 = std::max(y1, y);
+        }
+        if (y0 > y1) return;  // no points
+        const double reach = stroke ? gfx::StrokeReach(m, gs_.line) : 0;
+        NoteRows(y0 - reach, y1 + reach);
+    }
+
     // ---- operands ------------------------------------------------------------------------
 
     // Exactly `n` finite numbers.
@@ -381,6 +489,7 @@ private:
 
     void Paint(bool close, bool fill, gfx::FillRule rule, bool stroke) {
         if (close) path_.Close();
+        if (fill_ && (fill || stroke) && !open_.empty()) NotePath(stroke);
         if (fill && CanFill()) canvas_.FillPath(path_, gs_.ctm, rule, FillPaint());
         if (stroke && CanStroke()) canvas_.StrokePath(path_, gs_.ctm, gs_.line, StrokePaint());
         if (pendingClip_) Clip(path_, clipRule_);
@@ -484,21 +593,32 @@ private:
         return x1 + 32 >= clip.x0 && x0 - 32 <= clip.x1 && y1 + 32 >= clip.y0 && y0 - 32 <= clip.y1;
     }
 
-    // Whether GlyphVisible culls every glyph a string shows from here for its rows: text whose
-    // matrices do not tilt it (tm_.b and the CTM's b are 0) keeps the device y of each corner of
-    // its em box, to the bit, as it advances, and here that box lies wholly above or below the
-    // clip. Another band of a tall page then costs the string no glyph matrices.
-    __attribute__((noinline)) bool RowCulled(const Matrix& fontToText) const {
-        if (tm_.b != 0 || gs_.ctm.b != 0) return false;
-        const Matrix trm = fontToText.Multiply(tm_).Multiply(gs_.ctm);
-        double y0 = 0, y1 = 0;
-        for (int i = 0; i < 4; i++) {
-            double x = 0, y = 0;
-            trm.Apply(i & 1 ? 3.0 : -2.0, i & 2 ? 3.0 : -2.0, x, y);
-            if (!Finite(x) || !Finite(y)) return false;
-            if (i == 0 || y < y0) y0 = y;
-            if (i == 0 || y > y1) y1 = y;
+    // A string shown in a band. Text whose matrices do not tilt it (tm_.b and the CTM's b are 0)
+    // keeps the device y of each corner of its em box, to the bit, as it advances: those rows are
+    // noted for the BandIndex being filled (a stroke or a tilt counts as anywhere), and true when
+    // GlyphVisible culls every glyph a filled string shows from here, its box wholly above or
+    // below the clip. Another band of a tall page then costs the string no glyph matrices.
+    __attribute__((noinline)) bool BandText(const Matrix& fontToText, bool fill, bool stroke, bool source) {
+        double y0 = -kInfinity, y1 = kInfinity;
+        bool rows = tm_.b == 0 && gs_.ctm.b == 0;
+        if (rows) {
+            const Matrix trm = fontToText.Multiply(tm_).Multiply(gs_.ctm);
+            for (int i = 0; i < 4 && rows; i++) {
+                double x = 0, y = 0;
+                trm.Apply(i & 1 ? 3.0 : -2.0, i & 2 ? 3.0 : -2.0, x, y);
+                rows = Finite(x) && Finite(y);
+                if (i == 0 || y < y0) y0 = y;
+                if (i == 0 || y > y1) y1 = y;
+            }
         }
+        if (fill_ && (fill || stroke)) {
+            if (rows && !stroke) {
+                NoteRows(y0, y1);
+            } else {
+                NoteRows(-kInfinity, kInfinity);
+            }
+        }
+        if (!rows || !fill || stroke || !source) return false;
         const RectI clip = canvas_.ClipBounds();
         return !(y1 + 32 >= clip.y0 && y0 - 32 <= clip.y1);
     }
@@ -556,7 +676,7 @@ private:
         const bool stroke = (mode == 1 || mode == 2) && CanStroke();
         size_t at = 0;
         PdfGlyph g;
-        if (band_ && fill && !stroke && source && RowCulled(fontToText)) return SkipText(*font, bytes, size, th);
+        if (band_ && BandText(fontToText, fill, stroke, source != nullptr)) return SkipText(*font, bytes, size, th);
         while (!stopped_ && font->Next(bytes, at, g)) {
             if ((fill || stroke) && source) DrawGlyph(*source, g.glyph, fontToText, fill, stroke);
             const double tx = (g.width / 1000.0 * size + gs_.charSpacing + (g.wordSpace ? gs_.wordSpacing : 0)) * th;
@@ -564,7 +684,7 @@ private:
         }
     }
 
-    // ShowText's loop for a string RowCulled culls: each glyph counted and culled as DrawGlyph
+    // ShowText's loop for a string BandText culls: each glyph counted and culled as DrawGlyph
     // would, and advanced the same, with no glyph matrix.
     __attribute__((noinline)) void SkipText(const PdfFont& font, std::string_view bytes, double size, double th) {
         size_t at = 0;
@@ -590,40 +710,43 @@ private:
 
     void TextOperator(std::string_view op, const std::vector<PdfValue>& ops, const PdfValue& resources) {
         double v[6];
-        if (op == "BT") {
+        if (Is(op, "BT")) {
             tm_ = tlm_ = Matrix();
-        } else if (op == "ET") {
-        } else if (op == "Tc") {
+        } else if (Is(op, "ET")) {
+            // Text space ends with the text object: a q ... Q group around one leaves the text
+            // matrices as it found them (BandIndex).
+            tm_ = tlm_ = Matrix();
+        } else if (Is(op, "Tc")) {
             if (Numbers(ops, 1, v)) gs_.charSpacing = v[0];
-        } else if (op == "Tw") {
+        } else if (Is(op, "Tw")) {
             if (Numbers(ops, 1, v)) gs_.wordSpacing = v[0];
-        } else if (op == "Tz") {
+        } else if (Is(op, "Tz")) {
             if (Numbers(ops, 1, v)) gs_.hscale = v[0] / 100.0;
-        } else if (op == "TL") {
+        } else if (Is(op, "TL")) {
             if (Numbers(ops, 1, v)) gs_.leading = v[0];
-        } else if (op == "Ts") {
+        } else if (Is(op, "Ts")) {
             if (Numbers(ops, 1, v)) gs_.rise = v[0];
-        } else if (op == "Tr") {
+        } else if (Is(op, "Tr")) {
             if (Numbers(ops, 1, v) && v[0] >= 0 && v[0] <= 7) gs_.mode = static_cast<int>(v[0]);
-        } else if (op == "Tf") {
+        } else if (Is(op, "Tf")) {
             if (ops.size() == 2 && ops[0].IsName() && ops[1].IsNumber() && Finite(ops[1].Number())) {
                 gs_.font = FontOf(resources, ops[0].Name());
                 gs_.fontSize = ops[1].Number();
             }
-        } else if (op == "Td") {
+        } else if (Is(op, "Td")) {
             if (Numbers(ops, 2, v)) MoveLine(v[0], v[1]);
-        } else if (op == "TD") {
+        } else if (Is(op, "TD")) {
             if (Numbers(ops, 2, v)) {
                 gs_.leading = -v[1];
                 MoveLine(v[0], v[1]);
             }
-        } else if (op == "Tm") {
+        } else if (Is(op, "Tm")) {
             if (Numbers(ops, 6, v)) tm_ = tlm_ = Matrix{v[0], v[1], v[2], v[3], v[4], v[5]};
-        } else if (op == "T*") {
+        } else if (Is(op, "T*")) {
             if (ops.empty()) MoveLine(0, -gs_.leading);
-        } else if (op == "Tj") {
+        } else if (Is(op, "Tj")) {
             if (ops.size() == 1 && ops[0].IsString()) ShowText(ops[0].String());
-        } else if (op == "TJ") {
+        } else if (Is(op, "TJ")) {
             if (ops.size() != 1 || !ops[0].IsArray()) return;
             for (const PdfValue& item : ops[0].items) {
                 if (item.IsString()) {
@@ -633,11 +756,11 @@ private:
                     tm_ = Matrix::Translate(tx, 0).Multiply(tm_);
                 }
             }
-        } else if (op == "'") {
+        } else if (Is(op, "'")) {
             if (ops.size() != 1 || !ops[0].IsString()) return;
             MoveLine(0, -gs_.leading);
             ShowText(ops[0].String());
-        } else if (op == "\"") {
+        } else if (Is(op, "\"")) {
             if (ops.size() != 3 || !ops[0].IsNumber() || !ops[1].IsNumber() || !ops[2].IsString()) return;
             if (!Finite(ops[0].Number()) || !Finite(ops[1].Number())) return;
             gs_.wordSpacing = ops[0].Number();
@@ -654,6 +777,7 @@ private:
         // Image space: row 0 at the top of the unit square, (0, 1) in user space.
         const Matrix flip{1, 0, 0, -1, 0, 1};
         const Matrix m = flip.Multiply(gs_.ctm);
+        if (fill_ && !open_.empty()) NoteSquare(m);
         // Wholly outside the clip (another band of a tall page): not decoded.
         if (OutsideClip(m)) return;
         // The level whose pixels are still at least as many as the device pixels it covers.
@@ -739,6 +863,15 @@ private:
 
     static bool SameMatrix(const Matrix& x, const Matrix& y) {
         return x.a == y.a && x.b == y.b && x.c == y.c && x.d == y.d && x.e == y.e && x.f == y.f;
+    }
+
+    // The rows of the unit square under `m` (an image).
+    __attribute__((noinline)) void NoteSquare(const Matrix& m) {
+        const double ys[4] = {m.f, m.b + m.f, m.d + m.f, m.b + m.d + m.f};
+        for (const double y : ys) {
+            if (!Finite(y)) return NoteRows(-kInfinity, kInfinity);
+        }
+        NoteRows(std::min({ys[0], ys[1], ys[2], ys[3]}), std::max({ys[0], ys[1], ys[2], ys[3]}));
     }
 
     // Whether the unit square under `m` lies wholly outside the clip (a pixel of slack); false
@@ -909,6 +1042,8 @@ private:
     }
 
     void Shade(const PdfValue& shading, const PdfValue& resources) {
+        // It fills the clip: anywhere, for a band's index.
+        if (fill_) NoteRows(-kInfinity, kInfinity);
         if (!shading.IsDict()) {
             stats_.AddUnknown("shading:missing");
             return;
@@ -993,115 +1128,115 @@ private:
         if (op.empty()) return;
         switch (op[0]) {
             case 'q':
-                if (op == "q") return Save();
+                if (Is(op, "q")) return Save();
                 break;
             case 'Q':
-                if (op == "Q") return Restore();
+                if (Is(op, "Q")) return Restore();
                 break;
             case 'c':
-                if (op == "cm") {
+                if (Is(op, "cm")) {
                     if (Numbers(ops, 6, v)) gs_.ctm = Matrix{v[0], v[1], v[2], v[3], v[4], v[5]}.Multiply(gs_.ctm);
                     return;
                 }
-                if (op == "c") return PathOperator('c', ops);
-                if (op == "cs") {
+                if (Is(op, "c")) return PathOperator('c', ops);
+                if (Is(op, "cs")) {
                     if (ops.size() == 1 && ops[0].IsName()) SetColorSpace(false, ops[0], resources);
                     return;
                 }
                 break;
             case 'w':
-                if (op == "w") {
+                if (Is(op, "w")) {
                     if (Numbers(ops, 1, v)) SetLineWidth(v[0]);
                     return;
                 }
                 break;
             case 'J':
-                if (op == "J") {
+                if (Is(op, "J")) {
                     if (Numbers(ops, 1, v)) SetCap(static_cast<int64_t>(v[0]));
                     return;
                 }
                 break;
             case 'j':
-                if (op == "j") {
+                if (Is(op, "j")) {
                     if (Numbers(ops, 1, v)) SetJoin(static_cast<int64_t>(v[0]));
                     return;
                 }
                 break;
             case 'M':
-                if (op == "M") {
+                if (Is(op, "M")) {
                     if (Numbers(ops, 1, v)) SetMiter(v[0]);
                     return;
                 }
-                if (op == "MP") return;
+                if (Is(op, "MP")) return;
                 break;
             case 'd':
-                if (op == "d") {
+                if (Is(op, "d")) {
                     if (ops.size() == 2 && ops[0].IsArray() && ops[1].IsNumber()) SetDash(ops[0], ops[1].Number());
                     return;
                 }
                 break;
             case 'r':
-                if (op == "ri") return;
-                if (op == "re") return PathOperator('r', ops);
-                if (op == "rg") {
+                if (Is(op, "ri")) return;
+                if (Is(op, "re")) return PathOperator('r', ops);
+                if (Is(op, "rg")) {
                     if (Numbers(ops, 3, v)) SetColor(false, Space::Rgb, v);
                     return;
                 }
                 break;
             case 'R':
-                if (op == "RG") {
+                if (Is(op, "RG")) {
                     if (Numbers(ops, 3, v)) SetColor(true, Space::Rgb, v);
                     return;
                 }
                 break;
             case 'i':
-                if (op == "i") return;
+                if (Is(op, "i")) return;
                 break;
             case 'g':
-                if (op == "g") {
+                if (Is(op, "g")) {
                     if (Numbers(ops, 1, v)) SetColor(false, Space::Gray, v);
                     return;
                 }
-                if (op == "gs") {
+                if (Is(op, "gs")) {
                     if (ops.size() == 1 && ops[0].IsName()) ExtGState(Resource(resources, "ExtGState", ops[0].Name()));
                     return;
                 }
                 break;
             case 'G':
-                if (op == "G") {
+                if (Is(op, "G")) {
                     if (Numbers(ops, 1, v)) SetColor(true, Space::Gray, v);
                     return;
                 }
                 break;
             case 'k':
-                if (op == "k") {
+                if (Is(op, "k")) {
                     if (Numbers(ops, 4, v)) SetColor(false, Space::Cmyk, v);
                     return;
                 }
                 break;
             case 'K':
-                if (op == "K") {
+                if (Is(op, "K")) {
                     if (Numbers(ops, 4, v)) SetColor(true, Space::Cmyk, v);
                     return;
                 }
                 break;
             case 'C':
-                if (op == "CS") {
+                if (Is(op, "CS")) {
                     if (ops.size() == 1 && ops[0].IsName()) SetColorSpace(true, ops[0], resources);
                     return;
                 }
                 break;
             case 's':
-                if (op == "sc" || op == "scn") return SetColorComponents(false, ops);
-                if (op == "s") return Paint(true, false, gfx::FillRule::NonZero, true);
-                if (op == "sh") {
+                if (Is(op, "sc") || Is(op, "scn")) return SetColorComponents(false, ops);
+                if (Is(op, "s")) return Paint(true, false, gfx::FillRule::NonZero, true);
+                if (Is(op, "sh")) {
                     if (ops.size() == 1 && ops[0].IsName()) Shade(Resource(resources, "Shading", ops[0].Name()), resources);
                     return;
                 }
                 break;
             case 'S':
-                if (op == "SC" || op == "SCN") return SetColorComponents(true, ops);
-                if (op == "S") return Paint(false, false, gfx::FillRule::NonZero, true);
+                if (Is(op, "SC") || Is(op, "SCN")) return SetColorComponents(true, ops);
+                if (Is(op, "S")) return Paint(false, false, gfx::FillRule::NonZero, true);
                 break;
             case 'm':
             case 'l':
@@ -1111,49 +1246,49 @@ private:
                 if (op.size() == 1) return PathOperator(op[0], ops);
                 break;
             case 'f':
-                if (op == "f") return Paint(false, true, gfx::FillRule::NonZero, false);
-                if (op == "f*") return Paint(false, true, gfx::FillRule::EvenOdd, false);
+                if (Is(op, "f")) return Paint(false, true, gfx::FillRule::NonZero, false);
+                if (Is(op, "f*")) return Paint(false, true, gfx::FillRule::EvenOdd, false);
                 break;
             case 'F':
-                if (op == "F") return Paint(false, true, gfx::FillRule::NonZero, false);
+                if (Is(op, "F")) return Paint(false, true, gfx::FillRule::NonZero, false);
                 break;
             case 'B':
-                if (op == "B") return Paint(false, true, gfx::FillRule::NonZero, true);
-                if (op == "B*") return Paint(false, true, gfx::FillRule::EvenOdd, true);
-                if (op == "BT") return TextOperator(op, ops, resources);
-                if (op == "BDC" || op == "BMC" || op == "BX" || op == "BI") return;
+                if (Is(op, "B")) return Paint(false, true, gfx::FillRule::NonZero, true);
+                if (Is(op, "B*")) return Paint(false, true, gfx::FillRule::EvenOdd, true);
+                if (Is(op, "BT")) return TextOperator(op, ops, resources);
+                if (Is(op, "BDC") || Is(op, "BMC") || Is(op, "BX") || Is(op, "BI")) return;
                 break;
             case 'b':
-                if (op == "b") return Paint(true, true, gfx::FillRule::NonZero, true);
-                if (op == "b*") return Paint(true, true, gfx::FillRule::EvenOdd, true);
+                if (Is(op, "b")) return Paint(true, true, gfx::FillRule::NonZero, true);
+                if (Is(op, "b*")) return Paint(true, true, gfx::FillRule::EvenOdd, true);
                 break;
             case 'n':
-                if (op == "n") return Paint(false, false, gfx::FillRule::NonZero, false);
+                if (Is(op, "n")) return Paint(false, false, gfx::FillRule::NonZero, false);
                 break;
             case 'W':
-                if (op == "W" || op == "W*") {
+                if (Is(op, "W") || Is(op, "W*")) {
                     pendingClip_ = true;
-                    clipRule_ = op == "W" ? gfx::FillRule::NonZero : gfx::FillRule::EvenOdd;
+                    clipRule_ = Is(op, "W") ? gfx::FillRule::NonZero : gfx::FillRule::EvenOdd;
                     return;
                 }
                 break;
             case 'E':
-                if (op == "ET") return TextOperator(op, ops, resources);
-                if (op == "EMC" || op == "EX") return;
+                if (Is(op, "ET")) return TextOperator(op, ops, resources);
+                if (Is(op, "EMC") || Is(op, "EX")) return;
                 break;
             case 'D':
-                if (op == "Do") {
+                if (Is(op, "Do")) {
                     if (ops.size() == 1 && ops[0].IsName()) Do(ops[0].Name(), resources, depth);
                     return;
                 }
-                if (op == "DP") return;
+                if (Is(op, "DP")) return;
                 break;
             case 'T':
             case '\'':
             case '"':
-                if (op == "Tc" || op == "Tw" || op == "Tz" || op == "TL" || op == "Tf" || op == "Tr" || op == "Ts" ||
-                    op == "Td" || op == "TD" || op == "Tm" || op == "T*" || op == "Tj" || op == "TJ" || op == "'" ||
-                    op == "\"") {
+                if (Is(op, "Tc") || Is(op, "Tw") || Is(op, "Tz") || Is(op, "TL") || Is(op, "Tf") || Is(op, "Tr") || Is(op, "Ts") ||
+                    Is(op, "Td") || Is(op, "TD") || Is(op, "Tm") || Is(op, "T*") || Is(op, "Tj") || Is(op, "TJ") || Is(op, "'") ||
+                    Is(op, "\"")) {
                     return TextOperator(op, ops, resources);
                 }
                 break;
@@ -1176,7 +1311,19 @@ private:
     size_t floor_ = 0;          // saves a Q may not restore past (the running form's)
     size_t ignoredSaves_ = 0;   // q beyond kMaxSaves, matched by Qs that do nothing
     size_t clipDepth_ = 0;
-    const bool band_;
+    const Band* band_;
+    std::vector<BandIndex::Group>* fill_;   // the BandIndex's groups this band fills
+    // The groups being read, innermost last: the stack size before their q, the text matrices
+    // then, and the device rows drawn in so far.
+    struct Open {
+        size_t group;
+        size_t depth;
+        Matrix tm;
+        Matrix tlm;
+        double y0;
+        double y1;
+    };
+    std::vector<Open> open_;
     bool stopped_ = false;
     gfx::Path path_;
     bool hasCurrent_ = false;
@@ -1216,12 +1363,19 @@ int RenderHeight(double boxWidth, double boxHeight, int widthPx) {
 
 namespace {
 
+// The groups a band filled, as a BandIndex keeps them: those that can be passed over.
+std::shared_ptr<const std::vector<BandIndex::Group>> Kept(std::vector<BandIndex::Group>& groups) {
+    const auto drop = [](const BandIndex::Group& g) { return g.end == 0 || !(g.top > -kInfinity && g.bottom < kInfinity); };
+    groups.erase(std::remove_if(groups.begin(), groups.end(), drop), groups.end());
+    groups.shrink_to_fit();
+    return std::make_shared<const std::vector<BandIndex::Group>>(std::move(groups));
+}
+
 // Rows [top, top + rows) of page `page`, MediaBox `box`, at `widthPx`, of the page's `heightPx`
 // (RenderHeight), the band checked against the limits by the caller.
 bool RenderRows(const PdfFile& file, int page, const PdfRect& box, int widthPx, int heightPx, int top, int rows,
-                gfx::Image& out, RenderStats& st, const RenderEnvironment& environment) {
+                gfx::Image& out, RenderStats& st, const RenderEnvironment& environment, BandIndex* index) {
     const double s = widthPx / box.Width();
-    const bool band = rows < heightPx;
     const uint64_t bandPixels = static_cast<uint64_t>(widthPx) * static_cast<uint64_t>(rows);
     gfx::WorkBudget budget;
     budget.cancel = environment.cancel;
@@ -1232,6 +1386,15 @@ bool RenderRows(const PdfFile& file, int page, const PdfRect& box, int widthPx, 
         st.cancelled = true;
         return false;
     }
+    Band band{s, static_cast<double>(top), static_cast<double>(top) + rows};
+    std::shared_ptr<const std::vector<BandIndex::Group>> groups;
+    std::vector<BandIndex::Group> filled;
+    bool fill = false;
+    if (index && rows < heightPx) {
+        groups = index->Get(fill);
+        band.skip = groups.get();
+        if (fill) band.fill = &filled;
+    }
     const uint64_t pixelBudget = budget.pixels;
     std::vector<uint32_t> pixels(static_cast<size_t>(bandPixels), 0xFFFFFFFFu);
     Scratch& scratch = ThreadScratch();
@@ -1240,13 +1403,20 @@ bool RenderRows(const PdfFile& file, int page, const PdfRect& box, int widthPx, 
     scratch.canvas.SetBudget(&budget);
     {
         Interpreter interpreter(file, environment, st, scratch, budget, Matrix{s, 0, 0, -s, -box.x0 * s, box.y1 * s},
-                                RenderLimits::kMaskPerPagePixel * bandPixels + RenderLimits::kMaskBase, band);
+                                RenderLimits::kMaskPerPagePixel * bandPixels + RenderLimits::kMaskBase,
+                                rows < heightPx ? &band : nullptr);
         std::string_view content;
         std::string error;
-        if (file.PageContent(page, content, &error)) {
+        const bool read = file.PageContent(page, content, &error);
+        if (read) {
             interpreter.Run(content, file.PageResources(page), 0);
         } else {
             st.AddUnknown(error.empty() ? "contents" : error);
+        }
+        // An index is kept only of the whole content, read to its end.
+        if (fill) {
+            const bool whole = read && !interpreter.Stopped() && budget.stop == gfx::WorkBudget::Stop::None;
+            index->Fill(whole ? Kept(filled) : nullptr);
         }
     }
     scratch.canvas.SetBudget(nullptr);
@@ -1295,7 +1465,7 @@ bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, Ren
     PdfRect box;
     const int heightPx = PageHeight(file, page, widthPx, box);
     if (heightPx == 0 || !BandFits(widthPx, heightPx)) return false;
-    return RenderRows(file, page, box, widthPx, heightPx, 0, heightPx, out, st, environment);
+    return RenderRows(file, page, box, widthPx, heightPx, 0, heightPx, out, st, environment, nullptr);
 }
 
 bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, RenderStats* stats) {
@@ -1303,7 +1473,7 @@ bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, Ren
 }
 
 bool RenderPageRows(const PdfFile& file, int page, int widthPx, int top, int rows, gfx::Image& out,
-                    RenderStats* stats, const RenderEnvironment& environment) {
+                    RenderStats* stats, const RenderEnvironment& environment, BandIndex* index) {
     RenderStats local;
     RenderStats& st = stats ? *stats : local;
     st = RenderStats();
@@ -1312,7 +1482,25 @@ bool RenderPageRows(const PdfFile& file, int page, int widthPx, int top, int row
     if (heightPx == 0 || top < 0 || rows < 1 || top >= heightPx || rows > heightPx - top || !BandFits(widthPx, rows)) {
         return false;
     }
-    return RenderRows(file, page, box, widthPx, heightPx, top, rows, out, st, environment);
+    return RenderRows(file, page, box, widthPx, heightPx, top, rows, out, st, environment, index);
+}
+
+std::shared_ptr<const std::vector<BandIndex::Group>> BandIndex::Get(bool& fill) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fill = !groups_ && !filling_;
+    filling_ = filling_ || fill;
+    return groups_;
+}
+
+void BandIndex::Fill(std::shared_ptr<const std::vector<Group>> groups) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    filling_ = false;
+    if (groups) groups_ = std::move(groups);
+}
+
+size_t BandIndex::Bytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return groups_ ? groups_->capacity() * sizeof(Group) : 0;
 }
 
 } // namespace rgui::pdf

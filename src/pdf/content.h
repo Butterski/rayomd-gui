@@ -35,6 +35,11 @@ public:
     std::string_view InlineImageData() const { return inlineData_; }
     // Bytes of the data read so far.
     size_t Offset() const { return cursor_.pos; }
+    // Continues at `offset` (at most the data's size), an Offset() between two operators.
+    void Seek(size_t offset) {
+        cursor_.pos = offset < cursor_.data.size() ? offset : cursor_.data.size();
+        inlineData_ = {};
+    }
 
 private:
     void ReadInlineImage(std::vector<PdfValue>& operands);

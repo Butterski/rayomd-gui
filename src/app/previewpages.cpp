@@ -166,7 +166,8 @@ bool PreviewPages::WantPiece(int page, int widthPx, int strip, std::vector<Job>&
     for (const Job& job : jobs) {
         if (job.key == key.pageKey && job.widthPx == widthPx && job.strip == strip) return false;
     }
-    jobs.push_back({pdf_, page, widthPx, strip, slot.key, generation_});
+    if (strip >= 0 && !slot.bands) slot.bands = std::make_shared<pdf::BandIndex>();
+    jobs.push_back({pdf_, page, widthPx, strip, slot.key, generation_, strip >= 0 ? slot.bands : nullptr});
     return false;
 }
 
@@ -339,7 +340,8 @@ void PreviewPages::Run() {
             const int height = pdf::RenderHeight(box.Width(), box.Height(), job.widthPx);
             const int top = job.strip * kStripRows;
             ok = top < height && pdf::RenderPageRows(*job.pdf, job.page, job.widthPx, top,
-                                                     std::min(kStripRows, height - top), *image, &stats, environment);
+                                                     std::min(kStripRows, height - top), *image, &stats, environment,
+                                                     job.bands.get());
         }
         std::shared_ptr<const gfx::Image> result;
         if (ok) {
