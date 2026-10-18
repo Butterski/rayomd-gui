@@ -2,6 +2,7 @@
 // gfx.*: paths, the rasterizer, the stroker, the canvas, the PNG writer and icon paths.
 #include "runner.h"
 
+#include "common/exact_math.h"
 #include "common/file_io.h"
 #include "core/inflate.h"
 #include "gfx/budget.h"
@@ -642,6 +643,98 @@ RGUI_TEST("gfx.canvas_image") {
     broken.height = 100;  // no pixels
     r.DrawImage(broken, Matrix{16, 0, 0, 16, 0, 0}, 255, true);
     CHECK_EQ(rot.At(12, 3), 0xFFFF0000u);
+}
+
+namespace {
+
+// The general bilinear sampler of gfx::Canvas (any matrix), as a reference for its upright path:
+// row y from x0, 16.16 steps, the four pixels around each centre clamped at the edges.
+int64_t RefFixed(double v) {
+    if (!(v > -16777216.0)) v = -16777216.0;
+    if (v > 16777216.0) v = 16777216.0;
+    return static_cast<int64_t>(RayoMd::ExactMath::Floor(v * 65536.0));
+}
+
+void RefBilinearRow(const Image& image, const Matrix& inv, int y, int x0, int w, uint32_t* out) {
+    const int64_t iw = image.width, ih = image.height;
+    const double px = x0 + 0.5, py = y + 0.5;
+    const double ix = inv.a * px + inv.c * py + inv.e;
+    const double iy = inv.b * px + inv.d * py + inv.f;
+    const int64_t dx = RefFixed(inv.a), dy = RefFixed(inv.b);
+    int64_t sx = RefFixed(ix - 0.5), sy = RefFixed(iy - 0.5);
+    for (int i = 0; i < w; ++i, sx += dx, sy += dy) {
+        const int64_t xi = sx >> 16, yi = sy >> 16;
+        const uint32_t wx1 = static_cast<uint32_t>((sx >> 8) & 255), wy1 = static_cast<uint32_t>((sy >> 8) & 255);
+        const int64_t xa = std::clamp<int64_t>(xi, 0, iw - 1), xb = std::clamp<int64_t>(xi + 1, 0, iw - 1);
+        const int64_t ya = std::clamp<int64_t>(yi, 0, ih - 1) * iw, yb = std::clamp<int64_t>(yi + 1, 0, ih - 1) * iw;
+        const uint32_t p[4] = {image.pixels[ya + xa], image.pixels[ya + xb], image.pixels[yb + xa], image.pixels[yb + xb]};
+        uint32_t v = 0;
+        for (int shift = 0; shift < 32; shift += 8) {
+            const auto ch = [&](int k) { return (p[k] >> shift) & 0xFFu; };
+            const uint32_t top = ch(0) * (256 - wx1) + ch(1) * wx1, bottom = ch(2) * (256 - wx1) + ch(3) * wx1;
+            v |= ((top * (256 - wy1) + bottom * wy1 + 32768) >> 16) << shift;
+        }
+        out[i] = v;
+    }
+}
+
+} // namespace
+
+// Upright images (scaled, flipped, at fractions of a pixel, partly outside, one pixel wide or
+// high) sample as the general bilinear sampler does, through SampleImage and DrawImage.
+RGUI_TEST("gfx.canvas_image_upright") {
+    uint64_t state = 0x853C49E6748FEA9Bull;
+    const auto next = [&] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    };
+    const auto unit = [&] { return static_cast<double>(next() >> 11) / 9007199254740992.0; };
+    for (int round = 0; round < 400; ++round) {
+        Image image;
+        image.width = 1 + static_cast<int>(next() % 12);
+        image.height = 1 + static_cast<int>(next() % 12);
+        for (int i = 0; i < image.width * image.height; ++i) image.pixels.push_back(static_cast<uint32_t>(next()));
+        image.opaque = false;
+        const double sx = (0.25 + unit() * 40) * (next() % 4 == 0 ? -1 : 1);
+        const double sy = (0.25 + unit() * 40) * (next() % 4 == 0 ? -1 : 1);
+        const Matrix m{sx, 0, 0, sy, unit() * 60 - 10, unit() * 60 - 10};
+        Pixels px(48, 48, 0);
+        Canvas canvas(px.surface);
+        ImageSamples samples;
+        if (!canvas.SampleImage(image, m, true, samples)) continue;
+        const Matrix toDevice{m.a / image.width, m.b / image.width, m.c / image.height, m.d / image.height, m.e, m.f};
+        Matrix inv;
+        CHECK(toDevice.Invert(inv));
+        const int w = samples.rect.Width();
+        std::vector<uint32_t> row(static_cast<size_t>(w));
+        bool same = true;
+        for (int y = samples.rect.y0; y < samples.rect.y1 && same; ++y) {
+            RefBilinearRow(image, inv, y, samples.rect.x0, w, row.data());
+            same = std::equal(row.begin(), row.end(), samples.pixels.begin() + static_cast<ptrdiff_t>(y - samples.rect.y0) * w);
+        }
+        CHECK(same);
+        if (!same) break;
+        // DrawImage (the span path) on whole pixels: every span starts at the square's left edge
+        // and covers fully, so over transparent black the pixels are the samples.
+        const int ew = 1 + static_cast<int>(next() % 40), eh = 1 + static_cast<int>(next() % 40);
+        const int ex = static_cast<int>(next() % 8), ey = static_cast<int>(next() % 8);
+        const Matrix aligned{static_cast<double>(ew), 0, 0, static_cast<double>(eh), static_cast<double>(ex),
+                             static_cast<double>(ey)};
+        Pixels drawn(48, 48, 0);
+        Canvas d(drawn.surface);
+        d.DrawImage(image, aligned, 255, true);
+        const Matrix alignedToDevice{aligned.a / image.width, 0, 0, aligned.d / image.height, aligned.e, aligned.f};
+        CHECK(alignedToDevice.Invert(inv));
+        row.resize(static_cast<size_t>(ew));
+        for (int y = ey; y < ey + eh && same; ++y) {
+            RefBilinearRow(image, inv, y, ex, ew, row.data());
+            same = std::equal(row.begin(), row.end(), drawn.data.begin() + static_cast<ptrdiff_t>(y) * 48 + ex);
+        }
+        CHECK(same);
+        if (!same) break;
+    }
 }
 
 RGUI_TEST("gfx.canvas_robust") {

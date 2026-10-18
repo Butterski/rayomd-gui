@@ -26,6 +26,12 @@ target_include_directories(rayomd_gui_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(rayomd_gui_core PUBLIC rayomd::engine)
 target_compile_definitions(rayomd_gui_core PUBLIC RAYOMD_GUI_VERSION="${PROJECT_VERSION}")
 rgui_flags(rayomd_gui_core)
+# Win64 keeps the stack 16-byte aligned and GCC cannot align it to 32 for AVX2 code (GCC bug
+# 54412): a ymm register spilled with an aligned move would fault. The assembler makes every
+# such move unaligned (binutils 2.38 and newer).
+if(MINGW)
+    set_source_files_properties(gfx/kernels_simd.cpp PROPERTIES COMPILE_OPTIONS "-Wa,-muse-unaligned-vector-move")
+endif()
 
 # The Linux platform layer (platform/linux/sources.cmake sets RGUI_LINUX_SOURCES): a library the
 # executable and the tests both link.

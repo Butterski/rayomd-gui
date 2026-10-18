@@ -26,6 +26,17 @@ struct MaskBuffer {
     std::vector<uint8_t> alpha;  // bounds.Width() per row
 };
 
+// The columns of an upright bilinear span (bilinear_row's xs and ws): every row of an image drawn
+// upright has the same ones, kept while the span's start, step, width and image width stay.
+struct ColumnTable {
+    int64_t sx = 0;
+    int64_t dx = 0;
+    int64_t imageWidth = 0;
+    int width = -1;
+    std::vector<int32_t> xs;
+    std::vector<uint32_t> ws;
+};
+
 // The gradient's colour at t in [0, 1], interpolated in RGB, then premultiplied.
 uint32_t GradientColor(const LinearGradient& g, double t) {
     const std::vector<GradientStop>& s = g.stops;
@@ -71,6 +82,7 @@ struct Canvas::Impl {
     uint32_t lut[256] = {};
     Path outline;
     Path unitSquare;
+    ColumnTable columns;
     const Kernels& k = ActiveKernels();
 
     Impl() {
@@ -238,9 +250,10 @@ inline uint64_t Lanes(uint32_t p) {
 }
 
 // Samples `image` for device pixels x0 .. x0 + w - 1 of row y, `inv` mapping device to image
-// pixels, into src[0..w); where `cov` is given, only pixels it covers.
+// pixels, into src[0..w); where `cov` is given, only pixels it covers need be (an upright smooth
+// image samples them all).
 void SampleSpan(const Image& image, const Matrix& inv, bool smooth, int y, int x0, int w, const uint8_t* cov,
-                uint32_t* src) {
+                uint32_t* src, ColumnTable& columns, const Kernels& k) {
     const int64_t iw = image.width, ih = image.height;
     const uint32_t* pixels = image.pixels.data();
     // Image position of the first pixel's centre, and the step per pixel.
@@ -263,6 +276,41 @@ void SampleSpan(const Image& image, const Matrix& inv, bool smooth, int y, int x
     constexpr uint64_t kHalf = 32768u | (uint64_t(32768u) << 32);
     constexpr uint64_t kMask = 0xFFu | (uint64_t(0xFFu) << 32);
     int64_t sx = Fixed(ix - 0.5), sy = Fixed(iy - 0.5);
+    if (inv.b == 0 && inv.c == 0 && iw >= 2) {
+        // Upright: the row's y and its weight are the same along it (dy = Fixed(0) = 0), and the
+        // columns those of every other row. A clamped column is the pair (0, 1) weighted
+        // (256, 0) on the left and (iw - 2, iw - 1) weighted (0, 256) on the right: the same sums
+        // as the clamped pixel taken twice.
+        if (columns.width != w || columns.sx != sx || columns.dx != dx || columns.imageWidth != iw) {
+            columns.sx = sx;
+            columns.dx = dx;
+            columns.imageWidth = iw;
+            columns.width = w;
+            columns.xs.resize(static_cast<size_t>(w));
+            columns.ws.resize(static_cast<size_t>(w));
+            int64_t s = sx;
+            for (size_t i = 0; i < static_cast<size_t>(w); ++i, s += dx) {
+                const int64_t xi = s >> 16;
+                int64_t x = xi;
+                uint32_t w1 = static_cast<uint32_t>((s >> 8) & 255);
+                if (xi < 0) {
+                    x = 0;
+                    w1 = 0;
+                } else if (xi >= iw - 1) {
+                    x = iw - 2;
+                    w1 = 256;
+                }
+                columns.xs[i] = static_cast<int32_t>(x);
+                columns.ws[i] = (256 - w1) | (w1 << 16);
+            }
+        }
+        const int64_t yi = sy >> 16;
+        const uint32_t* rowA = pixels + std::clamp<int64_t>(yi, 0, ih - 1) * iw;
+        const uint32_t* rowB = pixels + std::clamp<int64_t>(yi + 1, 0, ih - 1) * iw;
+        k.bilinearRow(rowA, rowB, static_cast<uint32_t>((sy >> 8) & 255), columns.xs.data(), columns.ws.data(),
+                      static_cast<size_t>(w), src);
+        return;
+    }
     for (int i = 0; i < w; ++i, sx += dx, sy += dy) {
         if (cov && cov[i] == 0) continue;
         const int64_t xi = sx >> 16, yi = sy >> 16;
@@ -307,7 +355,7 @@ struct Canvas::Impl::ImageSink final : SpanSink {
 
     void Span(int y, int x0, int w, const uint8_t* alpha) override {
         const uint8_t* cov = Coverage(c, alpha, y, x0, w, opacity);
-        SampleSpan(image, inv, smooth, y, x0, w, cov, c.src.data());
+        SampleSpan(image, inv, smooth, y, x0, w, cov, c.src.data(), c.columns, c.k);
         c.SpanRow(y, x0, w, c.src.data(), cov, image.opaque && opacity == 255);
     }
 };
@@ -481,7 +529,7 @@ bool Canvas::SampleImage(const Image& image, const Matrix& unitSquareToDevice, b
     out.pixels.resize(width * static_cast<size_t>(rect.Height()));
     for (int y = rect.y0; y < rect.y1; ++y) {
         SampleSpan(image, inv, smooth, y, rect.x0, rect.Width(), nullptr,
-                   out.pixels.data() + static_cast<size_t>(y - rect.y0) * width);
+                   out.pixels.data() + static_cast<size_t>(y - rect.y0) * width, c.columns, c.k);
     }
     return true;
 }

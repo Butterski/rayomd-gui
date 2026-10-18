@@ -304,6 +304,73 @@ RGUI_TEST("kernels.blend_span") {
     }
 }
 
+// ---- bilinear_row ----
+
+using BilinearFn = void (*)(const uint32_t*, const uint32_t*, uint32_t, const int32_t*, const uint32_t*, size_t,
+                            uint32_t*);
+
+RGUI_TEST("kernels.bilinear_row") {
+    // The reference against the bilinear sum of gfx::Canvas's general sampler, horizontal first:
+    // ((a w0 + b w1) y0 + (p w0 + q w1) y1 + 32768) >> 16 per channel.
+    {
+        Rng rng{0x9E3779B97F4A7C15ull};
+        bool same = true;
+        for (int testCase = 0; testCase < kCases && same; testCase++) {
+            const uint32_t a = rng.U32(), b = rng.U32(), p = rng.U32(), q = rng.U32();
+            const uint32_t rowA[2] = {a, b}, rowB[2] = {p, q};
+            const uint32_t wy1 = testCase < 4 ? (testCase & 1) * 255 : rng.Below(256);
+            const uint32_t w1 = testCase < 4 ? (testCase >> 1) * 256 : rng.Below(257);
+            const int32_t x = 0;
+            const uint32_t ws = (256 - w1) | (w1 << 16);
+            uint32_t out = 0;
+            rgui_bilinear_row_scalar(rowA, rowB, wy1, &x, &ws, 1, &out);
+            uint32_t expect = 0;
+            for (int shift = 0; shift < 32; shift += 8) {
+                const uint32_t top = ((a >> shift) & 0xFF) * (256 - w1) + ((b >> shift) & 0xFF) * w1;
+                const uint32_t bottom = ((p >> shift) & 0xFF) * (256 - w1) + ((q >> shift) & 0xFF) * w1;
+                expect |= ((top * (256 - wy1) + bottom * wy1 + 32768) >> 16) << shift;
+            }
+            if (out != expect) {
+                Report("scalar", testCase, "against the horizontal-first sum");
+                same = false;
+            }
+        }
+    }
+    for (const auto& variant :
+         Variants<BilinearFn>("kernels.bilinear_row", rgui_bilinear_row_sse2, rgui_bilinear_row_avx2)) {
+        Rng rng{0xD1B54A32D192ED03ull};
+        for (int testCase = 0; testCase < kCases; testCase++) {
+            const size_t n = Length(rng, testCase);
+            const uint32_t pixelMode = rng.Below(5);
+            const size_t width = 2 + rng.Below(40);
+            std::vector<uint32_t> rowA(width), rowB(width);
+            for (size_t i = 0; i < width; i++) {
+                rowA[i] = Pixel(rng, pixelMode);
+                rowB[i] = Pixel(rng, pixelMode);
+            }
+            std::vector<int32_t> xs(n + 1);
+            std::vector<uint32_t> ws(n + 1);
+            for (size_t i = 0; i < n; i++) {
+                xs[i] = static_cast<int32_t>(rng.Below(static_cast<uint32_t>(width - 1)));
+                const uint32_t pick = rng.Below(4);
+                const uint32_t w1 = pick == 0 ? 0 : (pick == 1 ? 256 : rng.Below(257));
+                ws[i] = (256 - w1) | (w1 << 16);
+            }
+            const uint32_t wy1 = rng.Below(3) == 0 ? 0 : rng.Below(256);
+            std::vector<uint32_t> expect(n + 1);
+            rgui_bilinear_row_scalar(rowA.data(), rowB.data(), wy1, xs.data(), ws.data(), n, expect.data());
+            Buffer dstBuf(rng, n * 4, rng.Below(32));
+            Buffer want = dstBuf;
+            want.Put(expect.data(), n * 4);
+            variant.fn(rowA.data(), rowB.data(), wy1, xs.data(), ws.data(), n, reinterpret_cast<uint32_t*>(dstBuf.Data()));
+            if (!SameBytes(dstBuf, want)) {
+                Report(variant.isa, testCase, "n " + std::to_string(n) + ", offset " + std::to_string(dstBuf.offset));
+                break;
+            }
+        }
+    }
+}
+
 // ---- ycc_to_bgra ----
 
 using YccFn = void (*)(const uint8_t* const*, uint32_t*, size_t);
