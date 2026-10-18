@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 namespace rgui::gfx {
 
@@ -57,6 +58,7 @@ uint32_t GradientColor(const LinearGradient& g, double t) {
 
 struct Canvas::Impl {
     Surface target{};
+    int top = 0;                 // the device row of the target's first row
     std::vector<ClipState> clips{{RectI{}, -1}};
     std::vector<MaskBuffer> masks;
     size_t maskDepth = 0;
@@ -106,7 +108,7 @@ struct Canvas::Impl {
         return out;
     }
 
-    uint32_t* Dst(int y, int x) const { return target.Row(y) + x; }
+    uint32_t* Dst(int y, int x) const { return target.Row(y - top) + x; }
 
     // One row of `color` under coverage c[0..w): runs of 16 or more zeros are skipped and, for an
     // opaque colour, runs as long of full coverage are stored; the rest is blended. Stores and
@@ -354,17 +356,23 @@ Canvas::Canvas(const Surface& target) : impl_(new Impl) {
 
 Canvas::~Canvas() = default;
 
-void Canvas::SetTarget(const Surface& target) {
+void Canvas::SetTarget(const Surface& target, int top) {
     Impl& c = *impl_;
     c.target = target;
-    const bool valid = target.pixels != nullptr && target.width > 0 && target.height > 0 && target.stride >= target.width;
-    c.clips.assign(1, ClipState{valid ? RectI{0, 0, target.width, target.height} : RectI{}, -1});
+    const bool valid = target.pixels != nullptr && target.width > 0 && target.height > 0 && target.stride >= target.width &&
+                       top >= 0 && top <= std::numeric_limits<int>::max() - target.height;
+    c.top = valid ? top : 0;
+    c.clips.assign(1, ClipState{valid ? RectI{0, top, target.width, top + target.height} : RectI{}, -1});
     c.maskDepth = 0;
     if (valid) c.Reserve(static_cast<size_t>(target.width));
 }
 
 const Surface& Canvas::Target() const {
     return impl_->target;
+}
+
+int Canvas::TargetTop() const {
+    return impl_->top;
 }
 
 RectI Canvas::ClipBounds() const {
@@ -454,7 +462,7 @@ bool Canvas::SampleImage(const Image& image, const Matrix& unitSquareToDevice, b
     Impl& c = *impl_;
     out.rect = RectI{};
     out.pixels.clear();
-    const RectI surface{0, 0, c.target.width, c.target.height};
+    const RectI surface{0, c.top, c.target.width, c.top + c.target.height};
     if (c.target.pixels == nullptr || surface.Empty() || c.Stopped() || image.width <= 0 || image.height <= 0) return false;
     if (image.pixels.size() < static_cast<size_t>(image.width) * static_cast<size_t>(image.height)) return false;
     const Matrix& m = unitSquareToDevice;

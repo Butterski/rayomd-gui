@@ -60,9 +60,13 @@ public:
     Canvas(const Canvas&) = delete;
     Canvas& operator=(const Canvas&) = delete;
 
-    // Draws into `target` from now on, the clip stack reset to the whole surface.
-    void SetTarget(const Surface& target);
+    // Draws into `target` from now on, the clip stack reset to the whole surface. The surface's
+    // first row is device row `top`: device coordinates (clips, matrices, ClipBounds) are those of
+    // a taller surface of which `target` holds rows [top, top + height), so a band of a picture
+    // drawn with the same matrices gets the pixels of the same rows of the whole picture.
+    void SetTarget(const Surface& target, int top = 0);
     const Surface& Target() const;
+    int TargetTop() const;
 
     // An opaque colour is stored; otherwise blended with full coverage.
     void FillRect(RectI rect, uint32_t color);
@@ -76,7 +80,7 @@ public:
     // scale 1, with no clip mask, is copied row by row.
     void DrawImage(const Image& image, const Matrix& unitSquareToDevice, uint8_t opacity, bool smooth);
     // The samples DrawImage takes, taken once for every pixel the image's square covers in the
-    // surface (whatever the clip): drawing them again with the same matrix and surface size
+    // surface (whatever the clip): drawing them again with the same matrix, surface size and top
     // only blends, the sampling (most of an image's cost) done. Each row is sampled from its
     // first pixel, so the bytes may differ from DrawImage's by rounding. False (`out` empty)
     // when the image covers nothing. Costs the budget one pixel per sample.

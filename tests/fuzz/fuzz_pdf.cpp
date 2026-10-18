@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// The preview's PDF path: PdfFile::Parse, the content lexer on the raw bytes, and RenderPage of
-// the first pages at a small width (the budget: at most 2 pages of 48 px; fonts and images are
-// decoded on every render, no system font index, so runs are independent of each other).
+// The preview's PDF path: PdfFile::Parse, the content lexer on the raw bytes, RenderPage of the
+// first pages at a small width and RenderPageRows of the middle third of the first (the budget:
+// at most 2 pages of 48 px and a band; fonts and images are decoded on every render, no system
+// font index, so runs are independent of each other).
 #include "harness.h"
 
 #include "gfx/surface.h"
@@ -37,6 +38,10 @@ int FuzzPdf(const uint8_t* data, size_t size) {
         gfx::Image image;
         pdf::RenderStats stats;
         pdf::RenderPage(*file, page, 48, image, &stats, environment);
+        if (page > 0) continue;
+        const pdf::PdfRect box = file->PageMediaBox(page);
+        const int height = pdf::RenderHeight(box.Width(), box.Height(), 48);
+        if (height >= 3) pdf::RenderPageRows(*file, page, 48, height / 3, height / 3, image, &stats, environment);
     }
     return 0;
 }

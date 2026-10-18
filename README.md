@@ -166,7 +166,10 @@ Windows and the tests: [Building](#building).
 
 The editor is on the left, the PDF on the right. A change goes to the engine at the end of the
 frame that made it, and what you type while a build runs goes into the next one. Pages that did
-not change keep their images, and a page with a large picture draws again in about 2 ms.
+not change keep their images, and a page with a large picture draws again in about 2 ms. A page
+far taller than it is wide (a custom 210 × 5080 mm page, 14,400 points, the engine's tallest) is
+drawn in strips of 2,048 rows, only the ones in view and next to them: its top shows as fast as an
+A4 page does.
 
 The two panes stay together. A click in the editor shows its line in the preview, marked for a
 moment by a bar beside it, and a double click on a page puts the caret on the Markdown line that
@@ -247,8 +250,9 @@ where startup's time went; the end-to-end tests run it on headless compositors.
 
 ## Performance
 
-Measured on 2026-10-15 and 2026-10-16: on Linux with an AMD Ryzen 5 PRO 4650GE in an Arch Linux
-container, pinned to six cores, on headless Wayland compositors; on Windows on GitHub's runners.
+Measured on 2026-10-15 and 2026-10-16 (the tall page on 2026-10-18): on Linux with an AMD Ryzen 5
+PRO 4650GE in an Arch Linux container, pinned to six cores, on headless Wayland compositors; on
+Windows on GitHub's runners.
 
 | Measure | Result |
 |---|---:|
@@ -260,6 +264,7 @@ container, pinned to six cores, on headless Wayland compositors; on Windows on G
 | A frame while the preview / the editor scrolls, 1788×1097 window, 40 pages, median / p99 | 3.4 / 4.6 ms, 3.2 / 4.0 ms |
 | Scrolling frames a second on Windows runners, before / now | 32 / 64 (every refresh of their 64 Hz display) |
 | Page 1 of `tester.md` at 1,200 px, first time / with warm caches | 6.8 / 1.3 ms |
+| A 210 × 5080 mm page at 1,200 px (29,042 rows, 15 strips), its first strip / an A4 page whole, new preview thread | 6.7 / 3.3 ms |
 | Start to first frame / to the preview of `tester.md`, Linux | 12 / 37 ms |
 | The same on Windows runners | 15–26 / 74–161 ms |
 

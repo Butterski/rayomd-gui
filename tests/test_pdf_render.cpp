@@ -509,6 +509,162 @@ RGUI_TEST("pdf.render_tester") {
 
 namespace {
 
+// How rows [top, top + band.height) of `whole` and `band` differ: the largest channel difference
+// and the pixels that differ at all.
+struct BandDiff {
+    int largest = 0;
+    size_t pixels = 0;
+};
+
+BandDiff CompareRows(const Image& whole, int top, const Image& band) {
+    BandDiff diff;
+    for (int y = 0; y < band.height; y++) {
+        const uint32_t* a = whole.pixels.data() + static_cast<size_t>(top + y) * static_cast<size_t>(whole.width);
+        const uint32_t* b = band.pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(band.width);
+        for (int x = 0; x < band.width; x++) {
+            if (a[x] == b[x]) continue;
+            diff.pixels++;
+            for (int shift = 0; shift < 32; shift += 8) {
+                diff.largest = std::max(diff.largest, std::abs(static_cast<int>((a[x] >> shift) & 255) -
+                                                               static_cast<int>((b[x] >> shift) & 255)));
+            }
+        }
+    }
+    return diff;
+}
+
+bool HasInk(const Image& image) {
+    return std::any_of(image.pixels.begin(), image.pixels.end(), [](uint32_t p) { return p != 0xFFFFFFFFu; });
+}
+
+} // namespace
+
+// One long page (595 x 14,400 pt, the engine's tallest) drawn in bands of rows: the pixels of
+// the whole page where it can be drawn whole, and bands that meet with no seam where it cannot.
+RGUI_TEST("pdf.render_strips") {
+    using rgui::pdf::RenderHeight;
+    using rgui::pdf::RenderPageRows;
+    if (NoHelvetica("pdf.render_strips")) return;
+    TinyPdf::PdfOptions options;
+    options.pageSize = {595.0, 14400.0};
+    options.sourcePath = rgui::pdftest::TesterMarkdownPath();
+    const auto file = PdfFile::Parse(rgui::pdftest::BuildPreview(rgui::pdftest::LongMarkdown(8), options), nullptr);
+    CHECK(file != nullptr);
+    if (!file) return;
+    CHECK_EQ(file->PageMediaBox(0).Height(), 14400.0);
+    const auto& env = TestEnvironment();
+
+    // At the preview's 1,200 px the page is 29,042 rows: too tall to draw whole.
+    CHECK_EQ(RenderHeight(595, 14400, 1200), 29042);
+    Image image;
+    CHECK(!RenderPage(*file, 0, 1200, image, nullptr, env));
+
+    // At 600 px (14,521 rows) it can be: every band of 2,048 rows is the whole page's rows.
+    Image whole;
+    RenderStats wholeStats;
+    CHECK(RenderPage(*file, 0, 600, whole, &wholeStats, env));
+    CHECK(wholeStats.unknown.empty());
+    CHECK_EQ(whole.height, RenderHeight(595, 14400, 600));
+    size_t differing = 0;
+    int largest = 0;
+    for (int top = 0; top < whole.height; top += 2048) {
+        Image band;
+        RenderStats stats;
+        const int rows = std::min(2048, whole.height - top);
+        CHECK(RenderPageRows(*file, 0, 600, top, rows, band, &stats, env));
+        CHECK(stats.unknown.empty());
+        CHECK_EQ(band.width, 600);
+        CHECK_EQ(band.height, rows);
+        CHECK(stats.glyphs == wholeStats.glyphs);
+        const BandDiff diff = CompareRows(whole, top, band);
+        differing += diff.pixels;
+        largest = std::max(largest, diff.largest);
+    }
+    std::printf("bands of a 600 x %d page: %zu of %zu pixels differ from the whole page's, by at most %d\n",
+                whole.height, differing, whole.pixels.size(), largest);
+    CHECK(largest <= 2);
+    CHECK(differing * 10000 <= whole.pixels.size());
+
+    // At 1,200 px: every strip of 2,048 rows draws; one across the boundary of two others gives
+    // their rows (no seam), and a band of the whole page's height is refused.
+    const int height = RenderHeight(595, 14400, 1200);
+    std::vector<Image> strips;
+    int inked = 0;
+    double slowest = 0;
+    for (int top = 0; top < height; top += 2048) {
+        strips.emplace_back();
+        const auto start = std::chrono::steady_clock::now();
+        CHECK(RenderPageRows(*file, 0, 1200, top, std::min(2048, height - top), strips.back(), nullptr, env));
+        slowest = std::max(slowest, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        inked += HasInk(strips.back());
+    }
+    std::printf("1200 x %d page: %zu strips, %d with ink, slowest %.1f ms\n", height, strips.size(), inked, slowest);
+    CHECK_EQ(strips.size(), size_t(15));
+    CHECK(inked >= 12);
+    for (int boundary = 2048; boundary < height; boundary += 3 * 2048) {
+        Image across;
+        CHECK(RenderPageRows(*file, 0, 1200, boundary - 512, 1024, across, nullptr, env));
+        const size_t k = static_cast<size_t>(boundary / 2048);
+        Image above, below;
+        above.width = below.width = 1200;
+        above.height = below.height = 512;
+        above.pixels.assign(across.pixels.begin(), across.pixels.begin() + 512 * 1200);
+        below.pixels.assign(across.pixels.begin() + 512 * 1200, across.pixels.end());
+        const BandDiff top = CompareRows(strips[k - 1], 2048 - 512, above);
+        const BandDiff bottom = CompareRows(strips[k], 0, below);
+        CHECK(top.largest <= 2 && bottom.largest <= 2);
+        CHECK(HasInk(across));
+    }
+    CHECK(!RenderPageRows(*file, 0, 1200, 0, height, image, nullptr, env));
+
+    // A page under the threshold: its one band is RenderPage's image, byte for byte.
+    const auto a4 = PdfFile::Parse(TesterPdf(), nullptr);
+    CHECK(a4 != nullptr);
+    if (!a4) return;
+    Image page, band;
+    CHECK(RenderPage(*a4, 0, 1200, page, nullptr, env));
+    CHECK(RenderPageRows(*a4, 0, 1200, 0, page.height, band, nullptr, env));
+    CHECK(band.pixels == page.pixels);
+    // Bands outside the page are refused and leave the image alone.
+    image.width = 7;
+    CHECK(!RenderPageRows(*a4, 0, 1200, -1, 10, image, nullptr, env));
+    CHECK(!RenderPageRows(*a4, 0, 1200, page.height, 1, image, nullptr, env));
+    CHECK(!RenderPageRows(*a4, 0, 1200, page.height - 5, 6, image, nullptr, env));
+    CHECK(!RenderPageRows(*a4, 0, 1200, 0, 0, image, nullptr, env));
+    CHECK(!RenderPageRows(*a4, a4->PageCount(), 1200, 0, 1, image, nullptr, env));
+    CHECK_EQ(image.width, 7);
+    CHECK_EQ(RenderHeight(595, 1e9, 1200), 0);
+    CHECK_EQ(RenderHeight(0, 842, 1200), 0);
+    CHECK_EQ(RenderHeight(595, 842, rgui::pdf::kMaxRenderSide + 1), 0);
+}
+
+// An image wholly outside a band is not decoded for it.
+RGUI_TEST("pdf.render_strips_images") {
+    using rgui::pdf::RenderPageRows;
+    const std::string gray(16 * 16, '\x40');
+    const std::string pdf = PagePdf("q 100 0 0 100 0 0 cm /I Do Q", "<< /XObject << /I 5 0 R >> >>", 100, 4000,
+                                    {Stream(gray, " /Type /XObject /Subtype /Image /Width 16 /Height 16 "
+                                                  "/ColorSpace /DeviceGray /BitsPerComponent 8")});
+    const auto file = PdfFile::Parse(pdf, nullptr);
+    CHECK(file != nullptr);
+    if (!file) return;
+    rgui::pdf::ImageCache images;
+    rgui::pdf::FontCache fonts;
+    const rgui::pdf::RenderEnvironment env{&rgui::pdftest::TestFontIndex(), &images, &fonts};
+    Image band;
+    RenderStats stats;
+    CHECK(RenderPageRows(*file, 0, 100, 0, 2048, band, &stats, env));
+    CHECK_EQ(stats.images, uint32_t(0));
+    CHECK_EQ(stats.imageBytes, uint64_t(0));
+    CHECK_EQ(images.Count(), size_t(0));
+    CHECK(!HasInk(band));
+    CHECK(RenderPageRows(*file, 0, 100, 3900, 100, band, &stats, env));
+    CHECK_EQ(stats.images, uint32_t(1));
+    CHECK(Near(At(band, 50, 50), {64, 64, 64}));
+}
+
+namespace {
+
 struct Random {
     uint64_t state;
     uint64_t Next() {

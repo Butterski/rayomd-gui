@@ -92,6 +92,11 @@ memory, so it is the PDF, not an approximation of it.
   every page from `pdf::RenderLimits` (operators, glyphs, geometry, dashes, pixels, image decode
   and held bytes, clip depth), checks `RenderEnvironment::cancel`, culls what lies outside the
   clip and stops a page with a named limit; the JPEG decoder caps the work of a frame's scans.
+  A tall page (`PreviewPages::StripCount`: over 2,048 rows and more than twice as tall as wide, or
+  beyond `kMaxRenderSide` / `kMaxRenderPixels`) is drawn in strips of 2,048 rows by
+  `pdf::RenderPageRows` (each strip spends the limits with its own pixels; text and images wholly
+  outside it are skipped before their glyphs and decoding), and only the strips in view and next
+  to them are rendered; never a raster of the whole page.
   The editor keeps about 9 bytes per line, cuts rows at `kMaxRowBytes` and zero-width runs at
   `kMaxZeroWidthRun`, and rewraps from the edited row. A preview build is cancelled through
   `PdfOptions::cancel` when it is no longer wanted or passes 10 s. A new loop over input data

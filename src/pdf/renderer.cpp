@@ -104,6 +104,7 @@ struct SampledImage {
     Matrix m;
     int surfaceWidth = 0;
     int surfaceHeight = 0;
+    int surfaceTop = 0;
     gfx::ImageSamples samples;
 
     size_t Bytes() const { return samples.pixels.size() * sizeof(uint32_t) + sizeof(SampledImage); }
@@ -132,10 +133,12 @@ class Interpreter {
     using RectI = gfx::RectI;
 
 public:
+    // `band`: the surface holds only some rows of the page (RenderPageRows), so whole strings of
+    // text are often wholly above or below it.
     Interpreter(const PdfFile& file, const RenderEnvironment& env, RenderStats& stats, Scratch& scratch,
-                gfx::WorkBudget& budget, const Matrix& base, uint64_t maskLimit)
+                gfx::WorkBudget& budget, const Matrix& base, uint64_t maskLimit, bool band)
         : file_(file), env_(env), stats_(stats), s_(scratch), canvas_(scratch.canvas), budget_(budget),
-          maskLimit_(maskLimit) {
+          maskLimit_(maskLimit), band_(band) {
         gs_.ctm = base;
     }
 
@@ -481,6 +484,25 @@ private:
         return x1 + 32 >= clip.x0 && x0 - 32 <= clip.x1 && y1 + 32 >= clip.y0 && y0 - 32 <= clip.y1;
     }
 
+    // Whether GlyphVisible culls every glyph a string shows from here for its rows: text whose
+    // matrices do not tilt it (tm_.b and the CTM's b are 0) keeps the device y of each corner of
+    // its em box, to the bit, as it advances, and here that box lies wholly above or below the
+    // clip. Another band of a tall page then costs the string no glyph matrices.
+    __attribute__((noinline)) bool RowCulled(const Matrix& fontToText) const {
+        if (tm_.b != 0 || gs_.ctm.b != 0) return false;
+        const Matrix trm = fontToText.Multiply(tm_).Multiply(gs_.ctm);
+        double y0 = 0, y1 = 0;
+        for (int i = 0; i < 4; i++) {
+            double x = 0, y = 0;
+            trm.Apply(i & 1 ? 3.0 : -2.0, i & 2 ? 3.0 : -2.0, x, y);
+            if (!Finite(x) || !Finite(y)) return false;
+            if (i == 0 || y < y0) y0 = y;
+            if (i == 0 || y > y1) y1 = y;
+        }
+        const RectI clip = canvas_.ClipBounds();
+        return !(y1 + 32 >= clip.y0 && y0 - 32 <= clip.y1);
+    }
+
     void DrawGlyph(const text::GlyphSource& source, uint16_t glyph, const Matrix& fontToText, bool fill, bool stroke) {
         const Matrix trm = fontToText.Multiply(tm_).Multiply(gs_.ctm);
         if (++stats_.glyphs > RenderLimits::kGlyphs) {
@@ -534,8 +556,28 @@ private:
         const bool stroke = (mode == 1 || mode == 2) && CanStroke();
         size_t at = 0;
         PdfGlyph g;
+        if (band_ && fill && !stroke && source && RowCulled(fontToText)) return SkipText(*font, bytes, size, th);
         while (!stopped_ && font->Next(bytes, at, g)) {
             if ((fill || stroke) && source) DrawGlyph(*source, g.glyph, fontToText, fill, stroke);
+            const double tx = (g.width / 1000.0 * size + gs_.charSpacing + (g.wordSpace ? gs_.wordSpacing : 0)) * th;
+            tm_ = Matrix::Translate(tx, 0).Multiply(tm_);
+        }
+    }
+
+    // ShowText's loop for a string RowCulled culls: each glyph counted and culled as DrawGlyph
+    // would, and advanced the same, with no glyph matrix.
+    __attribute__((noinline)) void SkipText(const PdfFont& font, std::string_view bytes, double size, double th) {
+        size_t at = 0;
+        PdfGlyph g;
+        while (!stopped_ && font.Next(bytes, at, g)) {
+            if (++stats_.glyphs > RenderLimits::kGlyphs) {
+                stats_.AddUnknown("budget");
+                stopped_ = true;
+            } else if (!budget_.Poll()) {
+                stopped_ = true;
+            } else {
+                stats_.glyphsCulled++;
+            }
             const double tx = (g.width / 1000.0 * size + gs_.charSpacing + (g.wordSpace ? gs_.wordSpacing : 0)) * th;
             tm_ = Matrix::Translate(tx, 0).Multiply(tm_);
         }
@@ -612,6 +654,8 @@ private:
         // Image space: row 0 at the top of the unit square, (0, 1) in user space.
         const Matrix flip{1, 0, 0, -1, 0, 1};
         const Matrix m = flip.Multiply(gs_.ctm);
+        // Wholly outside the clip (another band of a tall page): not decoded.
+        if (OutsideClip(m)) return;
         // The level whose pixels are still at least as many as the device pixels it covers.
         const int64_t w = file_.Get(image, "Width").Int(0), h = file_.Get(image, "Height").Int(0);
         const int level = w > 0 && h > 0 && w <= 65535 && h <= 65535
@@ -658,9 +702,13 @@ private:
     // page), or new ones kept for the next render.
     void DrawSampled(const std::shared_ptr<const gfx::Image>& image, const Matrix& m, uint8_t opacity) {
         const gfx::Surface& target = canvas_.Target();
+        const int top = canvas_.TargetTop();
         auto& list = s_.sampled;
         for (auto it = list.begin(); it != list.end(); ++it) {
-            if (it->surfaceWidth != target.width || it->surfaceHeight != target.height || !SameMatrix(it->m, m)) continue;
+            if (it->surfaceWidth != target.width || it->surfaceHeight != target.height || it->surfaceTop != top ||
+                !SameMatrix(it->m, m)) {
+                continue;
+            }
             const std::shared_ptr<const gfx::Image> held = it->image.lock();
             if (held != image) continue;
             list.splice(list.begin(), list, it);
@@ -680,6 +728,7 @@ private:
         entry.m = m;
         entry.surfaceWidth = target.width;
         entry.surfaceHeight = target.height;
+        entry.surfaceTop = top;
         list.push_front(std::move(entry));
         s_.sampledBytes += list.front().Bytes();
         while (s_.sampledBytes > kSampledBytes && !list.empty()) {
@@ -690,6 +739,23 @@ private:
 
     static bool SameMatrix(const Matrix& x, const Matrix& y) {
         return x.a == y.a && x.b == y.b && x.c == y.c && x.d == y.d && x.e == y.e && x.f == y.f;
+    }
+
+    // Whether the unit square under `m` lies wholly outside the clip (a pixel of slack); false
+    // for a matrix that is not finite, which the canvas refuses itself.
+    bool OutsideClip(const Matrix& m) const {
+        double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        for (int i = 0; i < 4; i++) {
+            double x = 0, y = 0;
+            m.Apply(i & 1 ? 1.0 : 0.0, i & 2 ? 1.0 : 0.0, x, y);
+            if (!Finite(x) || !Finite(y)) return false;
+            if (i == 0 || x < x0) x0 = x;
+            if (i == 0 || x > x1) x1 = x;
+            if (i == 0 || y < y0) y0 = y;
+            if (i == 0 || y > y1) y1 = y;
+        }
+        const RectI clip = canvas_.ClipBounds();
+        return x1 + 1 < clip.x0 || x0 - 1 > clip.x1 || y1 + 1 < clip.y0 || y0 - 1 > clip.y1;
     }
 
     void DrawForm(const PdfValue& form, const PdfValue& resources, int depth) {
@@ -1110,6 +1176,7 @@ private:
     size_t floor_ = 0;          // saves a Q may not restore past (the running form's)
     size_t ignoredSaves_ = 0;   // q beyond kMaxSaves, matched by Qs that do nothing
     size_t clipDepth_ = 0;
+    const bool band_;
     bool stopped_ = false;
     gfx::Path path_;
     bool hasCurrent_ = false;
@@ -1138,38 +1205,42 @@ const RenderEnvironment& DefaultRenderEnvironment() {
     return environment;
 }
 
-bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, RenderStats* stats,
-                const RenderEnvironment& environment) {
-    RenderStats local;
-    RenderStats& st = stats ? *stats : local;
-    st = RenderStats();
-    if (page < 0 || page >= file.PageCount() || widthPx <= 0 || widthPx > kMaxRenderSide) return false;
-    const PdfRect box = file.PageMediaBox(page);
-    if (!(box.Width() > 0) || !(box.Height() > 0) || !Finite(box.Width()) || !Finite(box.Height())) return false;
+int RenderHeight(double boxWidth, double boxHeight, int widthPx) {
+    if (widthPx <= 0 || widthPx > kMaxRenderSide) return 0;
+    if (!(boxWidth > 0) || !(boxHeight > 0) || !Finite(boxWidth) || !Finite(boxHeight)) return 0;
+    const double s = widthPx / boxWidth;
+    const double h = boxHeight * s;
+    if (!(h < kMaxPageRows + 0.5)) return 0;
+    return std::max(1, static_cast<int>(LRound(h)));
+}
+
+namespace {
+
+// Rows [top, top + rows) of page `page`, MediaBox `box`, at `widthPx`, of the page's `heightPx`
+// (RenderHeight), the band checked against the limits by the caller.
+bool RenderRows(const PdfFile& file, int page, const PdfRect& box, int widthPx, int heightPx, int top, int rows,
+                gfx::Image& out, RenderStats& st, const RenderEnvironment& environment) {
     const double s = widthPx / box.Width();
-    const double h = box.Height() * s;
-    if (!(h < kMaxRenderSide + 0.5)) return false;
-    const int heightPx = std::max(1, static_cast<int>(LRound(h)));
-    const uint64_t pagePixels = static_cast<uint64_t>(widthPx) * static_cast<uint64_t>(heightPx);
-    if (heightPx > kMaxRenderSide || pagePixels > kMaxRenderPixels) return false;
+    const bool band = rows < heightPx;
+    const uint64_t bandPixels = static_cast<uint64_t>(widthPx) * static_cast<uint64_t>(rows);
     gfx::WorkBudget budget;
     budget.cancel = environment.cancel;
     budget.geometry = RenderLimits::kGeometry;
-    budget.pixels = RenderLimits::kPixelsPerPagePixel * pagePixels + RenderLimits::kPixelsBase;
+    budget.pixels = RenderLimits::kPixelsPerPagePixel * bandPixels + RenderLimits::kPixelsBase;
     budget.dashes = RenderLimits::kDashes;
     if (!budget.Poll()) {
         st.cancelled = true;
         return false;
     }
     const uint64_t pixelBudget = budget.pixels;
-    std::vector<uint32_t> pixels(static_cast<size_t>(pagePixels), 0xFFFFFFFFu);
+    std::vector<uint32_t> pixels(static_cast<size_t>(bandPixels), 0xFFFFFFFFu);
     Scratch& scratch = ThreadScratch();
     scratch.glyphs.BeginFrame();
-    scratch.canvas.SetTarget(gfx::Surface{pixels.data(), widthPx, heightPx, widthPx});
+    scratch.canvas.SetTarget(gfx::Surface{pixels.data(), widthPx, rows, widthPx}, top);
     scratch.canvas.SetBudget(&budget);
     {
         Interpreter interpreter(file, environment, st, scratch, budget, Matrix{s, 0, 0, -s, -box.x0 * s, box.y1 * s},
-                                RenderLimits::kMaskPerPagePixel * pagePixels + RenderLimits::kMaskBase);
+                                RenderLimits::kMaskPerPagePixel * bandPixels + RenderLimits::kMaskBase, band);
         std::string_view content;
         std::string error;
         if (file.PageContent(page, content, &error)) {
@@ -1197,14 +1268,51 @@ bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, Ren
     case gfx::WorkBudget::Stop::Dashes: st.AddUnknown("budget"); break;
     }
     out.width = widthPx;
-    out.height = heightPx;
+    out.height = rows;
     out.pixels = std::move(pixels);
     out.opaque = true;
     return true;
 }
 
+// The page's height at `widthPx` and its MediaBox, 0 for a page that does not exist or has none.
+int PageHeight(const PdfFile& file, int page, int widthPx, PdfRect& box) {
+    if (page < 0 || page >= file.PageCount()) return 0;
+    box = file.PageMediaBox(page);
+    return RenderHeight(box.Width(), box.Height(), widthPx);
+}
+
+bool BandFits(int widthPx, int rows) {
+    return rows <= kMaxRenderSide && static_cast<uint64_t>(widthPx) * static_cast<uint64_t>(rows) <= kMaxRenderPixels;
+}
+
+} // namespace
+
+bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, RenderStats* stats,
+                const RenderEnvironment& environment) {
+    RenderStats local;
+    RenderStats& st = stats ? *stats : local;
+    st = RenderStats();
+    PdfRect box;
+    const int heightPx = PageHeight(file, page, widthPx, box);
+    if (heightPx == 0 || !BandFits(widthPx, heightPx)) return false;
+    return RenderRows(file, page, box, widthPx, heightPx, 0, heightPx, out, st, environment);
+}
+
 bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, RenderStats* stats) {
     return RenderPage(file, page, widthPx, out, stats, DefaultRenderEnvironment());
+}
+
+bool RenderPageRows(const PdfFile& file, int page, int widthPx, int top, int rows, gfx::Image& out,
+                    RenderStats* stats, const RenderEnvironment& environment) {
+    RenderStats local;
+    RenderStats& st = stats ? *stats : local;
+    st = RenderStats();
+    PdfRect box;
+    const int heightPx = PageHeight(file, page, widthPx, box);
+    if (heightPx == 0 || top < 0 || rows < 1 || top >= heightPx || rows > heightPx - top || !BandFits(widthPx, rows)) {
+        return false;
+    }
+    return RenderRows(file, page, box, widthPx, heightPx, top, rows, out, st, environment);
 }
 
 } // namespace rgui::pdf

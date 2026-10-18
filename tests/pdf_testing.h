@@ -3,6 +3,9 @@
 // the tests share.
 #pragma once
 
+#include "runner.h"
+
+#include "common/file_io.h"
 #include "pdf/renderer.h"
 #include "rayomd/tiny_pdf.h"
 #include "text/fontindex.h"
@@ -34,6 +37,26 @@ inline std::string BuildPreview(const std::string& markdown, TinyPdf::PdfOptions
     std::string pdf;
     if (!TinyPdf::BuildPdf(markdown, options, pdf).Ok()) pdf.clear();
     return pdf;
+}
+
+// The engine's tester.md, its path.
+inline std::string TesterMarkdownPath() {
+    return std::string(test::SourceDir()) + "/external/rayomd/tester.md";
+}
+
+// tester.md `copies` times over without its page breaks: every kind of block, about 2,000
+// points of A4 page a copy (8 copies fill a page 14,400 points tall). Empty when unreadable.
+inline std::string LongMarkdown(int copies) {
+    std::string tester;
+    if (!RayoMd::File::ReadAll(TesterMarkdownPath(), 1u << 24, tester)) return {};
+    for (const char* marker : {"\\pagebreak", "<!-- pagebreak -->"}) {
+        for (size_t at = tester.find(marker); at != std::string::npos; at = tester.find(marker, at)) {
+            tester.erase(at, std::string(marker).size());
+        }
+    }
+    std::string out;
+    for (int i = 0; i < copies; i++) out += tester + "\n\n";
+    return out;
 }
 
 // A stream object's body.

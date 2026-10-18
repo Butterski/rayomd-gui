@@ -4,6 +4,7 @@
 // snapshot mode.
 #include "app_harness.h"
 #include "headless_platform.h"
+#include "pdf_testing.h"
 #include "runner.h"
 
 #include "app/app.h"
@@ -246,6 +247,51 @@ RGUI_TEST("app.preview_scroll") {
     const float zoomed = w.PreviewScroll();
     CHECK(zoomed > 1500.0f * 1.07f && zoomed < 1500.0f * 1.1f);
     CHECK(h.Settle());
+}
+
+// A page of 210 x 5,080 mm (14,400 points, the custom size's largest) shows: in strips, the ones
+// in view, at the top and after a scroll to the middle of the page.
+RGUI_TEST("app.preview_long_page") {
+    if (!HaveFonts()) {
+        std::printf("skip app.preview_long_page: DejaVu Sans Mono not installed\n");
+        return;
+    }
+    Harness h("preview_long_page");
+    const fs::path path = h.dir / "long.md";
+    CHECK(RayoMd::File::WriteAll(path, rgui::pdftest::LongMarkdown(8)));
+    h.Start("ui.theme=tokyo-night\nui.syncScroll=false\nexport.pageSize=5\nexport.customWidthMm=210\n"
+            "export.customHeightMm=5080\n",
+            path.u8string());
+    CHECK(h.WaitLoaded());
+    CHECK(h.Settle());
+    rgui::MainWindow& w = h.Window();
+    CHECK(w.Preview().PageCount() >= 1);
+    CHECK_NEAR(w.Preview().PageHeightPt(0), 14400.0, 0.5);
+    std::vector<rgui::PreviewPages::Strip> strips;
+    w.Preview().Strips(0, strips);
+    CHECK(!strips.empty());
+    CHECK(w.Preview().Image(0) == nullptr);
+    CHECK(PageWithText(h));
+
+    InputEvent wheel;
+    wheel.type = InputEvent::Type::Wheel;
+    wheel.x = 1000;
+    wheel.y = 400;
+    wheel.pixelsY = 9000;
+    h.app->OnInput(wheel);
+    h.Frame();
+    h.Frame();
+    CHECK_NEAR(w.PreviewScroll(), 9000.0f, 1.0f);
+    CHECK(h.Settle());
+    CHECK(PageWithText(h));
+    w.Preview().Strips(0, strips);
+    int deepest = 0;
+    for (const rgui::PreviewPages::Strip& strip : strips) deepest = std::max(deepest, strip.top);
+    CHECK(deepest >= 4 * rgui::PreviewPages::kStripRows);
+    // Only strips near the two places looked at were drawn, not the page's 15 or more.
+    std::printf("app.preview_long_page: %llu strips rendered\n",
+                static_cast<unsigned long long>(w.Preview().RenderedCount()));
+    CHECK(w.Preview().RenderedCount() <= 9);
 }
 
 RGUI_TEST("app.unsaved_prompt") {

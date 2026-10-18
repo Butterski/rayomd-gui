@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// The preview renderer (plan Phase 6 step 2): one page of a PdfFile into an image, by
-// interpreting its content stream with gfx::Canvas.
+// The preview renderer (plan Phase 6 step 2): one page of a PdfFile, or a band of its rows, into
+// an image, by interpreting its content stream with gfx::Canvas.
 //
 // What it draws: paths (fill, stroke, both; nonzero and even-odd), clips (W, W*), the line
 // state (w J j M d), colours in DeviceGray, DeviceRGB and DeviceCMYK (CMYK -> RGB as
@@ -78,6 +78,8 @@ const RenderEnvironment& DefaultRenderEnvironment();
 // Page sizes the renderer refuses: wider or taller than this, or more pixels than kMaxPixels.
 inline constexpr int kMaxRenderSide = 16384;
 inline constexpr uint64_t kMaxRenderPixels = 1ull << 26;
+// The tallest page RenderPageRows draws rows of.
+inline constexpr int kMaxPageRows = 1 << 20;
 
 // What one page may cost. A page that reaches a limit stops there: what it drew so far is the
 // image (true), with "budget" or "geometry" in RenderStats::unknown. Every limit is far above
@@ -106,17 +108,35 @@ struct RenderLimits {
     static constexpr double kMaxCachedGlyphSize = 256;
 };
 
+// The height in pixels of a page whose MediaBox is `boxWidth` x `boxHeight` drawn `widthPx`
+// across: round(boxHeight * widthPx / boxWidth), at least 1. 0 when it has none: a box side
+// that is not positive and finite, a width outside [1, kMaxRenderSide], over kMaxPageRows.
+int RenderHeight(double boxWidth, double boxHeight, int widthPx);
+
 // Renders page `page` (0-based) at `widthPx` pixels across its MediaBox, the height in
-// proportion (rounded, at least 1), onto white: `out` is opaque, `out.id` and `out.version` are
+// proportion (RenderHeight), onto white: `out` is opaque, `out.id` and `out.version` are
 // left as they were. The base transform is Matrix(s, 0, 0, -s, -x0 * s, y1 * s), s = widthPx /
 // MediaBox width. False, with `out` unchanged, for a page that does not exist or a size out of
 // range, or when the environment's cancel flag was set (`stats->cancelled`); a page whose
 // content cannot be read is white (true, "contents" or "filter:..." in `stats`). `stats` may be
 // nullptr; it is cleared first. Glyphs whose em box (grown to [-2, 3] em and by 32 px) lies
-// outside the clip are not drawn, so a page of text far off the page costs no rasterization.
+// outside the clip are not drawn, so a page of text far off the page costs no rasterization;
+// nor are images wholly outside it decoded.
 bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, RenderStats* stats,
                 const RenderEnvironment& environment);
 // The same with DefaultRenderEnvironment().
 bool RenderPage(const PdfFile& file, int page, int widthPx, gfx::Image& out, RenderStats* stats);
+
+// A band of a page of any height up to kMaxPageRows: rows [top, top + rows) of the image
+// RenderPage would give at `widthPx` (`out` is widthPx x rows), drawn with the same base
+// transform into a surface whose first row is device row `top` (gfx::Canvas::SetTarget). The
+// pixels are RenderPage's, but in the rows next to the band's edges, where a path crossing one
+// is cut at it, by up to 1 per channel. The content is interpreted whole for every band, and
+// what lies outside the band is culled as outside any clip; the band spends the page's limits
+// (RenderLimits), its own pixels in place of the page's. False, with `out` unchanged, when `top`
+// and `rows` do not lie within the page's height, rows > kMaxRenderSide or widthPx * rows >
+// kMaxRenderPixels; otherwise as RenderPage.
+bool RenderPageRows(const PdfFile& file, int page, int widthPx, int top, int rows, gfx::Image& out,
+                    RenderStats* stats, const RenderEnvironment& environment);
 
 } // namespace rgui::pdf

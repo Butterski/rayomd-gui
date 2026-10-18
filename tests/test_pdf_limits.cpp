@@ -595,11 +595,11 @@ RGUI_TEST("pdf.preview_cancel") {
     {
         rgui::PreviewPages pages(platform, &rgui::pdftest::TestFontIndex(), [] {}, 1);
         pages.SetDocument(heavy, 1);
-        pages.Request({0}, 4000);
+        pages.Request({{0}}, 4000);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the heavy page is being drawn
         const auto start = Clock::now();
         pages.SetDocument(light, 2);
-        pages.Request({0}, 4000);
+        pages.Request({{0}}, 4000);
         CHECK(platform.PumpUntil([&] { return pages.Current(0, 4000); }, 20000));
         const double ms = MsSince(start);
         std::printf("the new build's page shown %.1f ms after it arrived\n", ms);
@@ -610,11 +610,103 @@ RGUI_TEST("pdf.preview_cancel") {
     {
         rgui::PreviewPages pages(platform, &rgui::pdftest::TestFontIndex(), [] {}, 1);
         pages.SetDocument(heavy, 1);
-        pages.Request({0}, 4000);
+        pages.Request({{0}}, 4000);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     const double quit = MsSince(start) - 100;
     std::printf("destroyed %.1f ms after the request's 100 ms\n", quit);
     CHECK(quit < 100 * kSlow);
     platform.Pump();
+}
+
+namespace {
+
+// `markdown` as the preview builds it beside tester.md, on pages `width` x `height` points.
+std::shared_ptr<const PdfFile> PreviewFile(const std::string& markdown, double width, double height) {
+    CHECK(!markdown.empty());
+    TinyPdf::PdfOptions options;
+    options.sourcePath = rgui::pdftest::TesterMarkdownPath();
+    options.pageSize = {width, height};
+    return PdfFile::Parse(rgui::pdftest::BuildPreview(markdown, options), nullptr);
+}
+
+} // namespace
+
+// A page of 595 x 14,400 points at the preview's 1,200 px is drawn in strips: the strips in
+// view, then their neighbours; never the whole page. Time to the first strip and the cache's
+// bytes against an A4 page drawn whole.
+RGUI_TEST("pdf.preview_strips") {
+    using rgui::PreviewPages;
+    const auto a4 = PreviewFile(rgui::pdftest::LongMarkdown(1), 595, 842);
+    const auto tall = PreviewFile(rgui::pdftest::LongMarkdown(8), 595, 14400);
+    CHECK(a4 && tall);
+    if (!a4 || !tall) return;
+    CHECK_EQ(PreviewPages::StripCount(595, 842, 1200), 0);
+    CHECK_EQ(PreviewPages::StripCount(595, 842, 4000), 0);     // A4 is drawn whole at any width
+    CHECK_EQ(PreviewPages::StripCount(100, 100, 4000), 0);
+    CHECK_EQ(PreviewPages::StripCount(595, 14400, 1200), 15);   // 29,042 rows
+    CHECK_EQ(PreviewPages::StripCount(595, 14400, 600), 8);     // drawable whole, but 24 x as tall
+    CHECK_EQ(PreviewPages::StripCount(595, 2000, 600), 0);      // 2,017 rows: one strip's worth
+    rgui::test::HeadlessPlatform platform;
+    // The first of the time is the fonts' and images' first use: measured after a warm-up, the
+    // best of five.
+    double a4Ms = 1e9, tallMs = 1e9, middleMs = 1e9;
+    size_t a4Bytes = 0, tallBytes = 0;
+    for (int round = 0; round < 6; round++) {
+        {
+            PreviewPages pages(platform, &rgui::pdftest::TestFontIndex(), [] {}, 1);
+            pages.SetDocument(a4, 1);
+            const auto start = Clock::now();
+            pages.Request({{0}}, 1200);
+            CHECK(platform.PumpUntil([&] { return pages.Current(0, 1200); }, 20000));
+            if (round > 0) a4Ms = std::min(a4Ms, MsSince(start));
+            CHECK(pages.Image(0) != nullptr);
+            a4Bytes = pages.CacheBytes();
+        }
+        PreviewPages pages(platform, &rgui::pdftest::TestFontIndex(), [] {}, 1);
+        pages.SetDocument(tall, 1);
+        CHECK_EQ(pages.StripCount(0, 1200), 15);
+        auto start = Clock::now();
+        // A view of 1,000 rows at the page's top.
+        pages.Request({{0, 0, 1000}}, 1200);
+        CHECK(platform.PumpUntil([&] { return pages.Current(0, 1200, 0, 1000); }, 20000));
+        if (round > 0) tallMs = std::min(tallMs, MsSince(start));
+        std::vector<PreviewPages::Strip> strips;
+        pages.Strips(0, strips);
+        CHECK(!strips.empty() && strips[0].top == 0 && strips[0].widthPx == 1200);
+        CHECK(!strips.empty() && strips[0].image->width == 1200 && strips[0].image->height == 2048);
+        CHECK(pages.Image(0) == nullptr);
+        // The strip below follows; nothing else.
+        CHECK(platform.PumpUntil([&] { return pages.RenderedCount() == 2; }, 20000));
+        pages.Request({{0, 0, 1000}}, 1200);
+        platform.PumpUntil([] { return false; }, 50);
+        CHECK_EQ(pages.RenderedCount(), uint64_t(2));
+        tallBytes = pages.CacheBytes();
+        // The middle of the page, across the boundary of strips 7 and 8 (row 16,384).
+        start = Clock::now();
+        pages.Request({{0, 16000, 17000}}, 1200);
+        CHECK(platform.PumpUntil([&] { return pages.Current(0, 1200, 16000, 17000); }, 20000));
+        if (round > 0) middleMs = std::min(middleMs, MsSince(start));
+        CHECK(!pages.Current(0, 1200, 4096, 4097));
+        pages.Strips(0, strips);
+        bool seven = false, eight = false, top = false;
+        for (const PreviewPages::Strip& strip : strips) {
+            seven |= strip.top == 7 * 2048;
+            eight |= strip.top == 8 * 2048;
+            top |= strip.top == 0;
+        }
+        CHECK(seven && eight);
+        // The page holds the strips near the view, not those it showed at its top.
+        CHECK(!top && strips.size() <= 6);
+        // A new build of the same page keeps showing the strips until its own are drawn.
+        pages.SetDocument(PreviewFile(rgui::pdftest::LongMarkdown(8), 595, 14400), 2);
+        pages.Strips(0, strips);
+        CHECK(strips.size() >= 2);
+        CHECK(!pages.Current(0, 1200, 0, 1000));
+    }
+    std::printf("preview at 1200 px: A4 page whole %.1f ms, %.1f MiB; 595 x 14400 pt page: first strip %.1f ms, "
+                "%.1f MiB with its neighbour; two strips mid-page %.1f ms\n",
+                a4Ms, a4Bytes / 1048576.0, tallMs, tallBytes / 1048576.0, middleMs);
+    CHECK(tallMs < 2000 * kSlow);
+    CHECK(tallBytes < 24u << 20);
 }

@@ -611,7 +611,18 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
     const int flashIndex =
         ctx.NowMs() < flashUntil_ && count > 0 ? static_cast<int>(Within(flashPage_, 0, count - 1)) : -1;
     const int widthPx = std::max(1, static_cast<int>(pageW * ctx.Scale() + 0.5));
+    // The rows of a page's image at widthPx in view, from its device rectangle: for a page out
+    // of view, an empty range at its edge nearest the view.
+    const gfx::RectI view = ctx.ToDevice(rect);
+    const auto want = [&](int i, const gfx::RectI& d) {
+        const int64_t height = std::max(0, d.Height()), width = std::max(1, d.Width());
+        const auto row = [&](int at) {
+            return static_cast<int>(std::min<int64_t>(std::max<int64_t>(at - d.y0, 0), height) * widthPx / width);
+        };
+        return PreviewPages::Want{i, row(view.y0), row(view.y1)};
+    };
     std::vector<int> visible;
+    wanted_.clear();
     for (int i = 0; i < count; i++) {
         const size_t k = static_cast<size_t>(i);
         const float top = rect.y - offset + pageTops_[k];
@@ -622,6 +633,10 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
         ctx.StrokeRect({page.x - 1, page.y - 1, page.w + 2, page.h + 2}, 1, t.colors.hairline);
         ctx.FillRect(page, kWhite);
         if (const gfx::Image* image = preview_->Image(i)) ctx.DrawImage(*image, page);
+        const gfx::RectI device = ctx.ToDevice(page);
+        preview_->Strips(i, strips_);
+        if (!strips_.empty()) DrawStrips(ctx, page, device, view);
+        wanted_.push_back(want(i, device));
         if (i == flashIndex) {
             // A bar in the page's left margin beside the line, 16 points high (at least 12 px).
             const float at = static_cast<float>(Within(flashPage_ - i, 0, 1)) * pageHeights_[k];
@@ -651,27 +666,34 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
     }
 
     // The visible pages, the one nearest the middle of the view first, then their neighbours.
-    wanted_ = visible;
     const float middle = offset + rect.h / 2;
-    std::stable_sort(wanted_.begin(), wanted_.end(), [&](int a, int b) {
+    std::stable_sort(wanted_.begin(), wanted_.end(), [&](const PreviewPages::Want& a, const PreviewPages::Want& b) {
         const auto distance = [&](int i) {
             const size_t k = static_cast<size_t>(i);
             const float center = pageTops_[k] + pageHeights_[k] / 2;
             return center > middle ? center - middle : middle - center;
         };
-        return distance(a) < distance(b);
+        return distance(a.page) < distance(b.page);
     });
+    const size_t shown = wanted_.size();
     if (!visible.empty()) {
+        const auto neighbour = [&](int i) {
+            const size_t k = static_cast<size_t>(i);
+            wanted_.push_back(want(i, ctx.ToDevice({pageX, rect.y - offset + pageTops_[k], pageW, pageHeights_[k]})));
+        };
         for (int d = 1; d <= 2; d++) {
-            if (visible.front() - d >= 0) wanted_.push_back(visible.front() - d);
-            if (visible.back() + d < count) wanted_.push_back(visible.back() + d);
+            if (visible.front() - d >= 0) neighbour(visible.front() - d);
+            if (visible.back() + d < count) neighbour(visible.back() + d);
         }
     }
     preview_->Request(wanted_, widthPx);
 
     bool current = count > 0 && !visible.empty() && !previewDirty_ && !previewInFlight_ && !loading_ &&
                    shownGeneration_ == requestedGeneration_ && preview_->Generation() == shownGeneration_;
-    for (const int i : visible) current = current && preview_->Current(i, widthPx);
+    for (size_t v = 0; v < shown; v++) {
+        const PreviewPages::Want& w = wanted_[v];
+        current = current && preview_->Current(w.page, widthPx, w.top, w.bottom);
+    }
     settled_ = current;
     // The preview leads: the editor follows in the next frame.
     if (syncScroll_ && leader_ == ScrollLeader::Preview && !sourceMap_.Empty() && offset != lastPreviewOffset_) {
@@ -679,6 +701,26 @@ void MainWindow::PreviewPane(ui::Context& ctx, RectF rect) {
         Dirty();
     }
     lastPreviewOffset_ = offset;
+}
+
+void MainWindow::DrawStrips(ui::Context& ctx, RectF page, const gfx::RectI& device, const gfx::RectI& view) {
+    // A strip's rows at its width map to device rows by the page's device width: at the width
+    // drawn now one to one, so strips meet on whole pixels with no seam.
+    const double scale = ctx.Scale();
+    bool clipped = false;
+    for (const PreviewPages::Strip& strip : strips_) {
+        const int64_t across = device.Width();
+        const int y0 = device.y0 + static_cast<int>(int64_t(strip.top) * across / strip.widthPx);
+        const int y1 = device.y0 + static_cast<int>(int64_t(strip.top + strip.image->height) * across / strip.widthPx);
+        if (y1 <= std::max(view.y0, device.y0) || y0 >= std::min(view.y1, device.y1)) continue;
+        // The last strip of a taller page of an earlier build stops at the page's bottom.
+        if (y1 > device.y1 && !clipped) {
+            ctx.PushClip(page);
+            clipped = true;
+        }
+        ctx.DrawImage(*strip.image, {page.x, static_cast<float>(y0 / scale), page.w, static_cast<float>((y1 - y0) / scale)});
+    }
+    if (clipped) ctx.PopClip();
 }
 
 void MainWindow::Prompts(ui::Context& ctx) {

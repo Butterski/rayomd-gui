@@ -219,6 +219,8 @@ private:
     void Options(ui::Context& ctx, ui::RectF rect);
     void OptionsContent(ui::Context& ctx, ui::RectF column, float& height);
     void PreviewPane(ui::Context& ctx, ui::RectF rect);
+    // Draws strips_, the strips of the page at `page` (`device` on the device), those in `view`.
+    void DrawStrips(ui::Context& ctx, ui::RectF page, const gfx::RectI& device, const gfx::RectI& view);
     void Prompts(ui::Context& ctx);
     void Shortcuts(ui::Context& ctx);
 
@@ -321,7 +323,8 @@ private:
     float pageX_ = 0;                 // the pages' left edge on screen
     float previewOffset_ = 0;
     float previewZoomWheel_ = 0;
-    std::vector<int> wanted_;
+    std::vector<PreviewPages::Want> wanted_;   // the last frame's, kept for its allocation
+    std::vector<PreviewPages::Strip> strips_;  // a page's strips while it is drawn
     bool settled_ = false;
 
     // Source sync.
