@@ -104,6 +104,11 @@ MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hoo
     preview_ = std::make_unique<PreviewPages>(platform_, fontIndex, [this] {
         if (hooks_.requestFrame) hooks_.requestFrame();
     });
+    // A parsed preview starts rendering the pages in view on the worker's thread (the worker
+    // stops before the preview goes).
+    worker_->SetPrefetch([preview = preview_.get()](const std::shared_ptr<const pdf::PdfFile>& pdf, int generation) {
+        return preview->Prefetch(pdf, generation);
+    });
     loader_ = std::make_unique<DocumentLoader>(
         platform_, [this](DocumentLoaded loaded) { OnLoaded(std::move(loaded)); },
         [this](ImageCopied copied) { OnImageCopied(std::move(copied)); },
@@ -115,9 +120,10 @@ MainWindow::~MainWindow() {
     link_->alive = false;
     if (budgetTimer_ != 0) platform_.CancelTimer(budgetTimer_);
     // The workers stop before the window they call back goes; the build in flight is cancelled.
+    // The build worker goes before the preview it prefetches into.
     loader_.reset();
-    preview_.reset();
     worker_.reset();
+    preview_.reset();
 }
 
 // ---- Settings ----
@@ -1307,7 +1313,7 @@ void MainWindow::OnPreview(PreviewReady ready) {
     if (ready.pdf) {
         // Keep the view on the page at its top, at the same place within it.
         if (!anchor_) anchor_ = ViewAnchor();
-        preview_->SetDocument(std::move(ready.pdf), ready.generation);
+        preview_->SetDocument(std::move(ready.pdf), ready.generation, ready.pageKeys);
         sourceMap_ = std::move(ready.sourceMap);
         // The anchor keeps the view first; the editor, when it leads, then sets it.
         if (syncScroll_ && leader_ == ScrollLeader::Editor) syncPreviewNow_ = true;

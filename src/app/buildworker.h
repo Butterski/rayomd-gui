@@ -11,6 +11,7 @@
 #include "app/document.h"
 #include "app/notes.h"
 #include "app/sourcemap.h"
+#include "pdf/reader.h"
 #include "rayomd/tiny_pdf.h"
 
 #include <atomic>
@@ -30,14 +31,13 @@ namespace rgui {
 
 class Platform;
 
-namespace pdf {
-class PdfFile;
-}
-
 struct PreviewReady {
     int generation = 0;
     // The PDF parsed for the preview renderer; nullptr when the build or the parse failed.
     std::shared_ptr<const pdf::PdfFile> pdf;
+    // Keys of its pages computed on the worker (BuildWorker::SetPrefetch), for
+    // PreviewPages::SetDocument.
+    std::vector<pdf::PdfPageKey> pageKeys;
     uint32_t pages = 0;
     uint32_t missingCharacters = 0;
     uint32_t failedImages = 0;
@@ -123,6 +123,13 @@ public:
     // `onChanged` runs on the UI thread when a note the last preview embeds changed on disk
     // (EmbedWatch), once until the next preview; set it before the first request.
     void SetOnEmbedsChanged(std::function<void()> onChanged);
+    // Runs on the worker's thread as soon as a preview's PDF is parsed, before the rest of its
+    // PreviewReady is made and handed over: the preview starts rendering the pages it wants
+    // (PreviewPages::Prefetch). The page keys it returns go into PreviewReady::pageKeys. Set it
+    // before the first request.
+    using PrefetchFunction =
+        std::function<std::vector<pdf::PdfPageKey>(const std::shared_ptr<const pdf::PdfFile>&, int generation)>;
+    void SetPrefetch(PrefetchFunction prefetch);
     // The window's focus. Gaining it checks the embedded notes at once; while it lasts they are
     // checked every kEmbedCheckMs (a stat each), on the worker's thread.
     void SetFocused(bool focused);
@@ -168,6 +175,7 @@ private:
 
     Platform& platform_;
     BuildFunction build_;
+    PrefetchFunction prefetch_;
     std::shared_ptr<Callbacks> callbacks_;
     std::mutex mutex_;
     std::condition_variable wake_;

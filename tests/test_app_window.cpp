@@ -21,6 +21,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -204,6 +205,34 @@ RGUI_TEST("app.preview_pipeline") {
     CHECK_EQ(w.Preview().RenderedCount(), before + 3);
     CHECK(w.Preview().Image(0) == first);
     CHECK(w.Preview().Image(1) != second);
+}
+
+// The page in view starts rendering as soon as the build worker parsed the new PDF, before the
+// window has the build; the window then takes the image from the cache, with no render of its own.
+RGUI_TEST("app.preview_prefetch") {
+    if (!HaveFonts()) {
+        std::printf("skip app.preview_prefetch: DejaVu Sans Mono not installed\n");
+        return;
+    }
+    Harness h("preview_prefetch");
+    h.Start("ui.theme=tokyo-night\n");
+    h.Type("# Prefetch");
+    CHECK(h.Settle());
+    rgui::MainWindow& w = h.Window();
+    const uint64_t before = w.Preview().RenderedCount();
+    const int shown = w.ShownGeneration();
+    h.Type("ed");
+    // Nothing posted to the UI thread runs meanwhile: the worker started the render itself.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (w.Preview().RenderedCount() == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK_EQ(w.Preview().RenderedCount(), before + 1);
+    CHECK_EQ(w.ShownGeneration(), shown);
+    CHECK(h.Settle());
+    CHECK(w.ShownGeneration() > shown);
+    CHECK_EQ(w.Preview().RenderedCount(), before + 1);
+    CHECK(PageWithText(h));
 }
 
 // The preview keeps its place (the page at its top, and how far into it) across builds and zooms

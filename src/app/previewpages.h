@@ -3,7 +3,9 @@
 // of the newest preview PDF with pdf::RenderPage, the pages nearest the viewport first. Images
 // are kept by (PdfFile::PageKey, width) in a 256 MiB LRU, so the pages an edit did not change
 // reuse their images in the next build at once. Until a page's new image is ready, the image it
-// showed before (the previous build's, or another width's) stays on screen.
+// showed before (the previous build's, or another width's) stays on screen. The build worker
+// hands each new PDF to Prefetch as soon as it is parsed: the pages the window wanted last start
+// rendering then, and their keys are computed there, off the UI thread.
 //
 // A tall page (StripCount: one long page, --page-size=WIDTHxauto) is drawn in strips of
 // kStripRows rows with pdf::RenderPageRows, and only the strips in view and next to it are
@@ -82,7 +84,9 @@ public:
     // ---- UI thread ----
 
     // The pages of a new build. Page i keeps showing the image it had until its own is ready.
-    void SetDocument(std::shared_ptr<const pdf::PdfFile> pdf, int generation);
+    // `keys` are page keys already known (Prefetch's).
+    void SetDocument(std::shared_ptr<const pdf::PdfFile> pdf, int generation,
+                     const std::vector<pdf::PdfPageKey>& keys = {});
     const std::shared_ptr<const pdf::PdfFile>& Document() const { return pdf_; }
     int Generation() const { return generation_; }
     int PageCount() const { return static_cast<int>(pages_.size()); }
@@ -112,6 +116,15 @@ public:
     // True when `page` shows this build's page at `widthPx` (or its render failed for good); for
     // a page drawn in strips, every strip holding a row of [top, bottom) (or row `top`).
     bool Current(int page, int widthPx, int top = 0, int bottom = 0) const;
+
+    // ---- Any thread ----
+
+    // A new build's PDF as soon as it is parsed (the build worker calls it, before the window
+    // has the build): the pages the last Request wanted, at its width, start rendering at once,
+    // ahead of whatever is queued: whole pages whose image the cache lacks and that are not
+    // being drawn. Returns the keys of those pages it computed (off the UI thread), for
+    // SetDocument.
+    std::vector<pdf::PdfPageKey> Prefetch(const std::shared_ptr<const pdf::PdfFile>& pdf, int generation);
 
     // Bytes of images in the cache, pages and strips rendered since the start, and renders
     // abandoned (tests).
@@ -218,6 +231,9 @@ private:
     std::condition_variable wake_;
     bool stop_ = false;
     std::vector<Job> queue_;   // the most urgent first
+    // What the last Request wanted, for Prefetch: its pages (the most urgent first) and width.
+    std::vector<int> prefetchPages_;
+    int prefetchWidth_ = 0;
     std::vector<InFlight> inFlight_;
     std::list<CacheEntry> lru_;   // most recent first
     std::unordered_map<CacheKey, std::list<CacheEntry>::iterator, CacheKeyHash> cache_;

@@ -55,6 +55,12 @@ struct PdfHashHasher {
     size_t operator()(const PdfHash& h) const { return static_cast<size_t>(h.lo ^ (h.hi >> 7)); }
 };
 
+// A page and its PdfFile::PageKey.
+struct PdfPageKey {
+    int page = 0;
+    PdfHash key;
+};
+
 class PdfFile {
 public:
     // Reads the cross-reference table from `startxref` and the page tree. Nullptr, with

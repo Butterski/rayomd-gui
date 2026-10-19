@@ -14,7 +14,9 @@
 // one starts per frame, an idle engine gets a keystroke within its frame, and the keystrokes
 // typed during a build all go into the one after it. The word and line counts come back with
 // the build's result (the worker counts them), and the worker reads the PDF theme file: the UI
-// thread does no O(n) or file work per keystroke beyond the one copy of the text.
+// thread does no O(n) or file work per keystroke beyond the one copy of the text. As soon as the
+// worker has parsed a build's PDF, the pages the preview showed last start rendering
+// (PreviewPages::Prefetch, their keys computed on the worker), before the window has the build.
 //
 // The build in flight is cancelled (PdfOptions::cancel) when the document changes (open, new),
 // when an export is requested (the worker builds it again after the export), when it runs over
