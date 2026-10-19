@@ -128,7 +128,11 @@ memory, so it is the PDF, not an approximation of it.
   (`PdfFile::Parse`'s `previous`): page tree objects whose bytes are unchanged are copied, not
   lexed again; the new file keeps no reference to the old one. The page image cache keeps a
   page's earlier images only as `PreviewPages::kKeptVersions`; older ones leave so their storage
-  goes to the next render (fresh memory costs ~500 page faults per page, more than drawing it). The UI
+  goes to the next render (fresh memory costs ~500 page faults per page, more than drawing it).
+  Likewise a preview's big buffers are recycled, never allocated afresh per build: the PDF bytes
+  (`pdf::RecycledBytes`, filled by the dropped PdfFiles), the reader's 1 MiB arena chunks, the
+  worker's source-map vector and the text, which `PreviewReady::text` hands back to the window
+  for its next copy. The UI
   thread does no file I/O and no O(document) work per keystroke beyond the one copy of the text
   a preview build takes (`mainwindow.h` states the preview policy); `bench.preview_latency`
   (ctest `rayomd-gui-bench-latency`) measures keystroke-to-preview latency, `bench.scroll`
