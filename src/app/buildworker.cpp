@@ -80,6 +80,7 @@ std::string FormatMs(double ms) {
 BuildWorker::BuildWorker(Platform& platform, PreviewCallback onPreview, ExportCallback onExport,
                          BuildFunction build)
     : platform_(platform),
+      engineBuilds_(!build),
       build_(build ? std::move(build) : BuildFunction(&TinyPdf::BuildPdf)),
       callbacks_(std::make_shared<Callbacks>()) {
     callbacks_->onPreview = std::move(onPreview);
@@ -278,7 +279,8 @@ void BuildWorker::RunPreview(Job& job) {
     // Where each top-level block is laid out, for the source sync; fake builds leave it empty.
     std::vector<TinyPdf::SourceBlock> blocks;
     job.options.sourceMap = &blocks;
-    const TinyPdf::BuildResult result = build_(job.utf8, job.options, bytes);
+    const TinyPdf::BuildResult result =
+        engineBuilds_ ? previewSession_.Build(job.utf8, job.options, bytes) : build_(job.utf8, job.options, bytes);
     job.options.sourceMap = nullptr;
     ready.generation = job.generation;
     bool abandoned = result.error == TinyPdf::BuildError::Cancelled;

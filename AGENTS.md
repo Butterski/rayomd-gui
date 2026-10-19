@@ -116,7 +116,9 @@ memory, so it is the PDF, not an approximation of it.
 - Threads: the UI thread (platform event loop, UI, presenting); a tile pool of
   `clamp(hardware_concurrency - 1, 1, 4)` threads; one build worker for the engine (it also
   stats the notes a preview embeds, `EmbedWatch`, on focus-in and every 2 s while focused, and
-  builds the book of an export with linked notes); a preview
+  builds the book of an export with linked notes; its previews go through one
+  `TinyPdf::BuildSession`, which lays out only the top-level blocks an edit changed or moved, the
+  same bytes and source map as `BuildPdf`; exports call `BuildPdf`); a preview
   pool of `clamp(hardware_concurrency / 2, 1, 3)` threads; one document loader that opens
   files, copies dropped images (`CopyImageBeside`) and lists the note names `[[` completes
   (`ListNoteNames`, bounded). Workers hand results to the UI thread only

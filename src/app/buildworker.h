@@ -174,7 +174,13 @@ private:
     void CheckWatched();
 
     Platform& platform_;
+    // The engine's own builds (no BuildFunction given): previews through a session, which lays out
+    // only the top-level blocks an edit changed or moved and takes the rest from its last build,
+    // the same bytes as TinyPdf::BuildPdf. Worker thread only. Exports call build_ (BuildPdf).
+    // Declared before build_, which the constructor moves the function into.
+    bool engineBuilds_ = false;
     BuildFunction build_;
+    TinyPdf::BuildSession previewSession_;
     PrefetchFunction prefetch_;
     std::shared_ptr<Callbacks> callbacks_;
     std::mutex mutex_;
