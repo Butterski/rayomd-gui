@@ -75,6 +75,10 @@ public:
     }
     // The cached bitmap of `key` without filling or touching the LRU order; nullptr on a miss.
     const GlyphBitmap* Find(const GlyphKey& key) const;
+    // Whether `bitmap`, which Get returned, is held by the cache (Find finds it, and it stays
+    // valid until a Get after the next BeginFrame evicts it), not the scratch bitmap of a glyph
+    // it did not keep.
+    bool Keeps(const GlyphBitmap* bitmap) const { return bitmap != &scratch_; }
 
     // Starts a frame: entries used since the previous BeginFrame become evictable. Entries used
     // in the current frame are not evicted, so the cache may exceed its budget for one frame, up

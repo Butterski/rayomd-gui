@@ -79,6 +79,10 @@ public:
     // `smooth`, else nearest), times `opacity`. An opaque image at an integer translation and
     // scale 1, with no clip mask, is copied row by row.
     void DrawImage(const Image& image, const Matrix& unitSquareToDevice, uint8_t opacity, bool smooth);
+    // Where DrawImage copies `image` row by row when the clip has no mask: an opaque, complete
+    // image at full opacity, scale 1 and an integer translation, its device rectangle in
+    // `rect` (before clipping); false for any other drawing.
+    static bool CopiedImageRect(const Image& image, const Matrix& unitSquareToDevice, uint8_t opacity, RectI& rect);
     // The samples DrawImage takes, taken once for every pixel the image's square covers in the
     // surface (whatever the clip): drawing them again with the same matrix, surface size and top
     // only blends, the sampling (most of an image's cost) done. Each row is sampled from its
@@ -120,5 +124,8 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// p[0..n) = v.
+void FillPixels(uint32_t* p, size_t n, uint32_t v);
 
 } // namespace rgui::gfx

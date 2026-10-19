@@ -131,7 +131,7 @@ inline void MulRowBy(const uint8_t* a, uint8_t k, uint8_t* out, int n) {
 }
 
 // p[0..n) = v.
-inline void FillPixels(uint32_t* p, size_t n, uint32_t v) {
+inline void FillRun(uint32_t* p, size_t n, uint32_t v) {
     const __m128i four = _mm_set1_epi32(static_cast<int>(v));
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
@@ -214,7 +214,7 @@ struct Canvas::Impl {
             const int end = RunEnd(c, i + 1, w, v);
             if (end - i >= kMinRun) {
                 if (i > start) k.blendSolid(dst + start, c + start, static_cast<size_t>(i - start), color);
-                if (v == 255) FillPixels(dst + i, static_cast<size_t>(end - i), color);
+                if (v == 255) FillRun(dst + i, static_cast<size_t>(end - i), color);
                 start = end;
             }
             i = end;
@@ -505,7 +505,7 @@ void Canvas::FillRect(RectI rect, uint32_t color) {
             c.SolidRow(y, r.x0, r.Width(), c.Masked(c.full.data(), y, r.x0, r.Width()), color);
         }
     } else if ((color >> 24) == 255) {
-        for (int y = r.y0; y < r.y1; ++y) FillPixels(c.Dst(y, r.x0), w, color);
+        for (int y = r.y0; y < r.y1; ++y) FillRun(c.Dst(y, r.x0), w, color);
     } else {
         for (int y = r.y0; y < r.y1; ++y) c.k.blendSolid(c.Dst(y, r.x0), c.full.data(), w, color);
     }
@@ -543,6 +543,19 @@ void Canvas::StrokePath(const Path& path, const Matrix& m, const StrokeStyle& st
     FillPath(c.outline, m, FillRule::NonZero, paint);
 }
 
+bool Canvas::CopiedImageRect(const Image& image, const Matrix& unitSquareToDevice, uint8_t opacity, RectI& rect) {
+    if (!image.opaque || opacity != 255 || image.width <= 0 || image.height <= 0) return false;
+    if (image.pixels.size() < static_cast<size_t>(image.width) * static_cast<size_t>(image.height)) return false;
+    const Matrix& m = unitSquareToDevice;
+    if (!(m.b == 0 && m.c == 0 && m.a == image.width && m.d == image.height && m.e > -1e9 && m.e < 1e9 &&
+          m.f > -1e9 && m.f < 1e9 && m.e == RayoMd::ExactMath::Floor(m.e) && m.f == RayoMd::ExactMath::Floor(m.f))) {
+        return false;
+    }
+    const int ex = static_cast<int>(m.e), fy = static_cast<int>(m.f);
+    rect = RectI{ex, fy, ex + image.width, fy + image.height};
+    return true;
+}
+
 void Canvas::DrawImage(const Image& image, const Matrix& unitSquareToDevice, uint8_t opacity, bool smooth) {
     Impl& c = *impl_;
     const RectI clip = c.Clip().rect;
@@ -551,14 +564,13 @@ void Canvas::DrawImage(const Image& image, const Matrix& unitSquareToDevice, uin
     const Matrix& m = unitSquareToDevice;
     const double w = image.width, h = image.height;
     // An opaque image at an integer translation and scale 1: rows copied as they are.
-    if (image.opaque && opacity == 255 && c.Clip().mask < 0 && m.b == 0 && m.c == 0 && m.a == w && m.d == h &&
-        m.e > -1e9 && m.e < 1e9 && m.f > -1e9 && m.f < 1e9 && m.e == RayoMd::ExactMath::Floor(m.e) &&
-        m.f == RayoMd::ExactMath::Floor(m.f)) {
-        const int ex = static_cast<int>(m.e), fy = static_cast<int>(m.f);
-        const RectI r = RectI{ex, fy, ex + image.width, fy + image.height}.Intersect(clip);
+    RectI copied;
+    if (c.Clip().mask < 0 && CopiedImageRect(image, m, opacity, copied)) {
+        const RectI r = copied.Intersect(clip);
         if (r.Empty() || !c.Spend(Impl::Area(r))) return;
         for (int y = r.y0; y < r.y1; ++y) {
-            std::memcpy(c.Dst(y, r.x0), image.pixels.data() + static_cast<size_t>(y - fy) * image.width + (r.x0 - ex),
+            std::memcpy(c.Dst(y, r.x0),
+                        image.pixels.data() + static_cast<size_t>(y - copied.y0) * image.width + (r.x0 - copied.x0),
                         static_cast<size_t>(r.Width()) * sizeof(uint32_t));
         }
         return;
@@ -731,6 +743,10 @@ void Canvas::Trim(size_t bytes) {
     }
     if (c.spare.alpha.capacity() > bytes) std::vector<uint8_t>().swap(c.spare.alpha);
     if (c.outline.Points().capacity() * sizeof(PointF) > bytes) c.outline = Path();
+}
+
+void FillPixels(uint32_t* p, size_t n, uint32_t v) {
+    FillRun(p, n, v);
 }
 
 } // namespace rgui::gfx
