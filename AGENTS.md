@@ -124,7 +124,11 @@ memory, so it is the PDF, not an approximation of it.
   (`ListNoteNames`, bounded). Workers hand results to the UI thread only
   through `Platform::PostToUi`; the one call between workers is the build worker's
   `PreviewPages::Prefetch` (thread-safe), which starts the renders of a just-parsed preview's
-  pages in view before the UI thread has it. The UI
+  pages in view before the UI thread has it. A preview's PDF is parsed with the last preview's
+  (`PdfFile::Parse`'s `previous`): page tree objects whose bytes are unchanged are copied, not
+  lexed again; the new file keeps no reference to the old one. The page image cache keeps a
+  page's earlier images only as `PreviewPages::kKeptVersions`; older ones leave so their storage
+  goes to the next render (fresh memory costs ~500 page faults per page, more than drawing it). The UI
   thread does no file I/O and no O(document) work per keystroke beyond the one copy of the text
   a preview build takes (`mainwindow.h` states the preview policy); `bench.preview_latency`
   (ctest `rayomd-gui-bench-latency`) measures keystroke-to-preview latency, `bench.scroll`
