@@ -96,12 +96,14 @@ void RasterizeGlyph(const GlyphSource& source, uint16_t glyph, float sizePx, flo
         return;
     }
     out.alpha.assign(pixels, 0);
-    gfx::Rasterizer rasterizer;
+    // The thread's rasterizer, its buffers kept from glyph to glyph.
+    thread_local gfx::Rasterizer rasterizer;
     rasterizer.SetBudget(budget);
     rasterizer.Reset(box);
     rasterizer.AddPath(path, m);
     BitmapSink sink(out, box);
     rasterizer.Sweep(gfx::FillRule::NonZero, sink);
+    rasterizer.SetBudget(nullptr);
 }
 
 const GlyphBitmap* GlyphCache::Get(const GlyphSource& source, const GlyphKey& key, gfx::WorkBudget* budget) {
@@ -114,8 +116,11 @@ const GlyphBitmap* GlyphCache::Get(const GlyphSource& source, const GlyphKey& ke
     Entry entry;
     entry.key = key;
     entry.frame = frame_;
-    RasterizeGlyph(source, key.glyph, static_cast<float>(key.size64 / 64.0), static_cast<float>(key.phase / 4.0),
-        entry.bitmap, budget);
+    if (!store_ || !store_->Find(key, entry.bitmap)) {
+        RasterizeGlyph(source, key.glyph, static_cast<float>(key.size64 / 64.0), static_cast<float>(key.phase / 4.0),
+            entry.bitmap, budget);
+        if (store_ && !(budget && budget->Stopped())) store_->Put(key, entry.bitmap);
+    }
     const size_t cost = Cost(entry.bitmap);
     if (bytes_ + cost > budget_) {
         bytes_ += cost;  // what Evict must free for this entry to fit
@@ -149,6 +154,38 @@ void GlyphCache::Clear() {
     map_.clear();
     lru_.clear();
     bytes_ = 0;
+}
+
+bool GlyphStore::Find(const GlyphKey& key, GlyphBitmap& out) const {
+    Shared found;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = map_.find(key);
+        if (it == map_.end()) return false;
+        found = it->second;
+    }
+    out = *found;
+    return true;
+}
+
+void GlyphStore::Put(const GlyphKey& key, const GlyphBitmap& bitmap) {
+    auto copy = std::make_shared<const GlyphBitmap>(bitmap);
+    const size_t cost = Cost(bitmap);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!map_.emplace(key, std::move(copy)).second) return;
+    order_.push_back(key);
+    bytes_ += cost;
+    while (bytes_ > budget_ && order_.size() > 1) {
+        const auto oldest = map_.find(order_.front());
+        bytes_ -= Cost(*oldest->second);
+        map_.erase(oldest);
+        order_.pop_front();
+    }
+}
+
+size_t GlyphStore::Bytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return bytes_;
 }
 
 } // namespace rgui::text

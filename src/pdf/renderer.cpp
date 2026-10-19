@@ -121,9 +121,15 @@ struct SampledImage {
 // Resampled images a rendering thread keeps (an image page re-renders by blending only).
 constexpr size_t kSampledBytes = 32u << 20;
 
+// The glyphs every rendering thread has rasterized, so that a glyph is rasterized once for all.
+text::GlyphStore& RenderGlyphStore() {
+    static text::GlyphStore store;
+    return store;
+}
+
 // What each rendering thread keeps from page to page.
 struct Scratch {
-    text::GlyphCache glyphs;
+    text::GlyphCache glyphs{text::GlyphCache::kDefaultBudget, &RenderGlyphStore()};
     gfx::Canvas canvas;
     gfx::Path glyphPath;
     gfx::Path userPath;
