@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "pdf/syntax.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 namespace rgui::pdf {
 
@@ -20,17 +23,55 @@ int64_t PdfValue::Int(int64_t fallback) const {
     return fallback;
 }
 
-const std::vector<PdfValue>& PdfValue::Array() const {
-    static const std::vector<PdfValue> kEmpty;
-    return type == Type::Array ? items : kEmpty;
-}
-
 const PdfValue* PdfValue::Find(std::string_view key) const {
-    if (!IsDict()) return nullptr;
-    for (const PdfDictEntry& entry : entries) {
+    for (const PdfDictEntry& entry : Entries()) {
         if (entry.key == key) return &entry.value;
     }
     return nullptr;
+}
+
+PdfArena::~PdfArena() {
+    while (head_) {
+        Chunk* next = head_->next;
+        std::free(head_);
+        head_ = next;
+    }
+}
+
+void* PdfArena::Allocate(size_t bytes) {
+    // Far beyond any input: a size that cannot be meant.
+    if (bytes > (size_t(1) << 40)) return nullptr;
+    bytes = (bytes + 7) & ~size_t(7);
+    if (bytes > static_cast<size_t>(end_ - at_)) {
+        // Chunks double from 4 KiB to 1 MiB; a bigger block gets a chunk of its own size.
+        const size_t grown = std::min<size_t>(std::max<size_t>(head_ ? head_->size * 2 : 0, 4096), size_t(1) << 20);
+        const size_t size = std::max(grown, bytes);
+        Chunk* chunk = static_cast<Chunk*>(std::malloc(sizeof(Chunk) + size));
+        if (!chunk) return nullptr;
+        chunk->next = head_;
+        chunk->size = size;
+        head_ = chunk;
+        at_ = reinterpret_cast<char*>(chunk + 1);
+        end_ = at_ + size;
+        capacity_ += size;
+    }
+    void* block = at_;
+    at_ += bytes;
+    return block;
+}
+
+void PdfArena::Reset() {
+    if (!head_) return;
+    Chunk* rest = head_->next;
+    while (rest) {
+        Chunk* next = rest->next;
+        std::free(rest);
+        rest = next;
+    }
+    head_->next = nullptr;
+    at_ = reinterpret_cast<char*>(head_ + 1);
+    end_ = at_ + head_->size;
+    capacity_ = head_->size;
 }
 
 namespace syntax {
@@ -120,50 +161,93 @@ bool ParseNumber(std::string_view token, PdfValue& out) {
     if (digits == 0) return false;
     // 19 digits stay below 2^64; past INT64_MAX the number is a Real.
     if (!point && scale == 0 && mantissa <= static_cast<uint64_t>(INT64_MAX)) {
-        out.Reset(PdfValue::Type::Int);
+        out = PdfValue();
+        out.type = PdfValue::Type::Int;
         out.integer = negative ? -static_cast<int64_t>(mantissa) : static_cast<int64_t>(mantissa);
         return true;
     }
     double value = static_cast<double>(mantissa);
     if (scale > 0) value *= PowerOfTen(scale);
     if (fraction > 0) value /= PowerOfTen(fraction);
-    out.Reset(PdfValue::Type::Real);
+    out = PdfValue();
+    out.type = PdfValue::Type::Real;
     out.real = negative ? -value : value;
     return true;
 }
 
-void ReadName(Cursor& c, std::string& out) {
-    out.clear();
+namespace {
+
+// `bytes` copied into the arena (a value counts at most UINT32_MAX of them).
+bool Store(Builder& b, std::string_view bytes, std::string_view& out) {
+    if (bytes.empty()) {
+        out = {};
+        return true;
+    }
+    if (bytes.size() > UINT32_MAX) return false;
+    char* block = static_cast<char*>(b.arena.Allocate(bytes.size()));
+    if (!block) return false;
+    std::memcpy(block, bytes.data(), bytes.size());
+    out = std::string_view(block, bytes.size());
+    return true;
+}
+
+} // namespace
+
+bool ReadName(Cursor& c, Builder& b, std::string_view& out) {
     c.pos++;  // '/'
+    // A #xx escape is three regular bytes: the name ends where they do.
+    const size_t start = c.pos;
+    bool escaped = false;
     while (c.pos < c.data.size()) {
         const unsigned char ch = static_cast<unsigned char>(c.data[c.pos]);
         if (!IsRegular(ch)) break;
-        if (ch == '#' && HexDigit(c.Peek(1)) >= 0 && HexDigit(c.Peek(2)) >= 0) {
-            out.push_back(static_cast<char>(HexDigit(c.Peek(1)) * 16 + HexDigit(c.Peek(2))));
-            c.pos += 3;
+        escaped |= ch == '#';
+        c.pos++;
+    }
+    const std::string_view run = c.data.substr(start, c.pos - start);
+    if (!escaped) return Store(b, run, out);
+    std::string& decoded = b.scratch;
+    decoded.clear();
+    for (size_t i = 0; i < run.size(); i++) {
+        const unsigned char ch = static_cast<unsigned char>(run[i]);
+        if (ch == '#' && i + 2 < run.size() && HexDigit(static_cast<unsigned char>(run[i + 1])) >= 0 &&
+            HexDigit(static_cast<unsigned char>(run[i + 2])) >= 0) {
+            decoded.push_back(static_cast<char>(HexDigit(static_cast<unsigned char>(run[i + 1])) * 16 +
+                                                HexDigit(static_cast<unsigned char>(run[i + 2]))));
+            i += 2;
         } else {
-            out.push_back(static_cast<char>(ch));
-            c.pos++;
+            decoded.push_back(static_cast<char>(ch));
         }
     }
+    return Store(b, decoded, out);
 }
 
-bool ReadLiteralString(Cursor& c, std::string& out) {
-    out.clear();
+bool ReadLiteralString(Cursor& c, Builder& b, std::string_view& out) {
+    std::string& text = b.scratch;
+    text.clear();
     c.pos++;  // '('
     int depth = 1;
     const size_t size = c.data.size();
     while (c.pos < size) {
+        // The run up to the next byte that needs a look, at once.
+        const size_t runStart = c.pos;
+        while (c.pos < size) {
+            const char ch = c.data[c.pos];
+            if (ch == '\\' || ch == '(' || ch == ')' || ch == '\r') break;
+            c.pos++;
+        }
+        text.append(c.data.data() + runStart, c.pos - runStart);
+        if (c.pos >= size) break;
         const char ch = c.data[c.pos++];
         if (ch == '\\') {
             if (c.pos >= size) return false;
             const char e = c.data[c.pos++];
             switch (e) {
-                case 'n': out.push_back('\n'); break;
-                case 'r': out.push_back('\r'); break;
-                case 't': out.push_back('\t'); break;
-                case 'b': out.push_back('\b'); break;
-                case 'f': out.push_back('\f'); break;
+                case 'n': text.push_back('\n'); break;
+                case 'r': text.push_back('\r'); break;
+                case 't': text.push_back('\t'); break;
+                case 'b': text.push_back('\b'); break;
+                case 'f': text.push_back('\f'); break;
                 case '\r':  // a line continuation
                     if (c.pos < size && c.data[c.pos] == '\n') c.pos++;
                     break;
@@ -174,37 +258,36 @@ bool ReadLiteralString(Cursor& c, std::string& out) {
                         for (int k = 0; k < 2 && c.pos < size && c.data[c.pos] >= '0' && c.data[c.pos] <= '7'; k++) {
                             value = value * 8 + static_cast<unsigned>(c.data[c.pos++] - '0');
                         }
-                        out.push_back(static_cast<char>(value & 0xFF));
+                        text.push_back(static_cast<char>(value & 0xFF));
                     } else {
-                        out.push_back(e);  // \( \) \\ and an unknown escape: the character itself
+                        text.push_back(e);  // \( \) \\ and an unknown escape: the character itself
                     }
                     break;
             }
         } else if (ch == '(') {
             depth++;
-            out.push_back(ch);
+            text.push_back(ch);
         } else if (ch == ')') {
-            if (--depth == 0) return true;
-            out.push_back(ch);
-        } else if (ch == '\r') {  // an end of line in a string is a line feed
-            out.push_back('\n');
+            if (--depth == 0) return Store(b, text, out);
+            text.push_back(ch);
+        } else {  // '\r': an end of line in a string is a line feed
+            text.push_back('\n');
             if (c.pos < size && c.data[c.pos] == '\n') c.pos++;
-        } else {
-            out.push_back(ch);
         }
     }
     return false;
 }
 
-bool ReadHexString(Cursor& c, std::string& out) {
-    out.clear();
+bool ReadHexString(Cursor& c, Builder& b, std::string_view& out) {
+    std::string& text = b.scratch;
+    text.clear();
     c.pos++;  // '<'
     int high = -1;
     while (c.pos < c.data.size()) {
         const unsigned char ch = static_cast<unsigned char>(c.data[c.pos++]);
         if (ch == '>') {
-            if (high >= 0) out.push_back(static_cast<char>(high << 4));
-            return true;
+            if (high >= 0) text.push_back(static_cast<char>(high << 4));
+            return Store(b, text, out);
         }
         if (IsWhite(ch)) continue;
         const int d = HexDigit(ch);
@@ -212,100 +295,136 @@ bool ReadHexString(Cursor& c, std::string& out) {
         if (high < 0) {
             high = d;
         } else {
-            out.push_back(static_cast<char>(high << 4 | d));
+            text.push_back(static_cast<char>(high << 4 | d));
             high = -1;
         }
     }
     return false;
 }
 
-bool ParseValue(Cursor& c, Mode mode, int depth, PdfValue& out) {
+bool ParseValue(Cursor& c, Mode mode, int depth, Builder& b, PdfValue& out) {
     if (c.AtEnd()) return false;
     const unsigned char ch = c.Peek();
     switch (ch) {
         case '/':
-            out.Reset(PdfValue::Type::Name);
-            ReadName(c, out.text);
-            return true;
         case '(':
-            out.Reset(PdfValue::Type::String);
-            return ReadLiteralString(c, out.text);
-        case '<':
-            if (c.Peek(1) != '<') {
-                out.Reset(PdfValue::Type::String);
-                return ReadHexString(c, out.text);
-            } else {
-                if (depth >= kMaxDepth) return false;
-                c.pos += 2;
-                // Filled in place; on failure `out` is left half filled, which callers drop.
-                out.Reset(PdfValue::Type::Dict);
-                for (;;) {
-                    SkipSpace(c);
-                    if (c.AtEnd()) return false;
-                    if (c.Peek() == '>' && c.Peek(1) == '>') {
-                        c.pos += 2;
-                        break;
-                    }
-                    if (c.Peek() != '/') return false;
-                    PdfDictEntry& entry = out.entries.emplace_back();
-                    ReadName(c, entry.key);
-                    SkipSpace(c);
-                    if (c.Peek() == '>' && c.Peek(1) == '>') {  // a key without a value
-                        out.entries.pop_back();
-                        continue;
-                    }
-                    if (!ParseValue(c, mode, depth + 1, entry.value)) return false;
-                }
+        case '<': {
+            if (ch == '<' && c.Peek(1) == '<') break;
+            std::string_view text;
+            const bool read = ch == '/' ? ReadName(c, b, text)
+                              : ch == '(' ? ReadLiteralString(c, b, text)
+                                          : ReadHexString(c, b, text);
+            if (!read) return false;
+            out = PdfValue();
+            out.type = ch == '/' ? PdfValue::Type::Name : PdfValue::Type::String;
+            out.count = static_cast<uint32_t>(text.size());
+            out.data = text.data();
+            return true;
+        }
+        case '[':
+            break;
+        default: {
+            if (!IsRegular(ch)) return false;
+            const std::string_view token = ReadToken(c);
+            if (token == "true" || token == "false") {
+                out = PdfValue();
+                out.type = PdfValue::Type::Bool;
+                out.boolean = token == "true";
                 return true;
             }
-        case '[': {
-            if (depth >= kMaxDepth) return false;
-            c.pos++;
-            out.Reset(PdfValue::Type::Array);
-            for (;;) {
-                SkipSpace(c);
-                if (c.AtEnd()) return false;
-                if (c.Peek() == ']') {
-                    c.pos++;
-                    break;
+            if (token == "null") {
+                out = PdfValue();
+                return true;
+            }
+            if (!ParseNumber(token, out)) return false;
+            // "n g R": a reference, read ahead without consuming anything else.
+            if (mode == Mode::File && out.type == PdfValue::Type::Int && AllDigits(token) && out.integer <= UINT32_MAX) {
+                Cursor ahead = c;
+                SkipSpace(ahead);
+                const std::string_view generation = ReadToken(ahead);
+                if (AllDigits(generation) && generation.size() <= 5) {
+                    uint32_t gen = 0;
+                    for (char g : generation) gen = gen * 10 + static_cast<uint32_t>(g - '0');
+                    SkipSpace(ahead);
+                    if (gen <= 65535 && ReadToken(ahead) == "R") {
+                        const uint32_t num = static_cast<uint32_t>(out.integer);
+                        out = PdfValue();
+                        out.type = PdfValue::Type::Ref;
+                        out.refNum = num;
+                        out.refGen = static_cast<uint16_t>(gen);
+                        c = ahead;
+                    }
                 }
-                if (!ParseValue(c, mode, depth + 1, out.items.emplace_back())) return false;
             }
             return true;
         }
-        default:
-            break;
     }
-    if (!IsRegular(ch)) return false;
-    const std::string_view token = ReadToken(c);
-    if (token == "true" || token == "false") {
-        out.Reset(PdfValue::Type::Bool);
-        out.boolean = token == "true";
-        return true;
-    }
-    if (token == "null") {
-        out.Reset(PdfValue::Type::Null);
-        return true;
-    }
-    if (!ParseNumber(token, out)) return false;
-    // "n g R": a reference, read ahead without consuming anything else.
-    if (mode == Mode::File && out.type == PdfValue::Type::Int && AllDigits(token) && out.integer <= UINT32_MAX) {
-        Cursor ahead = c;
-        SkipSpace(ahead);
-        const std::string_view generation = ReadToken(ahead);
-        if (AllDigits(generation) && generation.size() <= 5) {
-            uint32_t gen = 0;
-            for (char g : generation) gen = gen * 10 + static_cast<uint32_t>(g - '0');
-            SkipSpace(ahead);
-            if (gen <= 65535 && ReadToken(ahead) == "R") {
-                const uint32_t num = static_cast<uint32_t>(out.integer);
-                out.Reset(PdfValue::Type::Ref);
-                out.refNum = num;
-                out.refGen = gen;
-                c = ahead;
+    // An array or a dictionary: read on the builder's stacks above what the values around it
+    // hold there, then copied to the arena whole.
+    if (depth >= kMaxDepth) return false;
+    if (ch == '[') {
+        c.pos++;
+        const size_t base = b.items.size();
+        bool ok = false;
+        for (;;) {
+            SkipSpace(c);
+            if (c.AtEnd()) break;
+            if (c.Peek() == ']') {
+                c.pos++;
+                ok = true;
+                break;
             }
+            PdfValue item;
+            if (!ParseValue(c, mode, depth + 1, b, item)) break;
+            b.items.push_back(item);
         }
+        const size_t n = b.items.size() - base;
+        PdfValue* items = nullptr;
+        if (ok && n > 0) {
+            items = n <= UINT32_MAX ? static_cast<PdfValue*>(b.arena.Allocate(n * sizeof(PdfValue))) : nullptr;
+            if (items) std::memcpy(static_cast<void*>(items), b.items.data() + base, n * sizeof(PdfValue));
+            ok = items != nullptr;
+        }
+        b.items.resize(base);
+        if (!ok) return false;
+        out = PdfValue();
+        out.type = PdfValue::Type::Array;
+        out.count = static_cast<uint32_t>(n);
+        out.data = items;
+        return true;
     }
+    c.pos += 2;  // "<<"
+    const size_t base = b.entries.size();
+    bool ok = false;
+    for (;;) {
+        SkipSpace(c);
+        if (c.AtEnd()) break;
+        if (c.Peek() == '>' && c.Peek(1) == '>') {
+            c.pos += 2;
+            ok = true;
+            break;
+        }
+        if (c.Peek() != '/') break;
+        PdfDictEntry entry;
+        if (!ReadName(c, b, entry.key)) break;
+        SkipSpace(c);
+        if (c.Peek() == '>' && c.Peek(1) == '>') continue;  // a key without a value
+        if (!ParseValue(c, mode, depth + 1, b, entry.value)) break;
+        b.entries.push_back(entry);
+    }
+    const size_t n = b.entries.size() - base;
+    PdfDictEntry* entries = nullptr;
+    if (ok && n > 0) {
+        entries = n <= UINT32_MAX ? static_cast<PdfDictEntry*>(b.arena.Allocate(n * sizeof(PdfDictEntry))) : nullptr;
+        if (entries) std::memcpy(static_cast<void*>(entries), b.entries.data() + base, n * sizeof(PdfDictEntry));
+        ok = entries != nullptr;
+    }
+    b.entries.resize(base);
+    if (!ok) return false;
+    out = PdfValue();
+    out.type = PdfValue::Type::Dict;
+    out.count = static_cast<uint32_t>(n);
+    out.data = entries;
     return true;
 }
 

@@ -47,7 +47,7 @@ drawn by the app's own PDF renderer.
 <td width="33%" valign="top">
 
 ### Live
-A keystroke reaches the preview in about **4 ms** in `tester.md`. No waiting timer, and a slow
+A keystroke reaches the preview in about **3 ms** in `tester.md`. No waiting timer, and a slow
 build never holds up typing.
 
 </td>
@@ -263,16 +263,17 @@ where startup's time went; the end-to-end tests run it on headless compositors.
 
 ## Performance
 
-Measured on 2026-10-15 and 2026-10-16 (the preview's rows on 2026-10-19): on Linux with an AMD
+Measured on 2026-10-15 and 2026-10-16 (the preview's rows on 2026-10-19, the keystroke rows on
+2026-10-19 after the latency work of opt3/latency, medians of three interleaved runs): on Linux with an AMD
 Ryzen 5 PRO 4650GE in an Arch Linux container, pinned to six cores, on headless Wayland
 compositors; on Windows on GitHub's runners.
 
 | Measure | Result |
 |---|---:|
-| Keystroke to the edited page's preview, `tester.md` (5 KB, 5 pages), median / p99 | **2.7 / 4.1 ms** |
-| The same, 8 copies (42 KB, 40 pages) | 5.4 / 6.4 ms |
-| The same, 70 copies (364 KB, 350 pages) | 20.0 / 21.1 ms |
-| The same, 700 copies (3.6 MB, 3,500 pages) | 188 / 199 ms |
+| Keystroke to the edited page's preview, `tester.md` (5 KB, 5 pages), median / p95 | **3.1 / 3.7 ms** (before 3.8 / 4.1) |
+| The same, 8 copies (42 KB, 40 pages) | 4.9 / 5.3 ms (5.3 / 6.0) |
+| The same, 70 copies (364 KB, 350 pages) | 18.6 / 18.8 ms (19.7 / 21.6) |
+| The same, 700 copies (3.6 MB, 3,500 pages; the engine's build is 160 ms of it) | 172 / 184 ms (179 / 194) |
 | One keystroke in a 1 MiB document, editor and drawing, median | 0.31 ms |
 | A frame while the preview / the editor scrolls, 1788×1097 window, 40 pages, median / p99 | 2.7 / 3.8 ms, 2.6 / 3.8 ms |
 | Scrolling frames a second on Windows runners, before / now | 32 / 64 (every refresh of their 64 Hz display) |

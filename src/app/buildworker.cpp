@@ -160,6 +160,10 @@ void BuildWorker::SetOnEmbedsChanged(std::function<void()> onChanged) {
     callbacks_->onEmbedsChanged = std::move(onChanged);
 }
 
+void BuildWorker::SetPrefetch(PrefetchFunction prefetch) {
+    prefetch_ = std::move(prefetch);
+}
+
 void BuildWorker::SetFocused(bool focused) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -302,8 +306,6 @@ void BuildWorker::RunPreview(Job& job) {
         });
         return;
     }
-    ready.stats = Document::ComputeStats(job.utf8);
-    if (job.headings) ready.headings = ui::markdown::DocumentHeadings(job.utf8);
     ready.pages = result.pages;
     ready.missingCharacters = result.missingCharacters;
     ready.failedImages = result.failedImages;
@@ -316,6 +318,11 @@ void BuildWorker::RunPreview(Job& job) {
         if (!ready.pdf) {
             ready.error = "the preview PDF cannot be read (" + parseError + ")";
         } else {
+            // The pages in view start rendering now; the rest of the result follows. Streams the
+            // last preview hashed (its fonts and images) need not be hashed again for their keys.
+            if (lastPreview_) ready.pdf->InheritHashes(*lastPreview_);
+            lastPreview_ = ready.pdf;
+            if (prefetch_) ready.pageKeys = prefetch_(ready.pdf, job.generation);
             std::vector<double> heights(static_cast<size_t>(ready.pdf->PageCount()));
             for (size_t i = 0; i < heights.size(); i++) {
                 const pdf::PdfRect box = ready.pdf->PageMediaBox(static_cast<int>(i));
@@ -324,6 +331,8 @@ void BuildWorker::RunPreview(Job& job) {
             ready.sourceMap = SourceMap::FromEngine(blocks, job.utf8, heights);
         }
     }
+    ready.stats = Document::ComputeStats(job.utf8);
+    if (job.headings) ready.headings = ui::markdown::DocumentHeadings(job.utf8);
     ready.ms = MsSince(start);
     platform_.PostToUi([callbacks = callbacks_, ready = std::move(ready)]() mutable {
         if (callbacks->alive && callbacks->onPreview) callbacks->onPreview(std::move(ready));

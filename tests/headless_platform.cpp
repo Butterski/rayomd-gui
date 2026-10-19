@@ -11,11 +11,25 @@ namespace rgui::test {
 HeadlessPlatform::HeadlessPlatform() = default;
 
 void HeadlessPlatform::Present(const gfx::Surface& frame, const std::vector<gfx::RectI>& damage) {
+    // As the Wayland window does: the damaged rectangles only, the whole frame when its size changed.
+    const size_t pixels = static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height);
+    const bool whole = lastFrameWidth != frame.width || lastFrameHeight != frame.height || lastFrame.size() != pixels;
     lastFrameWidth = frame.width;
     lastFrameHeight = frame.height;
-    lastFrame.resize(static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height));
-    for (int y = 0; y < frame.height; y++) {
-        std::copy_n(frame.Row(y), frame.width, lastFrame.data() + static_cast<size_t>(y) * frame.width);
+    lastFrame.resize(pixels);
+    const gfx::RectI bounds{0, 0, frame.width, frame.height};
+    const auto copy = [&](const gfx::RectI& r) {
+        const gfx::RectI c = r.Intersect(bounds);
+        if (c.Empty()) return;
+        for (int y = c.y0; y < c.y1; y++) {
+            std::copy_n(frame.Row(y) + c.x0, c.Width(),
+                        lastFrame.data() + static_cast<size_t>(y) * static_cast<size_t>(frame.width) + c.x0);
+        }
+    };
+    if (whole) {
+        copy(bounds);
+    } else {
+        for (const gfx::RectI& r : damage) copy(r);
     }
     lastDamage = damage;
     presents++;

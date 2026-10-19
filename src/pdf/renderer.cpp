@@ -430,15 +430,15 @@ private:
         const PdfValue& join = file_.Get(dict, "LJ");
         if (join.IsNumber()) SetJoin(join.Int());
         const PdfValue& dash = file_.Get(dict, "D");
-        if (dash.IsArray() && dash.items.size() == 2) {
+        if (dash.IsArray() && dash.Array().size() == 2) {
             double phase = 0;
-            file_.Number(dash.items[1], phase);
-            SetDash(dash.items[0], phase);
+            file_.Number(dash.Array()[1], phase);
+            SetDash(dash.Array()[0], phase);
         }
         const PdfValue& mask = file_.Get(dict, "SMask");
         if (!mask.IsNull() && !mask.IsName("None")) stats_.AddUnknown("gs:SMask");
         const PdfValue& bm = file_.Get(dict, "BM");
-        const PdfValue& mode = bm.IsArray() && !bm.items.empty() ? file_.Resolve(bm.items[0]) : bm;
+        const PdfValue& mode = bm.IsArray() && !bm.Array().empty() ? file_.Resolve(bm.Array()[0]) : bm;
         if (!mode.IsNull() && !mode.IsName("Normal") && !mode.IsName("Compatible")) stats_.AddUnknown("gs:BM");
     }
 
@@ -451,12 +451,12 @@ private:
         if (n == "DeviceCMYK" || n == "CMYK") return Space::Cmyk;
         const PdfValue& cs = n.empty() ? name : Resource(resources, "ColorSpace", n);
         std::string_view family = cs.Name();
-        if (cs.IsArray() && !cs.items.empty()) family = file_.Resolve(cs.items[0]).Name();
+        if (cs.IsArray() && !cs.Array().empty()) family = file_.Resolve(cs.Array()[0]).Name();
         if (family == "DeviceGray" || family == "CalGray") return Space::Gray;
         if (family == "DeviceRGB" || family == "CalRGB") return Space::Rgb;
         if (family == "DeviceCMYK") return Space::Cmyk;
-        if (family == "ICCBased" && cs.items.size() >= 2) {
-            const int64_t comps = file_.Get(cs.items[1], "N").Int(0);
+        if (family == "ICCBased" && cs.Array().size() >= 2) {
+            const int64_t comps = file_.Get(cs.Array()[1], "N").Int(0);
             if (comps == 1) return Space::Gray;
             if (comps == 3) return Space::Rgb;
             if (comps == 4) return Space::Cmyk;
@@ -757,7 +757,7 @@ private:
             if (ops.size() == 1 && ops[0].IsString()) ShowText(ops[0].String());
         } else if (Is(op, "TJ")) {
             if (ops.size() != 1 || !ops[0].IsArray()) return;
-            for (const PdfValue& item : ops[0].items) {
+            for (const PdfValue& item : ops[0].Array()) {
                 if (item.IsString()) {
                     ShowText(item.String());
                 } else if (item.IsNumber() && Finite(item.Number())) {

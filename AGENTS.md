@@ -120,7 +120,9 @@ memory, so it is the PDF, not an approximation of it.
   pool of `clamp(hardware_concurrency / 2, 1, 3)` threads; one document loader that opens
   files, copies dropped images (`CopyImageBeside`) and lists the note names `[[` completes
   (`ListNoteNames`, bounded). Workers hand results to the UI thread only
-  through `Platform::PostToUi`. The UI
+  through `Platform::PostToUi`; the one call between workers is the build worker's
+  `PreviewPages::Prefetch` (thread-safe), which starts the renders of a just-parsed preview's
+  pages in view before the UI thread has it. The UI
   thread does no file I/O and no O(document) work per keystroke beyond the one copy of the text
   a preview build takes (`mainwindow.h` states the preview policy); `bench.preview_latency`
   (ctest `rayomd-gui-bench-latency`) measures keystroke-to-preview latency, `bench.scroll`

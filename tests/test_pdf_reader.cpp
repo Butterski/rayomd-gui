@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -89,12 +90,48 @@ struct Op {
     std::string inlineData;
 };
 
+// The lexer's operands live until its next operator: the tests keep copies in an arena of their
+// own, kept for the whole run.
+rgui::pdf::PdfArena& KeptValues() {
+    static rgui::pdf::PdfArena arena;
+    return arena;
+}
+
+PdfValue Keep(const PdfValue& value) {
+    PdfValue copy = value;
+    rgui::pdf::PdfArena& arena = KeptValues();
+    if (value.IsString() || value.IsName()) {
+        char* bytes = static_cast<char*>(arena.Allocate(value.count + 1));
+        std::memcpy(bytes, value.Text().data(), value.count);
+        copy.data = bytes;
+    } else if (value.IsArray()) {
+        PdfValue* items = static_cast<PdfValue*>(arena.Allocate(sizeof(PdfValue) * (value.count + 1)));
+        for (size_t i = 0; i < value.count; i++) items[i] = Keep(value.Array()[i]);
+        copy.data = items;
+    } else if (value.IsDict()) {
+        auto* entries = static_cast<rgui::pdf::PdfDictEntry*>(arena.Allocate(sizeof(rgui::pdf::PdfDictEntry) * (value.count + 1)));
+        for (size_t i = 0; i < value.count; i++) {
+            const rgui::pdf::PdfDictEntry entry = value.Entries()[i];
+            char* key = static_cast<char*>(arena.Allocate(entry.key.size() + 1));
+            std::memcpy(key, entry.key.data(), entry.key.size());
+            entries[i].key = std::string_view(key, entry.key.size());
+            entries[i].value = Keep(entry.value);
+        }
+        copy.data = entries;
+    }
+    return copy;
+}
+
 std::vector<Op> Lex(std::string_view content) {
     std::vector<Op> ops;
     ContentLexer lexer(content);
     std::string_view op;
     std::vector<PdfValue> operands;
-    while (lexer.Next(op, operands)) ops.push_back({std::string(op), operands, std::string(lexer.InlineImageData())});
+    while (lexer.Next(op, operands)) {
+        Op kept{std::string(op), {}, std::string(lexer.InlineImageData())};
+        for (const PdfValue& value : operands) kept.operands.push_back(Keep(value));
+        ops.push_back(std::move(kept));
+    }
     return ops;
 }
 
@@ -214,11 +251,79 @@ RGUI_TEST("pdf.page_key_edit") {
     // The link did shift page 1's resource objects: its key holds no object number.
     auto fontNumbers = [](const PdfFile& file) {
         std::vector<uint32_t> numbers;
-        for (const auto& entry : file.Get(file.PageResources(0), "Font").entries) numbers.push_back(entry.value.refNum);
+        for (const auto& entry : file.Get(file.PageResources(0), "Font").Entries()) numbers.push_back(entry.value.refNum);
         return numbers;
     };
     CHECK(!fontNumbers(*base).empty());
     CHECK(fontNumbers(*base) != fontNumbers(*linked));
+}
+
+RGUI_TEST("pdf.inherit_hashes") {
+    // A later build takes over the hashes of the earlier one's unchanged streams: its keys are
+    // those it computes alone, after an edit, after a renumbering (a link), and after a font
+    // program changed under its old object number and length.
+    const std::string head = "# Keys\n\nPage one: żółw and $x^2 + y$.\n\n\\pagebreak\n\n";
+    const std::string baseBytes = Build(head + "Page two text abc.\n");
+    const auto keys = [](const PdfFile& file) {
+        std::vector<rgui::pdf::PdfHash> all;
+        for (int i = 0; i < file.PageCount(); i++) all.push_back(file.PageKey(i));
+        return all;
+    };
+    const auto base = PdfFile::Parse(baseBytes, nullptr);
+    CHECK(base);
+    if (!base) return;
+    const std::vector<rgui::pdf::PdfHash> baseKeys = keys(*base);
+
+    // A byte in the middle of page 1's first embedded font program, flipped.
+    std::string tampered = baseBytes;
+    bool flipped = false;
+    for (const auto& entry : base->Get(base->PageResources(0), "Font").Entries()) {
+        const PdfValue& font = base->Resolve(entry.value);
+        const PdfValue& descendants = base->Get(font, "DescendantFonts");
+        const PdfValue& cid = descendants.IsArray() && !descendants.Array().empty() ? base->Resolve(descendants.Array()[0]) : font;
+        const PdfValue& descriptor = base->Get(cid, "FontDescriptor");
+        for (const char* program : {"FontFile2", "FontFile3"}) {
+            rgui::pdf::PdfRawStream raw;
+            if (flipped || !base->RawStream(base->Get(descriptor, program), raw) || raw.data.size() < 2048) continue;
+            const size_t at = static_cast<size_t>(raw.data.data() - base->Bytes().data()) + raw.data.size() / 2;
+            tampered[at] = static_cast<char>(tampered[at] ^ 0x55);
+            flipped = true;
+        }
+    }
+    // Without an embedded font program (no font of the engine's found), nothing to flip.
+    if (!flipped) std::printf("pdf.inherit_hashes: no embedded font program, the flipped byte is not tried\n");
+
+    std::vector<std::string> laters = {Build(head + "Page two text bca.\n"),
+                                       Build(head + "Page two text [abc](https://example.com).\n")};
+    if (flipped) laters.push_back(tampered);
+    for (const std::string& later : laters) {
+        const auto inheriting = PdfFile::Parse(later, nullptr);
+        const auto alone = PdfFile::Parse(later, nullptr);
+        CHECK(inheriting && alone);
+        if (!inheriting || !alone) continue;
+        inheriting->InheritHashes(*base);
+        CHECK(keys(*inheriting) == keys(*alone));
+    }
+    const auto changed = flipped ? PdfFile::Parse(tampered, nullptr) : nullptr;
+    if (changed) {
+        changed->InheritHashes(*base);
+        CHECK(changed->PageKey(0) != baseKeys[0]);
+    }
+
+    // A chain: each build inherits from the one before, which inherited what it did not hash.
+    std::shared_ptr<const PdfFile> last = base;
+    for (const char* words : {"bca", "abc", "cab", "abc"}) {
+        const std::string bytes = Build(head + "Page two text " + words + ".\n");
+        const auto next = PdfFile::Parse(bytes, nullptr);
+        const auto alone = PdfFile::Parse(bytes, nullptr);
+        CHECK(next && alone);
+        if (!next || !alone) return;
+        next->InheritHashes(*last);
+        CHECK(next->PageKey(0) == alone->PageKey(0));
+        CHECK(keys(*next) == keys(*alone));
+        last = next;
+    }
+    CHECK(keys(*last) == baseKeys);
 }
 
 RGUI_TEST("pdf.reader_objects") {
@@ -269,7 +374,7 @@ RGUI_TEST("pdf.reader_objects") {
     rgui::pdf::PdfRawStream raw;
     CHECK(file->RawStream(file->Object(7), raw));
     CHECK_EQ(raw.data, std::string_view("xxxxx"));
-    CHECK(raw.filter && raw.filter->IsArray() && raw.filter->items[0].IsName("FlateDecode"));
+    CHECK(raw.filter && raw.filter->IsArray() && raw.filter->Array()[0].IsName("FlateDecode"));
     CHECK(raw.decodeParms && raw.decodeParms->Find("Predictor")->Int() == 15);
 
     // References: a chain to a cycle resolves to null; out-of-range objects are null.
@@ -380,7 +485,7 @@ RGUI_TEST("pdf.lexer") {
     CHECK_EQ(ops[1].operands[5].Number(), -0.25);
     CHECK(ops[1].operands[0].type == PdfValue::Type::Int);
     CHECK(ops[2].operands[0].IsName("F1") && ops[2].operands[1].Int() == 12);
-    const std::vector<PdfValue>& tj = ops[3].operands[0].Array();
+    const auto tj = ops[3].operands[0].Array();
     CHECK_EQ(tj.size(), size_t{5});
     if (tj.size() == 5) {
         CHECK_EQ(tj[0].String(), std::string_view("A)(b"));
@@ -439,14 +544,14 @@ uint64_t Exercise(const PdfFile& file) {
         digest ^= file.PageKey(page).lo ^ file.PageKey(page).hi;
         const PdfValue& resources = file.PageResources(page);
         for (const char* category : {"Font", "XObject", "ExtGState", "Shading"}) {
-            for (const auto& entry : file.Get(resources, category).entries) {
+            for (const auto& entry : file.Get(resources, category).Entries()) {
                 const PdfValue& object = file.Resolve(entry.value);
                 rgui::pdf::PdfRawStream raw;
                 if (file.RawStream(object, raw)) digest += raw.data.size();
                 if (file.RawStream(file.Get(object, "SMask"), raw)) digest += raw.data.size();
                 const PdfValue& descendants = file.Get(object, "DescendantFonts");
-                const PdfValue& cidFont = descendants.IsArray() && !descendants.items.empty()
-                                              ? file.Resolve(descendants.items[0])
+                const PdfValue& cidFont = descendants.IsArray() && !descendants.Array().empty()
+                                              ? file.Resolve(descendants.Array()[0])
                                               : object;
                 const PdfValue& descriptor = file.Get(cidFont, "FontDescriptor");
                 for (const char* program : {"FontFile", "FontFile2", "FontFile3"}) {

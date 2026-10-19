@@ -2,6 +2,7 @@
 #include "pdf/content.h"
 
 #include <cstdint>
+#include <cstring>
 #include <utility>
 
 namespace rgui::pdf {
@@ -23,7 +24,7 @@ const PdfValue* InlineEntry(const PdfValue& dict, std::string_view abbreviation,
 // The byte size of an unfiltered inline image's data, when its dictionary tells it.
 bool InlineImageSize(const PdfValue& dict, uint64_t& size) {
     const PdfValue* filter = InlineEntry(dict, "F", "Filter");
-    if (filter && !filter->IsNull() && !(filter->IsArray() && filter->items.empty())) return false;
+    if (filter && !filter->IsNull() && !(filter->IsArray() && filter->Array().empty())) return false;
     const PdfValue* widthEntry = InlineEntry(dict, "W", "Width");
     const PdfValue* heightEntry = InlineEntry(dict, "H", "Height");
     if (!widthEntry || !heightEntry) return false;
@@ -40,7 +41,7 @@ bool InlineImageSize(const PdfValue& dict, uint64_t& size) {
         if (bits != 1 && bits != 2 && bits != 4 && bits != 8 && bits != 16) return false;
         const PdfValue* space = InlineEntry(dict, "CS", "ColorSpace");
         if (!space) return false;
-        const PdfValue* family = space->IsArray() && !space->items.empty() ? &space->items[0] : space;
+        const PdfValue* family = space->IsArray() && !space->Array().empty() ? &space->Array()[0] : space;
         const std::string_view name = family->Name();
         if (name == "G" || name == "DeviceGray" || name == "CalGray" || name == "I" || name == "Indexed") {
             components = 1;
@@ -62,6 +63,7 @@ bool InlineImageSize(const PdfValue& dict, uint64_t& size) {
 bool ContentLexer::Next(std::string_view& op, std::vector<PdfValue>& operands) {
     operands.clear();
     inlineData_ = {};
+    arena_.Reset();
     Cursor& c = cursor_;
     for (;;) {
         syntax::SkipSpace(c);
@@ -85,7 +87,9 @@ bool ContentLexer::Next(std::string_view& op, std::vector<PdfValue>& operands) {
         }
         if (ch == '/' || ch == '(' || ch == '<' || ch == '[') {
             const size_t start = c.pos;
-            if (syntax::ParseValue(c, syntax::Mode::Content, 0, operands.emplace_back())) {
+            PdfValue value;
+            if (syntax::ParseValue(c, syntax::Mode::Content, 0, builder_, value)) {
+                operands.push_back(value);
                 Kept(operands);
             } else {
                 if (c.pos == start) c.pos++;
@@ -100,9 +104,9 @@ bool ContentLexer::Next(std::string_view& op, std::vector<PdfValue>& operands) {
 void ContentLexer::ReadInlineImage(std::vector<PdfValue>& operands) {
     Cursor& c = cursor_;
     operands.clear();
-    PdfValue dict;
-    dict.type = PdfValue::Type::Dict;
-    std::string key;
+    std::vector<PdfDictEntry>& entries = builder_.entries;
+    entries.clear();
+    std::string_view key;
     bool hasKey = false;
     bool data = false;
     for (;;) {
@@ -119,20 +123,30 @@ void ContentLexer::ReadInlineImage(std::vector<PdfValue>& operands) {
             }
         }
         if (ch == '/' && !hasKey) {
-            syntax::ReadName(c, key);
-            hasKey = true;
+            hasKey = syntax::ReadName(c, builder_, key);
             continue;
         }
         const size_t start = c.pos;
         PdfValue value;
-        if (syntax::ParseValue(c, syntax::Mode::Content, 1, value)) {
-            if (hasKey) dict.entries.push_back({std::move(key), std::move(value)});
+        if (syntax::ParseValue(c, syntax::Mode::Content, 1, builder_, value)) {
+            if (hasKey) entries.push_back({key, value});
         } else if (c.pos == start) {
             c.pos++;
         }
         hasKey = false;
     }
-    operands.push_back(std::move(dict));
+    PdfValue dict;
+    dict.type = PdfValue::Type::Dict;
+    if (!entries.empty()) {
+        void* block = arena_.Allocate(entries.size() * sizeof(PdfDictEntry));
+        if (block) {
+            std::memcpy(block, entries.data(), entries.size() * sizeof(PdfDictEntry));
+            dict.count = static_cast<uint32_t>(entries.size());
+            dict.data = block;
+        }
+    }
+    entries.clear();
+    operands.push_back(dict);
     if (!data) return;
 
     // One white-space byte separates "ID" from the data.

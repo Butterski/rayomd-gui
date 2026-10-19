@@ -8,6 +8,8 @@
 #include <system_error>
 #include <utility>
 
+#include <emmintrin.h>
+
 namespace rgui {
 namespace {
 
@@ -136,9 +138,41 @@ bool Document::Save(const std::string& path, std::string& status) {
 }
 
 DocumentStats Document::ComputeStats(const std::string& text) {
+    // 16 bytes at a time (SSE2): a byte's lane is 0xFF when it separates words; a word starts at a
+    // byte that does not, after one that does (or at the text's start). Per-lane counts subtract
+    // the 0xFF lanes and are summed (_mm_sad_epu8) before a lane can wrap, every 255 blocks.
     DocumentStats stats;
-    bool inWord = false;
-    for (char c : text) {
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(text.data());
+    const size_t n = text.size();
+    size_t i = 0;
+    const __m128i space = _mm_set1_epi8(' '), tab = _mm_set1_epi8('\t'), lf = _mm_set1_epi8('\n'),
+                  cr = _mm_set1_epi8('\r'), zero = _mm_setzero_si128();
+    __m128i before = _mm_set1_epi8(-1);   // the previous block's separators: the start counts as one
+    __m128i lineSum = zero, wordSum = zero;
+    while (n - i >= 16) {
+        __m128i lines = zero, words = zero;
+        for (int k = 0; k < 255 && n - i >= 16; k++, i += 16) {
+            const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+            const __m128i newline = _mm_cmpeq_epi8(v, lf);
+            const __m128i sep = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v, space), _mm_cmpeq_epi8(v, tab)),
+                                             _mm_or_si128(newline, _mm_cmpeq_epi8(v, cr)));
+            const __m128i previous = _mm_or_si128(_mm_slli_si128(sep, 1), _mm_srli_si128(before, 15));
+            lines = _mm_sub_epi8(lines, newline);
+            words = _mm_sub_epi8(words, _mm_andnot_si128(sep, previous));
+            before = sep;
+        }
+        lineSum = _mm_add_epi64(lineSum, _mm_sad_epu8(lines, zero));
+        wordSum = _mm_add_epi64(wordSum, _mm_sad_epu8(words, zero));
+    }
+    const auto total = [](__m128i sum) {
+        return static_cast<size_t>(_mm_cvtsi128_si64(sum)) +
+               static_cast<size_t>(_mm_cvtsi128_si64(_mm_unpackhi_epi64(sum, sum)));
+    };
+    stats.lines += total(lineSum);
+    stats.words += total(wordSum);
+    bool inWord = i > 0 && (_mm_movemask_epi8(before) & 0x8000) == 0;
+    for (; i < n; i++) {
+        const unsigned char c = p[i];
         if (c == '\n') stats.lines++;
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
             inWord = false;

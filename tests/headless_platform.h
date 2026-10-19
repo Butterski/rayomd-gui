@@ -70,7 +70,9 @@ public:
     gfx::RectI textInputRect{};
     bool textInputEnabled = false;
     int frameRequests = 0;
-    // The last presented frame (tightly packed, width x height) and its damage.
+    // The last presented frame (tightly packed, width x height) and its damage. As on Wayland,
+    // a present copies its damage only (the whole frame when the size changed): a frame whose
+    // damage misses a change shows the old pixels there.
     std::vector<uint32_t> lastFrame;
     int lastFrameWidth = 0;
     int lastFrameHeight = 0;

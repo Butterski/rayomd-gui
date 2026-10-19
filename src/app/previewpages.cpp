@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <iterator>
 
 namespace rgui {
 
@@ -67,7 +68,8 @@ PreviewPages::~PreviewPages() {
     for (std::thread& thread : threads_) thread.join();
 }
 
-void PreviewPages::SetDocument(std::shared_ptr<const pdf::PdfFile> pdf, int generation) {
+void PreviewPages::SetDocument(std::shared_ptr<const pdf::PdfFile> pdf, int generation,
+                               const std::vector<pdf::PdfPageKey>& keys) {
     std::vector<PageSlot> pages(pdf ? static_cast<size_t>(pdf->PageCount()) : 0);
     for (size_t i = 0; i < pages.size(); i++) {
         const pdf::PdfRect box = pdf->PageMediaBox(static_cast<int>(i));
@@ -87,6 +89,11 @@ void PreviewPages::SetDocument(std::shared_ptr<const pdf::PdfFile> pdf, int gene
             pages[i].under = std::move(old.under);
             for (StripSlot& strip : pages[i].strips) strip.failed = false;
         }
+    }
+    for (const pdf::PdfPageKey& known : keys) {
+        if (known.page < 0 || static_cast<size_t>(known.page) >= pages.size()) continue;
+        pages[static_cast<size_t>(known.page)].key = known.key;
+        pages[static_cast<size_t>(known.page)].keyKnown = true;
     }
     pages_ = std::move(pages);
     pdf_ = std::move(pdf);
@@ -233,6 +240,9 @@ bool PreviewPages::Request(const std::vector<Want>& pages, int widthPx) {
             if (!stillWanted) running.cancel->store(true, std::memory_order_relaxed);
         }
         queue_ = std::move(jobs);
+        prefetchPages_.clear();
+        for (const Want& want : pages) prefetchPages_.push_back(want.page);
+        prefetchWidth_ = widthPx;
         wake = !queue_.empty();
     }
     if (wake) wake_.notify_all();
@@ -271,6 +281,47 @@ bool PreviewPages::Current(int page, int widthPx, int top, int bottom) const {
         if (!StripCurrent(slot, s)) return false;
     }
     return true;
+}
+
+std::vector<pdf::PdfPageKey> PreviewPages::Prefetch(const std::shared_ptr<const pdf::PdfFile>& pdf, int generation) {
+    std::vector<pdf::PdfPageKey> keys;
+    if (!pdf) return keys;
+    std::vector<int> pages;
+    int widthPx = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pages = prefetchPages_;
+        widthPx = prefetchWidth_;
+    }
+    if (widthPx < 1) return keys;
+    for (const int page : pages) {
+        if (page < 0 || page >= pdf->PageCount()) continue;
+        const pdf::PdfRect box = pdf->PageMediaBox(page);
+        if (StripCount(box.Width(), box.Height(), widthPx) != 0) continue;
+        keys.push_back({page, pdf->PageKey(page)});
+    }
+    bool wake = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stop_) return keys;
+        std::vector<Job> jobs;
+        for (const pdf::PdfPageKey& known : keys) {
+            const CacheKey key{known.key, widthPx, -1};
+            if (cache_.count(key) != 0) continue;
+            bool busy = false;
+            for (const InFlight& running : inFlight_) busy = busy || (running.key == key && !running.cancel->load());
+            for (const std::vector<Job>* list : {&queue_, &jobs}) {
+                for (const Job& job : *list) {
+                    busy = busy || (job.key == known.key && job.widthPx == widthPx && job.strip < 0);
+                }
+            }
+            if (!busy) jobs.push_back({pdf, known.page, widthPx, -1, known.key, generation, nullptr});
+        }
+        wake = !jobs.empty();
+        queue_.insert(queue_.begin(), std::make_move_iterator(jobs.begin()), std::make_move_iterator(jobs.end()));
+    }
+    if (wake) wake_.notify_all();
+    return keys;
 }
 
 size_t PreviewPages::CacheBytes() const {
