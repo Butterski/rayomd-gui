@@ -111,7 +111,7 @@ PdfValue Keep(const PdfValue& value) {
     } else if (value.IsDict()) {
         auto* entries = static_cast<rgui::pdf::PdfDictEntry*>(arena.Allocate(sizeof(rgui::pdf::PdfDictEntry) * (value.count + 1)));
         for (size_t i = 0; i < value.count; i++) {
-            const rgui::pdf::PdfDictEntry& entry = value.Entries()[i];
+            const rgui::pdf::PdfDictEntry entry = value.Entries()[i];
             char* key = static_cast<char*>(arena.Allocate(entry.key.size() + 1));
             std::memcpy(key, entry.key.data(), entry.key.size());
             entries[i].key = std::string_view(key, entry.key.size());
