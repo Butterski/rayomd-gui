@@ -3,7 +3,8 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstring>
+
+#include <emmintrin.h>
 
 namespace rgui {
 
@@ -32,7 +33,8 @@ double EndLine(const ui::TextBuffer& buffer, const SourceSpan& s) {
     return s.end >= buffer.Size() ? static_cast<double>(buffer.LineCount()) : static_cast<double>(buffer.LineOf(s.end));
 }
 
-// The byte offsets where lines of a text start, read forward: each '\n' is looked at once.
+// The byte offsets where lines of a text start, read forward 16 bytes at a time: one compare
+// (SSE2) finds the newlines of a block, which are then counted off one by one.
 class LineCursor {
 public:
     explicit LineCursor(std::string_view text) : text_(text) {}
@@ -40,19 +42,38 @@ public:
     // Where line `target` starts: after the text's target-th '\n', its size past the last line.
     // `target` never goes below the one asked for before.
     size_t Offset(uint32_t target) {
-        while (line_ < target && offset_ < text_.size()) {
-            const void* newline = std::memchr(text_.data() + offset_, '\n', text_.size() - offset_);
-            if (newline == nullptr) break;
-            offset_ = static_cast<size_t>(static_cast<const char*>(newline) - text_.data()) + 1;
+        if (line_ >= target) return offset_;
+        const char* p = text_.data();
+        const size_t n = text_.size();
+        const __m128i lf = _mm_set1_epi8('\n');
+        for (; n - scan_ >= 16; scan_ += 16) {
+            const __m128i block = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + scan_));
+            for (uint32_t mask = static_cast<uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(block, lf))); mask != 0;
+                 mask &= mask - 1) {
+                if (line_ + 1 == target) return Found(scan_ + static_cast<size_t>(__builtin_ctz(mask)), target);
+                line_++;
+            }
+        }
+        for (; scan_ < n; scan_++) {
+            if (p[scan_] != '\n') continue;
+            if (line_ + 1 == target) return Found(scan_, target);
             line_++;
         }
-        return line_ < target ? text_.size() : offset_;
+        return n;
     }
 
 private:
+    size_t Found(size_t newline, uint32_t target) {
+        line_ = target;
+        offset_ = newline + 1;
+        scan_ = offset_;
+        return offset_;
+    }
+
     std::string_view text_;
-    uint32_t line_ = 0;   // the line that starts at offset_
+    uint32_t line_ = 0;   // the newlines before scan_; line_ starts at offset_ after a Found
     size_t offset_ = 0;
+    size_t scan_ = 0;
 };
 
 } // namespace
