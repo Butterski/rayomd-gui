@@ -950,6 +950,7 @@ void MainWindow::NewDocument() {
     syncedRevision_ = editor_.Revision();
     stats_ = DocumentStats();
     ResetSourceSync();
+    std::string().swap(spareText_);   // sized for the document before
     exportTargets_.erase(std::string());
     SetStatus({}, StatusKind::Info);
     focusEditor_ = true;
@@ -983,6 +984,7 @@ void MainWindow::OnLoaded(DocumentLoaded loaded) {
     syncedRevision_ = editor_.Revision();
     stats_ = loaded.stats;
     ResetSourceSync();
+    std::string().swap(spareText_);   // sized for the document before
     exportTargets_.erase(std::string());
     Remember(loaded.path);
     SetStatus(loaded.status, StatusKind::Info);
@@ -1157,9 +1159,17 @@ void MainWindow::MaybeStartPreview() {
     if (!previewDirty_ || previewInFlight_ || loading_) return;
     previewDirty_ = false;
     previewInFlight_ = true;
-    // The one copy of the text this build makes; doc_.text is synced only where it is needed
-    // (saving, exporting).
-    std::string text = editor_.Revision() == syncedRevision_ ? doc_.text : editor_.CopyText();
+    // The one copy of the text this build makes, into the storage of an earlier build's; doc_.text
+    // is synced only where it is needed (saving, exporting).
+    std::string text = std::move(spareText_);
+    if (editor_.Revision() == syncedRevision_) {
+        text.assign(doc_.text);
+    } else {
+        std::string_view head, tail;
+        editor_.Buffer().Pieces(0, editor_.Buffer().Size(), head, tail);
+        text.assign(head.data(), head.size());
+        text.append(tail.data(), tail.size());
+    }
     TinyPdf::PdfOptions options = export_.ToPdfOptions(doc_.filePath, true);
     if (export_.themeFile.empty()) options.theme = TinyPdf::PdfTheme();
     const int generation = ++requestedGeneration_;
@@ -1289,6 +1299,11 @@ float MainWindow::EditorScrollForPreview(float offset) const {
 }
 
 void MainWindow::OnPreview(PreviewReady ready) {
+    // Its text's storage takes the next copy (the larger one is kept; not a dropped build's, of
+    // the document before).
+    if (ready.generation > discardThrough_ && ready.text.capacity() > spareText_.capacity()) {
+        spareText_ = std::move(ready.text);
+    }
     if (ready.generation == requestedGeneration_) {
         previewInFlight_ = false;
         if (budgetTimer_ != 0) {

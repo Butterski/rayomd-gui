@@ -52,6 +52,9 @@ struct PreviewReady {
     SourceMap sourceMap;     // of the text built; empty when the build failed
     // The text's ATX headings (ui::markdown::DocumentHeadings) when the request asked for them.
     std::vector<std::string> headings;
+    // The text built, handed back so that the window copies the next one into its storage (a
+    // long document's text is MBs the system would otherwise map afresh for every build).
+    std::string text;
 };
 
 struct ExportFinished {
@@ -198,8 +201,12 @@ private:
     EmbedWatch embeds_;           // worker thread only: the last preview's embedded notes
     bool embedsReported_ = false; // worker thread only: their change was told
     // Worker thread only: the last preview's PDF (most often the one the window shows), whose
-    // stream hashes the next preview takes over (PdfFile::InheritHashes).
+    // stream hashes (PdfFile::InheritHashes) and page tree (PdfFile::Parse) the next preview takes
+    // over where unchanged.
     std::shared_ptr<const pdf::PdfFile> lastPreview_;
+    // Worker thread only: where previews' source maps are built (PdfOptions::sourceMap), kept for
+    // its storage.
+    std::vector<TinyPdf::SourceBlock> sourceBlocks_;
     std::thread thread_;
 };
 

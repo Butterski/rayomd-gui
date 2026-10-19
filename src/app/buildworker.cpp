@@ -275,9 +275,11 @@ void BuildWorker::RunPreview(Job& job) {
         embeds_.Update(job.utf8, job.options);
     }
     embedsReported_ = false;
-    std::string bytes;
+    // Into the storage of an earlier preview's PDF that is gone, when one is kept.
+    std::string bytes = pdf::RecycledBytes();
     // Where each top-level block is laid out, for the source sync; fake builds leave it empty.
-    std::vector<TinyPdf::SourceBlock> blocks;
+    std::vector<TinyPdf::SourceBlock>& blocks = sourceBlocks_;
+    blocks.clear();
     job.options.sourceMap = &blocks;
     const TinyPdf::BuildResult result =
         engineBuilds_ ? previewSession_.Build(job.utf8, job.options, bytes) : build_(job.utf8, job.options, bytes);
@@ -316,7 +318,8 @@ void BuildWorker::RunPreview(Job& job) {
         ready.error = BuildErrorText(result.error);
     } else {
         std::string parseError;
-        ready.pdf = pdf::PdfFile::Parse(std::move(bytes), &parseError);
+        // The pages the edit did not change are copied from the last preview's parse.
+        ready.pdf = pdf::PdfFile::Parse(std::move(bytes), &parseError, lastPreview_.get());
         if (!ready.pdf) {
             ready.error = "the preview PDF cannot be read (" + parseError + ")";
         } else {
@@ -336,6 +339,7 @@ void BuildWorker::RunPreview(Job& job) {
     ready.stats = Document::ComputeStats(job.utf8);
     if (job.headings) ready.headings = ui::markdown::DocumentHeadings(job.utf8);
     ready.ms = MsSince(start);
+    ready.text = std::move(job.utf8);
     platform_.PostToUi([callbacks = callbacks_, ready = std::move(ready)]() mutable {
         if (callbacks->alive && callbacks->onPreview) callbacks->onPreview(std::move(ready));
     });

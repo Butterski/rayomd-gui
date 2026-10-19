@@ -103,6 +103,47 @@ RGUI_TEST("app.sourcemap") {
     }
 }
 
+// The byte offsets of the spans' lines over a long text: lines of 0 to 150 bytes (several in one
+// 64-byte block, one across many), blocks of one line and of many, a last one past the text's end.
+RGUI_TEST("app.sourcemap_offsets") {
+    std::string text;
+    std::vector<size_t> starts{0};   // where each line starts
+    uint32_t seed = 12345;
+    for (int i = 0; i < 3000; i++) {
+        seed = seed * 1103515245u + 12345u;
+        const size_t length = (seed >> 16) % 7 == 0 ? (seed >> 8) % 151 : (seed >> 8) % 5;
+        text.append(length, static_cast<char>('a' + i % 26));
+        text += '\n';
+        starts.push_back(text.size());
+    }
+    text += "last line without a newline";
+    const uint32_t lines = static_cast<uint32_t>(starts.size());   // the last one has no '\n'
+    std::vector<TinyPdf::SourceBlock> blocks;
+    std::vector<std::pair<uint32_t, uint32_t>> wanted;
+    uint32_t line = 0;
+    for (int k = 0; line < lines + 2; k++) {
+        seed = seed * 1103515245u + 12345u;
+        const uint32_t first = line + (k % 3 == 0 ? 0 : 1 + (seed >> 20) % 3);
+        const uint32_t end = first + 1 + (seed >> 12) % (k % 5 == 0 ? 90 : 4);
+        TinyPdf::SourceBlock block;
+        block.firstLine = first;
+        block.endLine = end;
+        block.top = static_cast<float>(k % 700);
+        block.bottom = block.top + 1;
+        block.page = block.endPage = static_cast<uint32_t>(k / 700);
+        blocks.push_back(block);
+        wanted.push_back({first, end});
+        line = end;
+    }
+    const SourceMap map = SourceMap::FromEngine(blocks, text, std::vector<double>(blocks.size() / 700 + 1, 842.0));
+    const auto offset = [&](uint32_t l) { return l < starts.size() ? starts[l] : text.size(); };
+    CHECK_EQ(map.Spans().size(), wanted.size());
+    for (size_t k = 0; k < map.Spans().size() && k < wanted.size(); k++) {
+        CHECK_EQ(map.Spans()[k].begin, offset(wanted[k].first));
+        CHECK_EQ(map.Spans()[k].end, offset(wanted[k].second));
+    }
+}
+
 RGUI_TEST("app.source_sync") {
     if (!HaveFonts()) {
         std::printf("skip app.source_sync: DejaVu Sans Mono not installed\n");

@@ -235,6 +235,39 @@ RGUI_TEST("app.preview_prefetch") {
     CHECK(PageWithText(h));
 }
 
+// Typing keeps the images of a page's last kKeptVersions builds in the cache, for an edit undone,
+// and drops older ones (their pixel storage goes to the next render): the cache does not grow by a
+// page per keystroke.
+RGUI_TEST("app.preview_versions") {
+    if (!HaveFonts()) {
+        std::printf("skip app.preview_versions: DejaVu Sans Mono not installed\n");
+        return;
+    }
+    Harness h("preview_versions");
+    h.Start("ui.theme=tokyo-night\n");
+    h.Type("# Versions");
+    CHECK(h.Settle());
+    rgui::MainWindow& w = h.Window();
+    CHECK_EQ(w.Preview().PageCount(), 1);
+    const auto settledImage = [&] { return h.Settle() && w.Preview().Image(0) != nullptr; };
+    CHECK(settledImage());
+    const size_t pageBytes = w.Preview().Image(0)->pixels.capacity() * sizeof(uint32_t);
+    const size_t kept = rgui::PreviewPages::kKeptVersions;
+    for (size_t i = 0; i < kept + 6; i++) {
+        h.Type("x");
+        CHECK(settledImage());
+    }
+    // The page shown and the kept versions of it (recycled storage holds up to a quarter more).
+    CHECK(w.Preview().CacheBytes() <= (kept + 1) * (pageBytes + pageBytes / 4 + 64));
+    CHECK(w.Preview().CacheBytes() >= (kept + 1) * pageBytes);
+    // Undone, the page shows a kept version: no render.
+    const uint64_t rendered = w.Preview().RenderedCount();
+    h.KeyDown(Key::Backspace);
+    CHECK(settledImage());
+    CHECK_EQ(w.Preview().RenderedCount(), rendered);
+    CHECK_EQ(std::string(w.Editor().Text()), "# Versions" + std::string(kept + 5, 'x'));
+}
+
 // The preview keeps its place (the page at its top, and how far into it) across builds and zooms
 // (without the scroll sync, which would bring it to the editor's).
 RGUI_TEST("app.preview_scroll") {

@@ -108,33 +108,52 @@ int PreviewPages::StripCount(int page, int widthPx) const {
     return StripCount(slot.widthPt, slot.heightPt, widthPx);
 }
 
-void PreviewPages::Assign(PageSlot& slot, const CacheKey& key, std::shared_ptr<const gfx::Image> image) {
+bool PreviewPages::Assign(PageSlot& slot, const CacheKey& key, std::shared_ptr<const gfx::Image> image,
+                          CacheKey& replaced) {
     if (key.strip >= 0) {
-        if (slot.stripWidth != key.widthPx || static_cast<size_t>(key.strip) >= slot.strips.size()) return;
+        if (slot.stripWidth != key.widthPx || static_cast<size_t>(key.strip) >= slot.strips.size()) return false;
         StripSlot& strip = slot.strips[static_cast<size_t>(key.strip)];
-        if (image) {
-            strip.image = std::move(image);
-            strip.imageKey = key.pageKey;
-            strip.imageWidth = key.widthPx;
-            strip.top = key.strip * kStripRows;
-            strip.failed = false;
-        } else {
+        if (!image) {
             strip.failed = true;
+            return false;
         }
-        return;
+        const bool other = strip.image && strip.imageWidth == key.widthPx && strip.imageKey != key.pageKey;
+        if (other) replaced = {strip.imageKey, strip.imageWidth, key.strip};
+        strip.image = std::move(image);
+        strip.imageKey = key.pageKey;
+        strip.imageWidth = key.widthPx;
+        strip.top = key.strip * kStripRows;
+        strip.failed = false;
+        return other;
     }
-    if (image) {
-        slot.image = std::move(image);
-        slot.imageKey = key.pageKey;
-        slot.imageWidth = key.widthPx;
-        slot.failed = false;
-        // The whole page covers whatever strips it showed.
-        slot.stripWidth = 0;
-        slot.strips.clear();
-        slot.under.clear();
-    } else {
+    if (!image) {
         slot.failed = true;
         slot.failedWidth = key.widthPx;
+        return false;
+    }
+    const bool other = slot.image && slot.imageWidth == key.widthPx && slot.imageKey != key.pageKey;
+    if (other) replaced = {slot.imageKey, slot.imageWidth, -1};
+    slot.image = std::move(image);
+    slot.imageKey = key.pageKey;
+    slot.imageWidth = key.widthPx;
+    slot.failed = false;
+    // The whole page covers whatever strips it showed.
+    slot.stripWidth = 0;
+    slot.strips.clear();
+    slot.under.clear();
+    return other;
+}
+
+void PreviewPages::Supersede(const CacheKey& key) {
+    superseded_.push_back(key);
+    while (superseded_.size() > kKeptVersions) {
+        const auto found = cache_.find(superseded_.front());
+        superseded_.pop_front();
+        // Shown elsewhere (another page alike, a frame being drawn): it stays, as any image does.
+        if (found == cache_.end() || found->second->image.use_count() != 1) continue;
+        cacheBytes_ -= found->second->bytes;
+        lru_.erase(found->second);
+        cache_.erase(found);
     }
 }
 
@@ -164,7 +183,8 @@ bool PreviewPages::WantPiece(int page, int widthPx, int strip, std::vector<Job>&
     if (strip < 0 ? Current(page, widthPx) : StripCurrent(slot, strip)) return false;
     std::shared_ptr<const gfx::Image> image;
     if (Lookup(key, image)) {
-        Assign(slot, key, std::move(image));
+        CacheKey replaced;
+        if (Assign(slot, key, std::move(image), replaced)) Supersede(replaced);
         return true;
     }
     for (const InFlight& running : inFlight_) {
@@ -344,6 +364,8 @@ bool PreviewPages::Lookup(const CacheKey& key, std::shared_ptr<const gfx::Image>
     if (found == cache_.end()) return false;
     lru_.splice(lru_.begin(), lru_, found->second);
     image = found->second->image;
+    // Shown again (an edit undone): no longer an earlier build's.
+    superseded_.erase(std::remove(superseded_.begin(), superseded_.end(), key), superseded_.end());
     return true;
 }
 
@@ -354,6 +376,7 @@ void PreviewPages::Insert(const CacheKey& key, std::shared_ptr<const gfx::Image>
         lru_.erase(found->second);
         cache_.erase(found);
     }
+    superseded_.erase(std::remove(superseded_.begin(), superseded_.end(), key), superseded_.end());
     const size_t bytes = ImageBytes(image.get());
     lru_.push_front({key, std::move(image), bytes});
     cache_[key] = lru_.begin();
@@ -426,6 +449,7 @@ void PreviewPages::Run() {
 
 void PreviewPages::Delivered(const Job& job, const std::shared_ptr<const gfx::Image>& image) {
     bool changed = false;
+    std::vector<CacheKey> replaced;
     for (PageSlot& slot : pages_) {
         if (!slot.keyKnown || slot.key != job.key) continue;
         if (job.strip < 0) {
@@ -436,8 +460,13 @@ void PreviewPages::Delivered(const Job& job, const std::shared_ptr<const gfx::Im
                    StripCurrent(slot, job.strip)) {
             continue;
         }
-        Assign(slot, {job.key, job.widthPx, job.strip}, image);
+        CacheKey earlier;
+        if (Assign(slot, {job.key, job.widthPx, job.strip}, image, earlier)) replaced.push_back(earlier);
         changed = true;
+    }
+    if (!replaced.empty()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const CacheKey& key : replaced) Supersede(key);
     }
     if (changed && onPageReady_) onPageReady_();
 }

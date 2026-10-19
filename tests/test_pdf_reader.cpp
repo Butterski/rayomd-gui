@@ -326,6 +326,108 @@ RGUI_TEST("pdf.inherit_hashes") {
     CHECK(keys(*last) == baseKeys);
 }
 
+namespace {
+
+// A value written out whole, references as they are, a stream's data range included.
+std::string Dump(const PdfValue& value) {
+    switch (value.type) {
+        case PdfValue::Type::Null: return "null";
+        case PdfValue::Type::Bool: return value.boolean ? "true" : "false";
+        case PdfValue::Type::Int: return std::to_string(value.integer);
+        case PdfValue::Type::Real: return std::to_string(value.real);
+        case PdfValue::Type::String: return "(" + std::string(value.Text()) + ")";
+        case PdfValue::Type::Name: return "/" + std::string(value.Text());
+        case PdfValue::Type::Ref: return std::to_string(value.refNum) + " " + std::to_string(value.refGen) + " R";
+        case PdfValue::Type::Array: {
+            std::string out = "[";
+            for (const PdfValue& item : value.Array()) out += Dump(item) + " ";
+            return out + "]";
+        }
+        case PdfValue::Type::Dict:
+        case PdfValue::Type::Stream: {
+            std::string out = "<<";
+            for (const auto& entry : value.Entries()) out += "/" + std::string(entry.key) + " " + Dump(entry.value) + " ";
+            out += ">>";
+            if (value.IsStream()) out += " stream " + std::to_string(value.streamOffset) + "+" + std::to_string(value.streamLength);
+            return out;
+        }
+    }
+    return "?";
+}
+
+// What a parse of `file` gives: its pages (dictionary, box, resources, content, key) and every
+// object.
+std::vector<std::string> Parsed(const PdfFile& file) {
+    std::vector<std::string> out;
+    for (int i = 0; i < file.PageCount(); i++) {
+        const PdfRect box = file.PageMediaBox(i);
+        std::string_view content;
+        std::string error;
+        const bool read = file.PageContent(i, content, &error);
+        const rgui::pdf::PdfHash key = file.PageKey(i);
+        out.push_back(Dump(file.PageDict(i)) + " box " + std::to_string(box.x0) + " " + std::to_string(box.y0) + " " +
+                      std::to_string(box.x1) + " " + std::to_string(box.y1) + " resources " +
+                      Dump(file.PageResources(i)) + " content " + (read ? std::string(content) : "! " + error) +
+                      " key " + std::to_string(key.lo) + std::to_string(key.hi));
+    }
+    for (uint32_t i = 0; i < file.ObjectCount(); i++) out.push_back(Dump(file.Object(i)));
+    return out;
+}
+
+} // namespace
+
+RGUI_TEST("pdf.adopt_objects") {
+    // The page tree a parse copies from an earlier build is the one it parses alone: after an
+    // edit, after a renumbering (a link), along a chain of builds each adopting from the one
+    // before, and from a file of another document.
+    const std::string head = "# Keys\n\nPage one: żółw and $x^2 + y$.\n\n\\pagebreak\n\n";
+    std::shared_ptr<const PdfFile> last = PdfFile::Parse(Build(head + "Page two text abc.\n"), nullptr);
+    CHECK(last);
+    if (!last) return;
+    for (const std::string& body : {std::string("Page two text bca.\n"), std::string("Page two text [abc](https://example.com).\n"),
+                                    std::string("Page two text abc.\n"), std::string("Page two text abc.\n\n# More\n")}) {
+        const std::string bytes = Build(head + body);
+        const auto adopting = PdfFile::Parse(bytes, nullptr, last.get());
+        const auto alone = PdfFile::Parse(bytes, nullptr);
+        CHECK(adopting && alone);
+        if (!adopting || !alone) return;
+        CHECK(Parsed(*adopting) == Parsed(*alone));
+        last = adopting;
+    }
+    const std::string other = BuildTester();
+    const auto fromOther = PdfFile::Parse(other, nullptr, last.get());
+    const auto otherAlone = PdfFile::Parse(other, nullptr);
+    CHECK(fromOther && otherAlone);
+    if (fromOther && otherAlone) CHECK(Parsed(*fromOther) == Parsed(*otherAlone));
+
+    // Made by hand: a page that is a stream, moved by a longer object before it (its data is
+    // found at its new place); a page whose box changed (parsed again); a /Length by reference.
+    const auto make = [](const std::string& catalog, const std::string& box) {
+        return MakePdf({
+            /* 1 */ catalog,
+            /* 2 */ "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
+            /* 3 */ "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Length 3 >>\nstream\nabc\nendstream",
+            /* 4 */ "<< /Type /Page /Parent 2 0 R /MediaBox " + box + " /Contents 6 0 R >>",
+            /* 5 */ "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 30 30] /Length 7 0 R >>\nstream\nxyz\nendstream",
+            /* 6 */ Stream("0 0 m"),
+            /* 7 */ "3",
+        });
+    };
+    const auto before = PdfFile::Parse(make("<< /Type /Catalog /Pages 2 0 R >>", "[0 0 20 20]"), nullptr);
+    const std::string after = make("<< /Type /Catalog /Pages 2 0 R /Lang (en-GB-oxendict) >>", "[0 0 20 25]");
+    const auto adopting = PdfFile::Parse(after, nullptr, before.get());
+    const auto alone = PdfFile::Parse(after, nullptr);
+    CHECK(before && adopting && alone);
+    if (!before || !adopting || !alone) return;
+    CHECK(Parsed(*adopting) == Parsed(*alone));
+    std::string_view data;
+    CHECK(adopting->StreamData(adopting->PageDict(0), data, nullptr));
+    CHECK_EQ(data, std::string_view("abc"));
+    CHECK(adopting->StreamData(adopting->PageDict(2), data, nullptr));
+    CHECK_EQ(data, std::string_view("xyz"));
+    CHECK_EQ(adopting->PageMediaBox(1).y1, 25.0);
+}
+
 RGUI_TEST("pdf.reader_objects") {
     const std::vector<std::string> bodies = {
         /* 1 */ "<< /Type /Catalog /Pages 2 0 R >>",

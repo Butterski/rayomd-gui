@@ -2,7 +2,8 @@
 // The preview's PDF path: PdfFile::Parse, the content lexer on the raw bytes, RenderPage of the
 // first pages at a small width and RenderPageRows of the first's top and middle thirds, sharing a
 // BandIndex (the budget: at most 2 pages of 48 px and two bands; fonts and images are decoded on
-// every render, no system font index, so runs are independent of each other).
+// every render, no system font index, so runs are independent of each other); then Parse again,
+// adopting the objects of the first parse, which must give the same pages.
 #include "harness.h"
 
 #include "gfx/surface.h"
@@ -45,6 +46,11 @@ int FuzzPdf(const uint8_t* data, size_t size) {
         pdf::BandIndex index;
         pdf::RenderPageRows(*file, page, 48, 0, height / 3, image, &stats, environment, &index);
         pdf::RenderPageRows(*file, page, 48, height / 3, height / 3, image, &stats, environment, &index);
+    }
+    const auto again = pdf::PdfFile::Parse(std::string(bytes), nullptr, file.get());
+    if (!again || again->PageCount() != file->PageCount()) Fail("Parse adopting from itself differs");
+    for (int page = 0; page < pages; ++page) {
+        if (again->PageKey(page) != file->PageKey(page)) Fail("Parse adopting from itself: another page key");
     }
     return 0;
 }
