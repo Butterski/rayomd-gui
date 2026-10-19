@@ -272,7 +272,7 @@ RGUI_TEST("pdf.render_images") {
 
     // DCTDecode: the corpus photo against the JPEG decoder.
     std::string jpeg;
-    CHECK(RayoMd::File::ReadAll(std::string(rgui::test::SourceDir()) + "/tests/corpus/photo.jpg", 1u << 22, jpeg));
+    CHECK(RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(std::string(rgui::test::SourceDir()) + "/tests/corpus/photo.jpg"), 1u << 22, jpeg));
     Image decoded;
     std::string reason;
     CHECK(rgui::pdf::DecodeJpeg(reinterpret_cast<const uint8_t*>(jpeg.data()), jpeg.size(), decoded, &reason));
@@ -338,7 +338,7 @@ RGUI_TEST("pdf.render_text") {
 RGUI_TEST("pdf.render_font_widths") {
     // A Type0 font over DejaVu Sans with a CIDToGIDMap stream, /W in both forms and /DW.
     std::string dejavu;
-    if (!RayoMd::File::ReadAll("/usr/share/fonts/TTF/DejaVuSans.ttf", 1u << 24, dejavu)) {
+    if (!RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8("/usr/share/fonts/TTF/DejaVuSans.ttf"), 1u << 24, dejavu)) {
         std::printf("skip pdf.render_font_widths: DejaVu Sans not found\n");
         return;
     }
@@ -463,7 +463,7 @@ namespace {
 std::string TesterPdf(TinyPdf::PdfOptions options = {}) {
     const std::string path = std::string(rgui::test::SourceDir()) + "/external/rayomd/tester.md";
     std::string markdown;
-    CHECK(RayoMd::File::ReadAll(path, 1u << 24, markdown));
+    CHECK(RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(path), 1u << 24, markdown));
     options.sourcePath = path;
     const std::string pdf = rgui::pdftest::BuildPreview(markdown, options);
     CHECK(!pdf.empty());

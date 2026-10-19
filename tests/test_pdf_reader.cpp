@@ -40,7 +40,7 @@ std::string Build(const std::string& markdown, TinyPdf::PdfOptions options = {})
 
 std::string BuildTester() {
     std::string markdown;
-    CHECK(RayoMd::File::ReadAll(TesterPath(), 1u << 24, markdown));
+    CHECK(RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(TesterPath()), 1u << 24, markdown));
     TinyPdf::PdfOptions options;
     options.sourcePath = TesterPath();
     return Build(markdown, options);

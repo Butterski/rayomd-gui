@@ -146,7 +146,7 @@ void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& opt
     watched_.clear();
     TinyPdf::Internal::Vault vault(options.vaultRoot, options.sourcePath);
     if (!vault.Valid()) return;
-    std::string folder(TinyPdf::Internal::ParentOf(options.sourcePath));
+    std::string folder(RayoMd::File::ParentOf(std::string_view(options.sourcePath)));
     folder = TinyPdf::Internal::ResolvedPath(folder.empty() ? std::string_view(".") : std::string_view(folder));
     if (folder.empty()) return;
     // Breadth first: the document's embeds, then theirs, as deep and as many bytes as the
@@ -175,7 +175,7 @@ void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& opt
             std::shared_ptr<const std::string> read = vault.Read(path, budget, identity);
             if (read) {
                 budget -= std::min(budget, read->size());
-                notes.push_back({std::string(TinyPdf::Internal::ParentOf(path)), std::move(read), depth + 1});
+                notes.push_back({std::string(RayoMd::File::ParentOf(std::string_view(path))), std::move(read), depth + 1});
             }
         });
     };

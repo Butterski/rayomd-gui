@@ -51,7 +51,7 @@ double Luminance(double r, double g, double b) {
 // An 8-bit RGB or RGBA PNG (RGBA over white), as pdftocairo writes them.
 bool ReadPng(const std::string& path, Luma& out) {
     std::string file;
-    if (!RayoMd::File::ReadAll(path, 1u << 28, file) || file.size() < 8 || file.compare(0, 8, "\x89PNG\r\n\x1a\n") != 0) {
+    if (!RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(path), 1u << 28, file) || file.size() < 8 || file.compare(0, 8, "\x89PNG\r\n\x1a\n") != 0) {
         return false;
     }
     const uint8_t* data = reinterpret_cast<const uint8_t*>(file.data());
@@ -195,12 +195,12 @@ RGUI_TEST("pdf.golden") {
         }
         const std::string path = Source(doc.markdown);
         std::string markdown;
-        CHECK(RayoMd::File::ReadAll(path, 1u << 24, markdown));
+        CHECK(RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(path), 1u << 24, markdown));
         options.sourcePath = path;
         std::string pdf = rgui::pdftest::BuildPreview(markdown, options);
         CHECK(!pdf.empty());
         const std::string pdfPath = (dir / (doc.name + ".pdf")).string();
-        CHECK(RayoMd::File::WriteAll(pdfPath, pdf));
+        CHECK(RayoMd::File::WriteAll(RayoMd::File::PathFromUtf8(pdfPath), pdf));
         const auto file = PdfFile::Parse(std::move(pdf), nullptr);
         CHECK(file != nullptr);
         if (!file) continue;
@@ -251,7 +251,7 @@ RGUI_TEST("pdf.golden") {
     std::thread([] {
         const std::string path = Source("external/rayomd/tester.md");
         std::string markdown;
-        RayoMd::File::ReadAll(path, 1u << 24, markdown);
+        RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(path), 1u << 24, markdown);
         TinyPdf::PdfOptions options;
         options.sourcePath = path;
         rgui::pdf::ImageCache images;

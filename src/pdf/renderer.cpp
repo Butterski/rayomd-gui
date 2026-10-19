@@ -2,6 +2,7 @@
 #include "pdf/renderer.h"
 
 #include "common/exact_math.h"
+#include "common/thread_object.h"
 #include "gfx/budget.h"
 #include "gfx/canvas.h"
 #include "pdf/content.h"
@@ -142,7 +143,7 @@ struct Scratch {
 };
 
 Scratch& ThreadScratch() {
-    thread_local Scratch scratch;
+    RAYOMD_THREAD_OBJECT(Scratch, scratch);   // never a plain thread_local: MinGW (thread_object.h)
     return scratch;
 }
 

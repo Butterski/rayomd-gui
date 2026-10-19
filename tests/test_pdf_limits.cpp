@@ -276,7 +276,7 @@ RGUI_TEST("pdf.limits_glyph_sizes") {
 RGUI_TEST("pdf.limits_tester_margin") {
     std::string markdown;
     const std::string path = std::string(rgui::test::SourceDir()) + "/external/rayomd/tester.md";
-    CHECK(RayoMd::File::ReadAll(path, 1u << 24, markdown));
+    CHECK(RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(path), 1u << 24, markdown));
     TinyPdf::PdfOptions options;
     options.sourcePath = path;
     const auto file = PdfFile::Parse(rgui::pdftest::BuildPreview(markdown, options), nullptr);
@@ -485,7 +485,7 @@ RGUI_TEST("pdf.limits_images") {
 
     // A JPEG soft mask whose header claims 8192 x 8192 fails on its size, before decoding.
     std::string gray;
-    CHECK(RayoMd::File::ReadAll(std::string(rgui::test::SourceDir()) + "/tests/data/jpeg/gray.jpg", 1u << 20, gray));
+    CHECK(RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(std::string(rgui::test::SourceDir()) + "/tests/data/jpeg/gray.jpg"), 1u << 20, gray));
     for (size_t i = 2; i + 9 < gray.size(); i++) {
         if (static_cast<uint8_t>(gray[i]) == 0xFF && static_cast<uint8_t>(gray[i + 1]) == 0xC0) {
             gray[i + 5] = gray[i + 7] = '\x20';  // 0x2000 = 8192
@@ -506,7 +506,7 @@ RGUI_TEST("pdf.limits_images") {
 // A JPEG drawn small is decoded at 1/2, 1/4 or 1/8 of its size: the mean of each square.
 RGUI_TEST("jpeg.scaled") {
     std::string jpeg;
-    CHECK(RayoMd::File::ReadAll(std::string(rgui::test::SourceDir()) + "/tests/corpus/photo.jpg", 1u << 22, jpeg));
+    CHECK(RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(std::string(rgui::test::SourceDir()) + "/tests/corpus/photo.jpg"), 1u << 22, jpeg));
     const uint8_t* data = reinterpret_cast<const uint8_t*>(jpeg.data());
     Image full;
     std::string reason;

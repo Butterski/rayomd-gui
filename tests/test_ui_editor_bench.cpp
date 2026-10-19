@@ -47,7 +47,7 @@ RGUI_TEST("bench.typing") {
         return;
     }
     std::string tester;
-    CHECK(RayoMd::File::ReadAll(std::string(rgui::test::SourceDir()) + "/external/rayomd/tester.md", 8u << 20, tester));
+    CHECK(RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(std::string(rgui::test::SourceDir()) + "/external/rayomd/tester.md"), 8u << 20, tester));
     if (tester.empty()) return;
     std::string document;
     document.reserve((1u << 20) + tester.size());

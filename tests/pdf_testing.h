@@ -48,7 +48,7 @@ inline std::string TesterMarkdownPath() {
 // points of A4 page a copy (8 copies fill a page 14,400 points tall). Empty when unreadable.
 inline std::string LongMarkdown(int copies) {
     std::string tester;
-    if (!RayoMd::File::ReadAll(TesterMarkdownPath(), 1u << 24, tester)) return {};
+    if (!RayoMd::File::ReadAll(RayoMd::File::PathFromUtf8(TesterMarkdownPath()), 1u << 24, tester)) return {};
     for (const char* marker : {"\\pagebreak", "<!-- pagebreak -->"}) {
         for (size_t at = tester.find(marker); at != std::string::npos; at = tester.find(marker, at)) {
             tester.erase(at, std::string(marker).size());

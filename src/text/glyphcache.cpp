@@ -2,6 +2,7 @@
 #include "text/glyphcache.h"
 
 #include "common/exact_math.h"
+#include "common/thread_object.h"
 #include "gfx/budget.h"
 #include "gfx/raster.h"
 
@@ -96,8 +97,9 @@ void RasterizeGlyph(const GlyphSource& source, uint16_t glyph, float sizePx, flo
         return;
     }
     out.alpha.assign(pixels, 0);
-    // The thread's rasterizer, its buffers kept from glyph to glyph.
-    thread_local gfx::Rasterizer rasterizer;
+    // The thread's rasterizer, its buffers kept from glyph to glyph. A thread object, never a plain
+    // thread_local: MinGW frees thread storage before thread_local destructors run (thread_object.h).
+    RAYOMD_THREAD_OBJECT(gfx::Rasterizer, rasterizer);
     rasterizer.SetBudget(budget);
     rasterizer.Reset(box);
     rasterizer.AddPath(path, m);
