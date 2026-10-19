@@ -18,6 +18,11 @@ enum class FillRule : uint8_t { NonZero, EvenOdd };
 class SpanSink {
 public:
     virtual void Span(int y, int x0, int width, const uint8_t* alpha) = 0;
+    // Rows y .. y + count - 1 with the same coverage (rectangles' rows): each to Span unless the
+    // sink draws them at once.
+    virtual void Rows(int y, int count, int x0, int width, const uint8_t* alpha) {
+        for (int k = 0; k < count; ++k) Span(y + k, x0, width, alpha);
+    }
     // True for a sink whose pixels depend on their own coverage and position alone, not on where
     // their span starts, and for which zero coverage changes nothing: Sweep may then hand a row
     // over in pieces, leaving out the runs of zero coverage between them.
@@ -36,8 +41,11 @@ protected:
 // any segment touched: where the row is long, a Splittable sink gets its touched runs and the
 // untouched runs of nonzero coverage between them, and the untouched runs of zero coverage (the
 // inside of a stroked box, the gaps between a row's glyph outlines) are neither accumulated nor
-// handed over. AddPath flattens a curve that lies wholly beyond
-// one edge of the clip as its chord (FlattenCull), which covers the clip the same.
+// handed over. An outline of vertical segments only (rectangles) is swept apart: a row whose
+// segments, and the row above's, cover both rows whole repeats the row above, so it is neither
+// rendered nor accumulated, and such rows go to the sink together (SpanSink::Rows). AddPath
+// flattens a curve that lies wholly beyond one edge of the clip as its chord (FlattenCull),
+// which covers the clip the same.
 //
 // With a WorkBudget, every segment AddLine takes costs one unit of geometry and every pixel
 // Sweep accumulates one of pixels; once the budget is stopped (spent or cancelled, the flag

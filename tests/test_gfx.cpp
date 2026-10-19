@@ -1028,6 +1028,123 @@ RGUI_TEST("gfx.raster_split_rows") {
 
 namespace {
 
+// A Grid counting the rows it got through Rows.
+struct RowsGrid final : SpanSink {
+    Grid grid;
+    size_t grouped = 0;
+    explicit RowsGrid(RectI c) : grid(c) {}
+    void Span(int y, int x0, int width, const uint8_t* alpha) override { grid.Span(y, x0, width, alpha); }
+    void Rows(int y, int count, int x0, int width, const uint8_t* alpha) override {
+        if (count > 1) grouped += static_cast<size_t>(count);
+        SpanSink::Rows(y, count, x0, width, alpha);
+    }
+};
+
+// Random rectangles, box outlines (as the stroker makes them) and right-angled steps, at
+// fractions of a pixel, partly outside `c`.
+template <typename Unit>
+Path Rectilinear(Unit& unit, const RectI& c) {
+    Path p;
+    const int width = c.Width(), height = c.Height();
+    const int shapes = 1 + static_cast<int>(unit() * 10);
+    for (int s = 0; s < shapes; ++s) {
+        const float x = c.x0 - 20 + unit() * (width + 40), y = c.y0 - 20 + unit() * (height + 40);
+        const float w = unit() * width * 0.7f + 0.1f, h = unit() * height * 0.7f + 0.1f;
+        const int kind = static_cast<int>(unit() * 3);
+        if (kind == 0) {
+            const float t = 0.2f + unit() * 3;
+            p.AddRect(x, y, w + 2 * t, h + 2 * t);
+            p.MoveTo(x + t, y + t);
+            p.LineTo(x + t, y + t + h);
+            p.LineTo(x + t + w, y + t + h);
+            p.LineTo(x + t + w, y + t);
+            p.Close();
+        } else if (kind == 1) {
+            p.MoveTo(x, y);
+            p.LineTo(x + w, y);
+            p.LineTo(x + w, y + h);
+            p.LineTo(x + w / 2, y + h);
+            p.LineTo(x + w / 2, y + h / 3);
+            p.LineTo(x, y + h / 3);
+            p.Close();
+        } else {
+            p.AddRect(x, y, w, h);
+        }
+    }
+    return p;
+}
+
+// `p` and a segment there and back that cancels in the cells but is not vertical: the general
+// sweep, for comparison.
+Path WithDiagonal(const Path& p, const RectI& c) {
+    Path q = p;
+    q.MoveTo(c.x0 + 0.5f, c.y0 + 0.25f);
+    q.LineTo(c.x0 + 3.7f, c.y0 + 2.6f);
+    q.LineTo(c.x0 + 0.5f, c.y0 + 0.25f);
+    q.Close();
+    return q;
+}
+
+} // namespace
+
+// Outlines of rectangles take the upright sweep: the coverage of the general sweep, rows that
+// repeat the one above handed over together; on a canvas, solid fills under no clip, a rectangle
+// clip and a mask give the general sweep's pixels.
+RGUI_TEST("gfx.raster_upright") {
+    uint64_t state = 0xBB67AE8584CAA73Bull;
+    const auto unit = [&] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return static_cast<float>(state >> 40) / 16777216.0f;
+    };
+    bool same = true, pixels = true;
+    size_t grouped = 0;
+    for (int round = 0; round < 300 && same && pixels; ++round) {
+        const int width = 8 + static_cast<int>(unit() * 600), height = 1 + static_cast<int>(unit() * 120);
+        const RectI c{static_cast<int>(unit() * 40) - 20, static_cast<int>(unit() * 40) - 20, 0, 0};
+        const RectI clip{c.x0, c.y0, c.x0 + width, c.y0 + height};
+        const Path p = Rectilinear(unit, clip);
+        const Path q = WithDiagonal(p, clip);
+        for (const FillRule rule : {FillRule::NonZero, FillRule::EvenOdd}) {
+            Rasterizer r;
+            r.Reset(clip);
+            r.AddPath(p, {});
+            RowsGrid upright(clip);
+            r.Sweep(rule, upright);
+            r.Reset(clip);
+            r.AddPath(q, {});
+            Grid general(clip);
+            r.Sweep(rule, general);
+            same = same && upright.grid.a == general.a && !upright.grid.outside && !general.outside;
+            grouped += upright.grouped;
+        }
+        // On a canvas: opaque and translucent colours, under a rectangle clip and a mask.
+        const uint32_t color = round % 2 ? 0xFF3366CCu : 0x80402010u;
+        const int clipKind = round % 3;
+        Pixels a(160, 100, 0xFF102030u), b(160, 100, 0xFF102030u);
+        Canvas ca(a.surface), cb(b.surface);
+        for (Canvas* canvas : {&ca, &cb}) {
+            if (clipKind == 1) canvas->PushClipRect({7, 5, 150, 90});
+            if (clipKind == 2) {
+                Path rounded;
+                rounded.AddRoundRect(5, 3, 140, 90, 20);
+                canvas->PushClipPath(rounded, {}, FillRule::NonZero);
+            }
+        }
+        const RectI area{0, 0, 160, 100};
+        const Path pc = Rectilinear(unit, area);
+        ca.FillPath(pc, {}, FillRule::NonZero, Paint::Solid(color));
+        cb.FillPath(WithDiagonal(pc, RectI{60, 40, 100, 60}), {}, FillRule::NonZero, Paint::Solid(color));
+        pixels = pixels && a.data == b.data;
+    }
+    CHECK(same);
+    CHECK(pixels);
+    CHECK(grouped > 1000);
+}
+
+namespace {
+
 // Segments of a flattening, and the rasterizer fed segment by segment: no culling.
 struct CountLines final : LineSink {
     Rasterizer* raster = nullptr;

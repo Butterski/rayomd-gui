@@ -159,6 +159,12 @@ struct Canvas::Impl {
     Path outline;
     Path unitSquare;
     ColumnTable columns;
+    struct Run {
+        int at;
+        int n;
+        bool fill;  // stored, else blended
+    };
+    std::vector<Run> runs;  // SolidRows'
     const Kernels& k = ActiveKernels();
 
     Impl() {
@@ -198,13 +204,12 @@ struct Canvas::Impl {
 
     uint32_t* Dst(int y, int x) const { return target.Row(y - top) + x; }
 
-    // One row of `color` under coverage c[0..w): runs of 16 or more zeros are skipped and, for an
-    // opaque colour, runs as long of full coverage are stored; the rest is blended. Stores and
-    // skips give the bytes blend_solid gives there.
-    void SolidRow(int y, int x0, int w, const uint8_t* c, uint32_t color) const {
+    // The runs of a row of `color` under coverage c[0..w): runs of 16 or more zeros are skipped
+    // and, for an opaque colour, runs as long of full coverage are stored (fill(start, n)); the
+    // rest is blended (blend(start, n)). Stores and skips give the bytes blend_solid gives there.
+    template <typename Blend, typename Fill>
+    static void SolidRuns(int w, const uint8_t* c, bool opaque, Blend&& blend, Fill&& fill) {
         constexpr int kMinRun = 16;
-        uint32_t* dst = Dst(y, x0);
-        const bool opaque = (color >> 24) == 255;
         int start = 0;
         int i = 0;
         for (;;) {
@@ -213,13 +218,40 @@ struct Canvas::Impl {
             const uint8_t v = c[i];
             const int end = RunEnd(c, i + 1, w, v);
             if (end - i >= kMinRun) {
-                if (i > start) k.blendSolid(dst + start, c + start, static_cast<size_t>(i - start), color);
-                if (v == 255) FillRun(dst + i, static_cast<size_t>(end - i), color);
+                if (i > start) blend(start, i - start);
+                if (v == 255) fill(i, end - i);
                 start = end;
             }
             i = end;
         }
-        if (w > start) k.blendSolid(dst + start, c + start, static_cast<size_t>(w - start), color);
+        if (w > start) blend(start, w - start);
+    }
+
+    // One row of `color` under coverage c[0..w).
+    void SolidRow(int y, int x0, int w, const uint8_t* c, uint32_t color) const {
+        uint32_t* dst = Dst(y, x0);
+        SolidRuns(
+            w, c, (color >> 24) == 255,
+            [&](int at, int n) { k.blendSolid(dst + at, c + at, static_cast<size_t>(n), color); },
+            [&](int at, int n) { FillRun(dst + at, static_cast<size_t>(n), color); });
+    }
+
+    // Rows y .. y + count - 1 of `color` under the same coverage c[0..w): its runs found once.
+    void SolidRows(int y, int count, int x0, int w, const uint8_t* c, uint32_t color) {
+        runs.clear();
+        SolidRuns(
+            w, c, (color >> 24) == 255, [&](int at, int n) { runs.push_back({at, n, false}); },
+            [&](int at, int n) { runs.push_back({at, n, true}); });
+        for (int row = y; row < y + count; ++row) {
+            uint32_t* dst = Dst(row, x0);
+            for (const Run& run : runs) {
+                if (run.fill) {
+                    FillRun(dst + run.at, static_cast<size_t>(run.n), color);
+                } else {
+                    k.blendSolid(dst + run.at, c + run.at, static_cast<size_t>(run.n), color);
+                }
+            }
+        }
     }
 
     // One row of premultiplied src[0..w) under coverage c[0..w), split as SolidRow: when every
@@ -256,6 +288,13 @@ struct Canvas::Impl::SolidSink final : SpanSink {
     SolidSink(Impl& canvas, uint32_t col) : c(canvas), color(col) {}
     void Span(int y, int x0, int w, const uint8_t* alpha) override {
         c.SolidRow(y, x0, w, c.Masked(alpha, y, x0, w), color);
+    }
+    void Rows(int y, int count, int x0, int w, const uint8_t* alpha) override {
+        if (c.Clip().mask >= 0) {
+            SpanSink::Rows(y, count, x0, w, alpha);  // the mask differs from row to row
+        } else {
+            c.SolidRows(y, count, x0, w, alpha, color);
+        }
     }
     bool Splittable() const override { return true; }
 };

@@ -92,6 +92,7 @@ struct Rasterizer::Impl {
     std::vector<Segment> segments;
     int32_t minX = 0, minY = 0, maxX = -1, maxY = -1;  // subpixels; empty while maxX < minX
     bool rightDropped = false;
+    bool upright = true;  // every segment taken is vertical (x0 == x1): an outline of rectangles
     WorkBudget* budget = nullptr;
     uint32_t added = 0;  // segments taken since the start, to poll the cancel flag now and then
 
@@ -109,6 +110,7 @@ struct Rasterizer::Impl {
     void Cell(int32_t* row, RowStat& st, int32_t c, int32_t cover, int32_t area) const;
     void RowPiece(int32_t* row, RowStat& st, int32_t sx, int32_t sy, int32_t ex, int32_t ey, int32_t dir) const;
     void RenderBand(const Segment& s, int bandTop);
+    void SweepUpright(uint32_t evenOdd, SpanSink& sink);
 };
 
 inline void Rasterizer::Impl::Cell(int32_t* row, RowStat& st, int32_t c, int32_t cover, int32_t area) const {
@@ -230,6 +232,7 @@ void Rasterizer::Impl::Push(double x0, double y0, double x1, double y1) {
         s.dir = -1;
     }
     segments.push_back(s);
+    upright = upright && s.x0 == s.x1;
     if (maxX < minX) {
         minX = std::min(s.x0, s.x1);
         maxX = std::max(s.x0, s.x1);
@@ -310,6 +313,7 @@ void Rasterizer::Reset(RectI clip) {
     r.minX = r.minY = 0;
     r.maxX = r.maxY = -1;
     r.rightDropped = false;
+    r.upright = true;
 }
 
 void Rasterizer::AddLine(PointF from, PointF to) {
@@ -348,6 +352,115 @@ void Rasterizer::AddPath(const Path& path, const Matrix& m, float tolerance) {
     cull.x1 = r.clip.x1 + 1.0;
     cull.y1 = r.clip.y1 + 1.0;
     Flatten(path, m, tolerance, sink, &cull);
+}
+
+// Sweep for outlines of vertical segments only (rectangles: fills, stroked boxes and lines,
+// images' squares). A segment crosses a row at one cell, so a row's cells follow from the
+// segments that touch it; a row that every segment touching it or the row above covers whole,
+// in both rows, has the cells of the row above, so its coverage is that row's: it is neither
+// rendered nor accumulated, and such runs of rows go to the sink at once (SpanSink::Rows). The
+// bands, their budget and the cells of the other rows are those of the general sweep.
+void Rasterizer::Impl::SweepUpright(uint32_t evenOdd, SpanSink& sink) {
+    const auto accumulateRow = ActiveKernels().accumulateRow;
+    const size_t w = static_cast<size_t>(width);
+    const size_t wordsPerRow = static_cast<size_t>(words);
+    uint8_t* const out = alpha.data();
+    // The rows sharing the coverage in `out`: from groupY, groupCount of them, the span groupX0,
+    // groupN; handed over when the next row differs.
+    int groupY = 0, groupCount = 0;
+    int32_t groupX0 = 0, groupN = 0;
+    const auto flush = [&] {
+        if (groupCount > 0) sink.Rows(clip.y0 + groupY, groupCount, clip.x0 + groupX0, groupN, out);
+        groupCount = 0;
+    };
+    bool repeat[kBandRows];
+    active.clear();
+    const int firstBand = minY >> kBandShift;
+    const int lastBand = (maxY - 1) >> kBandShift;
+    for (int band = firstBand; band <= lastBand; ++band) {
+        for (uint32_t i = bandStart[band]; i < bandStart[band + 1]; ++i) active.push_back(order[i]);
+        if (active.empty()) continue;
+        if (budget && !budget->Poll()) {
+            flush();
+            return;
+        }
+        const int bandTop = band * kBandRows;
+        const int rowsInBand = std::min(kBandRows, height - bandTop);
+        for (int i = 0; i < rowsInBand; ++i) {
+            RowStat& st = rows[i];
+            st = {INT32_MAX, -1, 0, touched.data() + static_cast<size_t>(i) * wordsPerRow};
+            const int32_t top = (bandTop + i) << kPixelBits, bottom = top + kOne;
+            // The first row of a band is rendered: segments that ended in the band above are gone.
+            bool same = i > 0;
+            for (size_t k = 0; k < active.size() && same; ++k) {
+                const Segment& s = segments[active[k]];
+                if (s.y1 <= top || s.y0 >= bottom) {
+                    same = !(s.y0 < top && s.y1 > top - kOne);  // touched the row above only
+                } else {
+                    same = s.y0 <= top - kOne && s.y1 >= bottom;  // covers both rows whole
+                }
+            }
+            repeat[i] = same;
+            if (same) {
+                st.minCell = rows[i - 1].minCell;
+                st.maxCell = rows[i - 1].maxCell;
+                st.coverSum = rows[i - 1].coverSum;
+                continue;
+            }
+            int32_t* row = cells.data() + 2 * static_cast<ptrdiff_t>(i) * width;
+            for (const uint32_t index : active) {
+                const Segment& s = segments[index];
+                if (s.y1 <= top || s.y0 >= bottom) continue;
+                // RowPiece's vertical case.
+                const int32_t dy = std::min(s.y1, bottom) - std::max(s.y0, top);
+                const int32_t c = s.x0 >> kPixelBits;
+                if (c >= width) continue;
+                const int32_t fx = s.x0 - (c << kPixelBits);
+                Cell(row, st, c, s.dir * dy, s.dir * dy * 2 * fx);
+            }
+        }
+        for (size_t i = 0; i < active.size();) {
+            if (((segments[active[i]].y1 - 1) >> kBandShift) <= band) {
+                active[i] = active.back();
+                active.pop_back();
+            } else {
+                ++i;
+            }
+        }
+        if (budget) {
+            uint64_t pixels = 0;
+            for (int i = 0; i < rowsInBand; ++i) {
+                const RowStat& st = rows[i];
+                if (st.maxCell >= st.minCell) pixels += static_cast<uint64_t>((st.coverSum == 0 ? st.maxCell + 1 : width) - st.minCell);
+            }
+            if (!budget->Take(budget->pixels, pixels, WorkBudget::Stop::Pixels)) {
+                flush();
+                std::fill_n(cells.data(), 2 * static_cast<size_t>(rowsInBand) * w, 0);
+                std::fill_n(touched.data(), static_cast<size_t>(rowsInBand) * wordsPerRow, 0);
+                return;
+            }
+        }
+        for (int i = 0; i < rowsInBand; ++i) {
+            const RowStat& st = rows[i];
+            if (repeat[i]) {
+                if (groupCount > 0) groupCount++;
+                continue;
+            }
+            flush();
+            if (st.maxCell < st.minCell) continue;
+            const int32_t end = st.coverSum == 0 ? st.maxCell + 1 : width;
+            int32_t* row = cells.data() + 2 * static_cast<ptrdiff_t>(i) * width;
+            if (accumulateRow(row + 2 * static_cast<ptrdiff_t>(st.minCell), out, static_cast<size_t>(end - st.minCell),
+                              evenOdd) != 0) {
+                groupY = bandTop + i;
+                groupCount = 1;
+                groupX0 = st.minCell;
+                groupN = end - st.minCell;
+            }
+            std::fill(st.touched + (st.minCell >> kWordShift), st.touched + (st.maxCell >> kWordShift) + 1, 0);
+        }
+    }
+    flush();
 }
 
 void Rasterizer::SetBudget(WorkBudget* budget) {
@@ -408,6 +521,10 @@ void Rasterizer::Sweep(FillRule rule, SpanSink& sink) {
     }
 
     const uint32_t evenOdd = rule == FillRule::EvenOdd ? 1u : 0u;
+    if (r.upright) {
+        r.SweepUpright(evenOdd, sink);
+        return;
+    }
     const auto accumulateRow = ActiveKernels().accumulateRow;
     const bool split = sink.Splittable();
     uint8_t* const alpha = r.alpha.data();
