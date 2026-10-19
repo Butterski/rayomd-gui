@@ -499,6 +499,42 @@ RGUI_TEST("app.document.stats") {
     CHECK_EQ(Document::ComputeStats("a\n\n").words, size_t(1));
     // Only space, tab, LF and CR separate words: punctuation and non-ASCII letters do not.
     CHECK_EQ(Document::ComputeStats("zażółć gęślą-jaźń, 中文").words, size_t(3));
+    // The 16-byte blocks agree with a byte at a time: every length and alignment around block and
+    // count-flush (255 blocks) edges, separators dense and sparse.
+    const auto reference = [](std::string_view text) {
+        rgui::DocumentStats s;
+        bool inWord = false;
+        for (char c : text) {
+            if (c == '\n') s.lines++;
+            const bool sep = c == ' ' || c == '\t' || c == '\n' || c == '\r';
+            if (!sep && !inWord) s.words++;
+            inWord = !sep;
+        }
+        return s;
+    };
+    uint32_t seed = 12345;
+    const auto next = [&seed] {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 8;
+    };
+    const char alphabet[] = {' ', '\t', '\n', '\r', 'a', 'Z', '\x80', '\xff', '-', '\0'};
+    std::string big;
+    for (int i = 0; i < 16 * 255 * 2 + 77; i++) {
+        big.push_back(alphabet[next() % (i % 3 == 0 ? 10 : 5)]);
+    }
+    for (size_t length : {size_t(1), size_t(15), size_t(16), size_t(17), size_t(31), size_t(32), size_t(33),
+                          size_t(16 * 255 - 1), size_t(16 * 255), size_t(16 * 255 + 1), size_t(16 * 255 + 16),
+                          big.size() - 3}) {
+        for (size_t offset = 0; offset < 3; offset++) {
+            const std::string text = big.substr(offset, length);
+            const rgui::DocumentStats want = reference(text);
+            CHECK_EQ(Document::ComputeStats(text).lines, want.lines);
+            CHECK_EQ(Document::ComputeStats(text).words, want.words);
+        }
+    }
+    CHECK_EQ(Document::ComputeStats(std::string(16 * 255 * 3, 'x')).words, size_t(1));
+    CHECK_EQ(Document::ComputeStats(std::string(16 * 255 * 3, '\n')).lines, size_t(16 * 255 * 3 + 1));
+    CHECK_EQ(Document::ComputeStats(std::string(16 * 255 * 3 + 5, ' ') + "x").words, size_t(1));
     Document doc;
     doc.New();
     CHECK_EQ(doc.displayName, std::string("untitled.md"));
