@@ -2,6 +2,7 @@
 // gfx.*: paths, the rasterizer, the stroker, the canvas, the PNG writer and icon paths.
 #include "runner.h"
 
+#include "common/exact_math.h"
 #include "common/file_io.h"
 #include "core/inflate.h"
 #include "gfx/budget.h"
@@ -644,6 +645,98 @@ RGUI_TEST("gfx.canvas_image") {
     CHECK_EQ(rot.At(12, 3), 0xFFFF0000u);
 }
 
+namespace {
+
+// The general bilinear sampler of gfx::Canvas (any matrix), as a reference for its upright path:
+// row y from x0, 16.16 steps, the four pixels around each centre clamped at the edges.
+int64_t RefFixed(double v) {
+    if (!(v > -16777216.0)) v = -16777216.0;
+    if (v > 16777216.0) v = 16777216.0;
+    return static_cast<int64_t>(RayoMd::ExactMath::Floor(v * 65536.0));
+}
+
+void RefBilinearRow(const Image& image, const Matrix& inv, int y, int x0, int w, uint32_t* out) {
+    const int64_t iw = image.width, ih = image.height;
+    const double px = x0 + 0.5, py = y + 0.5;
+    const double ix = inv.a * px + inv.c * py + inv.e;
+    const double iy = inv.b * px + inv.d * py + inv.f;
+    const int64_t dx = RefFixed(inv.a), dy = RefFixed(inv.b);
+    int64_t sx = RefFixed(ix - 0.5), sy = RefFixed(iy - 0.5);
+    for (int i = 0; i < w; ++i, sx += dx, sy += dy) {
+        const int64_t xi = sx >> 16, yi = sy >> 16;
+        const uint32_t wx1 = static_cast<uint32_t>((sx >> 8) & 255), wy1 = static_cast<uint32_t>((sy >> 8) & 255);
+        const int64_t xa = std::clamp<int64_t>(xi, 0, iw - 1), xb = std::clamp<int64_t>(xi + 1, 0, iw - 1);
+        const int64_t ya = std::clamp<int64_t>(yi, 0, ih - 1) * iw, yb = std::clamp<int64_t>(yi + 1, 0, ih - 1) * iw;
+        const uint32_t p[4] = {image.pixels[ya + xa], image.pixels[ya + xb], image.pixels[yb + xa], image.pixels[yb + xb]};
+        uint32_t v = 0;
+        for (int shift = 0; shift < 32; shift += 8) {
+            const auto ch = [&](int k) { return (p[k] >> shift) & 0xFFu; };
+            const uint32_t top = ch(0) * (256 - wx1) + ch(1) * wx1, bottom = ch(2) * (256 - wx1) + ch(3) * wx1;
+            v |= ((top * (256 - wy1) + bottom * wy1 + 32768) >> 16) << shift;
+        }
+        out[i] = v;
+    }
+}
+
+} // namespace
+
+// Upright images (scaled, flipped, at fractions of a pixel, partly outside, one pixel wide or
+// high) sample as the general bilinear sampler does, through SampleImage and DrawImage.
+RGUI_TEST("gfx.canvas_image_upright") {
+    uint64_t state = 0x853C49E6748FEA9Bull;
+    const auto next = [&] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    };
+    const auto unit = [&] { return static_cast<double>(next() >> 11) / 9007199254740992.0; };
+    for (int round = 0; round < 400; ++round) {
+        Image image;
+        image.width = 1 + static_cast<int>(next() % 12);
+        image.height = 1 + static_cast<int>(next() % 12);
+        for (int i = 0; i < image.width * image.height; ++i) image.pixels.push_back(static_cast<uint32_t>(next()));
+        image.opaque = false;
+        const double sx = (0.25 + unit() * 40) * (next() % 4 == 0 ? -1 : 1);
+        const double sy = (0.25 + unit() * 40) * (next() % 4 == 0 ? -1 : 1);
+        const Matrix m{sx, 0, 0, sy, unit() * 60 - 10, unit() * 60 - 10};
+        Pixels px(48, 48, 0);
+        Canvas canvas(px.surface);
+        ImageSamples samples;
+        if (!canvas.SampleImage(image, m, true, samples)) continue;
+        const Matrix toDevice{m.a / image.width, m.b / image.width, m.c / image.height, m.d / image.height, m.e, m.f};
+        Matrix inv;
+        CHECK(toDevice.Invert(inv));
+        const int w = samples.rect.Width();
+        std::vector<uint32_t> row(static_cast<size_t>(w));
+        bool same = true;
+        for (int y = samples.rect.y0; y < samples.rect.y1 && same; ++y) {
+            RefBilinearRow(image, inv, y, samples.rect.x0, w, row.data());
+            same = std::equal(row.begin(), row.end(), samples.pixels.begin() + static_cast<ptrdiff_t>(y - samples.rect.y0) * w);
+        }
+        CHECK(same);
+        if (!same) break;
+        // DrawImage (the span path) on whole pixels: every span starts at the square's left edge
+        // and covers fully, so over transparent black the pixels are the samples.
+        const int ew = 1 + static_cast<int>(next() % 40), eh = 1 + static_cast<int>(next() % 40);
+        const int ex = static_cast<int>(next() % 8), ey = static_cast<int>(next() % 8);
+        const Matrix aligned{static_cast<double>(ew), 0, 0, static_cast<double>(eh), static_cast<double>(ex),
+                             static_cast<double>(ey)};
+        Pixels drawn(48, 48, 0);
+        Canvas d(drawn.surface);
+        d.DrawImage(image, aligned, 255, true);
+        const Matrix alignedToDevice{aligned.a / image.width, 0, 0, aligned.d / image.height, aligned.e, aligned.f};
+        CHECK(alignedToDevice.Invert(inv));
+        row.resize(static_cast<size_t>(ew));
+        for (int y = ey; y < ey + eh && same; ++y) {
+            RefBilinearRow(image, inv, y, ex, ew, row.data());
+            same = std::equal(row.begin(), row.end(), drawn.data.begin() + static_cast<ptrdiff_t>(y) * 48 + ex);
+        }
+        CHECK(same);
+        if (!same) break;
+    }
+}
+
 RGUI_TEST("gfx.canvas_robust") {
     Pixels px(64, 64, 0xFF000000u);
     Canvas canvas(px.surface);
@@ -857,6 +950,197 @@ RGUI_TEST("gfx.raster_random_triangles") {
     }
     CHECK(areas);
     CHECK(mirrors);
+}
+
+namespace {
+
+// A Grid that takes rows in pieces, counting them.
+struct SplitGrid final : SpanSink {
+    Grid grid;
+    size_t spans = 0;
+    explicit SplitGrid(RectI c) : grid(c) {}
+    void Span(int y, int x0, int width, const uint8_t* alpha) override {
+        spans++;
+        grid.Span(y, x0, width, alpha);
+    }
+    bool Splittable() const override { return true; }
+};
+
+} // namespace
+
+// A Splittable sink gets the coverage a whole-row sink gets, in more pieces where long rows have
+// runs of zero coverage: stroked boxes, rows of shapes with gaps, shapes open past the clip's
+// right edge, both fill rules, clips of several widths and offsets.
+RGUI_TEST("gfx.raster_split_rows") {
+    uint64_t state = 0x6A09E667F3BCC908ull;
+    const auto unit = [&] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return static_cast<float>(state >> 40) / 16777216.0f;
+    };
+    bool same = true, split = false;
+    for (int round = 0; round < 300 && same; ++round) {
+        const int width = 64 + static_cast<int>(unit() * 5000), height = 1 + static_cast<int>(unit() * 60);
+        const RectI clip{static_cast<int>(unit() * 100) - 50, static_cast<int>(unit() * 20), 0, 0};
+        const RectI c{clip.x0, clip.y0, clip.x0 + width, clip.y0 + height};
+        Path p;
+        const int shapes = 1 + static_cast<int>(unit() * 12);
+        for (int s = 0; s < shapes; ++s) {
+            const float x = c.x0 - 20 + unit() * (width + 40), y = c.y0 - 5 + unit() * (height + 10);
+            const float w = unit() * width, h = unit() * height + 1;
+            const int kind = static_cast<int>(unit() * 3);
+            if (kind == 0) {
+                // A box outline: outer and inner contours.
+                const float t = 0.3f + unit() * 3;
+                p.AddRect(x, y, w + 2 * t, h + 2 * t);
+                p.MoveTo(x + t, y + t);
+                p.LineTo(x + t, y + t + h);
+                p.LineTo(x + t + w, y + t + h);
+                p.LineTo(x + t + w, y + t);
+                p.Close();
+            } else if (kind == 1) {
+                p.MoveTo(x, y);
+                p.LineTo(x + w, y + unit() * h);
+                p.LineTo(x + unit() * w, y + h);
+                p.Close();
+            } else {
+                p.AddRect(x, y, w, h);
+            }
+        }
+        for (const FillRule rule : {FillRule::NonZero, FillRule::EvenOdd}) {
+            Rasterizer r;
+            r.Reset(c);
+            r.AddPath(p, {});
+            Grid whole(c);
+            r.Sweep(rule, whole);
+            r.Reset(c);
+            r.AddPath(p, {});
+            SplitGrid pieces(c);
+            r.Sweep(rule, pieces);
+            same = same && whole.a == pieces.grid.a && !whole.outside && !pieces.grid.outside;
+            split = split || pieces.spans > static_cast<size_t>(height);
+        }
+    }
+    CHECK(same);
+    CHECK(split);
+}
+
+namespace {
+
+// A Grid counting the rows it got through Rows.
+struct RowsGrid final : SpanSink {
+    Grid grid;
+    size_t grouped = 0;
+    explicit RowsGrid(RectI c) : grid(c) {}
+    void Span(int y, int x0, int width, const uint8_t* alpha) override { grid.Span(y, x0, width, alpha); }
+    void Rows(int y, int count, int x0, int width, const uint8_t* alpha) override {
+        if (count > 1) grouped += static_cast<size_t>(count);
+        SpanSink::Rows(y, count, x0, width, alpha);
+    }
+};
+
+// Random rectangles, box outlines (as the stroker makes them) and right-angled steps, at
+// fractions of a pixel, partly outside `c`.
+template <typename Unit>
+Path Rectilinear(Unit& unit, const RectI& c) {
+    Path p;
+    const int width = c.Width(), height = c.Height();
+    const int shapes = 1 + static_cast<int>(unit() * 10);
+    for (int s = 0; s < shapes; ++s) {
+        const float x = c.x0 - 20 + unit() * (width + 40), y = c.y0 - 20 + unit() * (height + 40);
+        const float w = unit() * width * 0.7f + 0.1f, h = unit() * height * 0.7f + 0.1f;
+        const int kind = static_cast<int>(unit() * 3);
+        if (kind == 0) {
+            const float t = 0.2f + unit() * 3;
+            p.AddRect(x, y, w + 2 * t, h + 2 * t);
+            p.MoveTo(x + t, y + t);
+            p.LineTo(x + t, y + t + h);
+            p.LineTo(x + t + w, y + t + h);
+            p.LineTo(x + t + w, y + t);
+            p.Close();
+        } else if (kind == 1) {
+            p.MoveTo(x, y);
+            p.LineTo(x + w, y);
+            p.LineTo(x + w, y + h);
+            p.LineTo(x + w / 2, y + h);
+            p.LineTo(x + w / 2, y + h / 3);
+            p.LineTo(x, y + h / 3);
+            p.Close();
+        } else {
+            p.AddRect(x, y, w, h);
+        }
+    }
+    return p;
+}
+
+// `p` and a segment there and back that cancels in the cells but is not vertical: the general
+// sweep, for comparison.
+Path WithDiagonal(const Path& p, const RectI& c) {
+    Path q = p;
+    q.MoveTo(c.x0 + 0.5f, c.y0 + 0.25f);
+    q.LineTo(c.x0 + 3.7f, c.y0 + 2.6f);
+    q.LineTo(c.x0 + 0.5f, c.y0 + 0.25f);
+    q.Close();
+    return q;
+}
+
+} // namespace
+
+// Outlines of rectangles take the upright sweep: the coverage of the general sweep, rows that
+// repeat the one above handed over together; on a canvas, solid fills under no clip, a rectangle
+// clip and a mask give the general sweep's pixels.
+RGUI_TEST("gfx.raster_upright") {
+    uint64_t state = 0xBB67AE8584CAA73Bull;
+    const auto unit = [&] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return static_cast<float>(state >> 40) / 16777216.0f;
+    };
+    bool same = true, pixels = true;
+    size_t grouped = 0;
+    for (int round = 0; round < 300 && same && pixels; ++round) {
+        const int width = 8 + static_cast<int>(unit() * 600), height = 1 + static_cast<int>(unit() * 120);
+        const RectI c{static_cast<int>(unit() * 40) - 20, static_cast<int>(unit() * 40) - 20, 0, 0};
+        const RectI clip{c.x0, c.y0, c.x0 + width, c.y0 + height};
+        const Path p = Rectilinear(unit, clip);
+        const Path q = WithDiagonal(p, clip);
+        for (const FillRule rule : {FillRule::NonZero, FillRule::EvenOdd}) {
+            Rasterizer r;
+            r.Reset(clip);
+            r.AddPath(p, {});
+            RowsGrid upright(clip);
+            r.Sweep(rule, upright);
+            r.Reset(clip);
+            r.AddPath(q, {});
+            Grid general(clip);
+            r.Sweep(rule, general);
+            same = same && upright.grid.a == general.a && !upright.grid.outside && !general.outside;
+            grouped += upright.grouped;
+        }
+        // On a canvas: opaque and translucent colours, under a rectangle clip and a mask.
+        const uint32_t color = round % 2 ? 0xFF3366CCu : 0x80402010u;
+        const int clipKind = round % 3;
+        Pixels a(160, 100, 0xFF102030u), b(160, 100, 0xFF102030u);
+        Canvas ca(a.surface), cb(b.surface);
+        for (Canvas* canvas : {&ca, &cb}) {
+            if (clipKind == 1) canvas->PushClipRect({7, 5, 150, 90});
+            if (clipKind == 2) {
+                Path rounded;
+                rounded.AddRoundRect(5, 3, 140, 90, 20);
+                canvas->PushClipPath(rounded, {}, FillRule::NonZero);
+            }
+        }
+        const RectI area{0, 0, 160, 100};
+        const Path pc = Rectilinear(unit, area);
+        ca.FillPath(pc, {}, FillRule::NonZero, Paint::Solid(color));
+        cb.FillPath(WithDiagonal(pc, RectI{60, 40, 100, 60}), {}, FillRule::NonZero, Paint::Solid(color));
+        pixels = pixels && a.data == b.data;
+    }
+    CHECK(same);
+    CHECK(pixels);
+    CHECK(grouped > 1000);
 }
 
 namespace {

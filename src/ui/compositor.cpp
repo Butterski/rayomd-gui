@@ -34,14 +34,17 @@ gfx::RectI ToI(const gfx::RectF& r) {
             RoundToInt(static_cast<double>(r.y) + r.h)};
 }
 
+gfx::Matrix ImageMatrix(const Command& c) {
+    return {c.rect.w, 0, 0, c.rect.h, c.rect.x, c.rect.y};
+}
+
 // A worker's drawing tools.
 struct Worker {
     gfx::Canvas canvas;
     gfx::Path path;
 };
 
-void DrawCommand(Worker& w, const Command& c, const DisplayList& list, const gfx::RectI& tile,
-                 const text::GlyphCache& glyphs, const IconCache& icons) {
+void DrawCommand(Worker& w, const Command& c, const gfx::RectI& tile, const PlacedGlyph* placed, const IconCache& icons) {
     gfx::Canvas& canvas = w.canvas;
     switch (c.type) {
     case CommandType::Rect:
@@ -80,14 +83,11 @@ void DrawCommand(Worker& w, const Command& c, const DisplayList& list, const gfx
         break;
     }
     case CommandType::Glyphs: {
-        const GlyphInstance* g = list.GlyphArena().data() + c.glyphBegin;
+        const PlacedGlyph* g = placed + c.glyphBegin;
         for (uint32_t i = 0; i < c.glyphCount; i++) {
-            if (!g[i].source) continue;
-            const text::GlyphBitmap* bm = glyphs.Find(text::GlyphCache::KeyFor(*g[i].source, g[i].glyph, c.size, g[i].x));
-            if (!bm || bm->width <= 0 || bm->height <= 0) continue;
-            const int x0 = FloorToInt(g[i].x) + bm->left;
-            const int y0 = RoundToInt(g[i].y) + bm->top;
-            const gfx::RectI dst{x0, y0, x0 + bm->width, y0 + bm->height};
+            const text::GlyphBitmap* bm = g[i].bitmap;
+            if (!bm) continue;
+            const gfx::RectI dst{g[i].x0, g[i].y0, g[i].x0 + bm->width, g[i].y0 + bm->height};
             if (dst.Intersect(tile).Empty()) continue;
             canvas.DrawMask(bm->alpha.data(), bm->width, dst, c.color);
         }
@@ -95,8 +95,7 @@ void DrawCommand(Worker& w, const Command& c, const DisplayList& list, const gfx
     }
     case CommandType::Image: {
         if (!c.image) break;
-        const gfx::Matrix m{c.rect.w, 0, 0, c.rect.h, c.rect.x, c.rect.y};
-        canvas.DrawImage(*c.image, m, c.opacity, true);
+        canvas.DrawImage(*c.image, ImageMatrix(c), c.opacity, true);
         break;
     }
     case CommandType::Icon: {
@@ -110,6 +109,21 @@ void DrawCommand(Worker& w, const Command& c, const DisplayList& list, const gfx
     case CommandType::ClipPop:
         break;
     }
+}
+
+bool Contains(const gfx::RectI& outer, const gfx::RectI& inner) {
+    return inner.x0 >= outer.x0 && inner.y0 >= outer.y0 && inner.x1 <= outer.x1 && inner.y1 <= outer.y1;
+}
+
+// Whether `c` stores every pixel of `tile` whatever was there: an opaque rectangle or an image
+// copied row by row (Canvas::CopiedImageRect) covering the tile within the command's clip. The
+// commands before it and the background are then not drawn there.
+bool Covers(const Command& c, const gfx::RectI& tile) {
+    if (!Contains(c.clip, tile)) return false;
+    if (c.type == CommandType::Rect) return (c.color >> 24) == 255 && Contains(ToI(c.rect), tile);
+    gfx::RectI copied;
+    return c.type == CommandType::Image && c.image &&
+           gfx::Canvas::CopiedImageRect(*c.image, ImageMatrix(c), c.opacity, copied) && Contains(copied, tile);
 }
 
 } // namespace
@@ -178,16 +192,24 @@ void Compositor::RasterTiles(int worker) {
         const int row = static_cast<int>(t / static_cast<uint32_t>(cols_));
         const gfx::RectI tile{col * kTileSize, row * kTileSize, std::min(width_, (col + 1) * kTileSize),
                               std::min(height_, (row + 1) * kTileSize)};
-        for (int y = tile.y0; y < tile.y1; y++) {
-            uint32_t* p = target_.Row(y);
-            std::fill(p + tile.x0, p + tile.x1, background_);
+        // The last command that stores every pixel of the tile hides the background and all
+        // before it.
+        const std::vector<uint32_t>& indices = tileCommands_[t];
+        size_t first = indices.size();
+        while (first > 0 && !Covers(commands[indices[first - 1]], tile)) first--;
+        if (first == 0) {
+            for (int y = tile.y0; y < tile.y1; y++) {
+                gfx::FillPixels(target_.Row(y) + tile.x0, static_cast<size_t>(tile.x1 - tile.x0), background_);
+            }
+        } else {
+            first--;
         }
-        for (const uint32_t index : tileCommands_[t]) {
-            const Command& c = commands[index];
+        for (size_t k = first; k < indices.size(); k++) {
+            const Command& c = commands[indices[k]];
             const gfx::RectI clip = c.clip.Intersect(tile);
             if (clip.Empty()) continue;
             w.canvas.PushClipRect(clip);
-            DrawCommand(w, c, *list_, tile, *glyphCache_, *iconCache_);
+            DrawCommand(w, c, tile, placed_.data(), *iconCache_);
             w.canvas.PopClip();
         }
     }
@@ -254,9 +276,12 @@ const std::vector<gfx::RectI>& Compositor::Render(const DisplayList& list, uint3
     invalid_ = false;
     if (dirtyTiles_.empty()) return damage_;
 
-    // Prepare: the glyphs and icons the dirty tiles draw, into the caches, on this thread.
+    // Prepare: the glyphs and icons the dirty tiles draw, into the caches, on this thread, and
+    // where each glyph's bitmap lands.
     glyphs.BeginFrame();
     prepared_.assign(commands.size(), 0);
+    placed_.resize(list.GlyphArena().size());
+    unkept_.clear();
     for (const uint32_t t : dirtyTiles_) {
         for (const uint32_t index : tileCommands_[t]) {
             if (prepared_[index]) continue;
@@ -264,18 +289,36 @@ const std::vector<gfx::RectI>& Compositor::Render(const DisplayList& list, uint3
             const Command& c = commands[index];
             if (c.type == CommandType::Glyphs) {
                 const GlyphInstance* g = list.GlyphArena().data() + c.glyphBegin;
+                PlacedGlyph* out = placed_.data() + c.glyphBegin;
                 for (uint32_t i = 0; i < c.glyphCount; i++) {
-                    if (g[i].source) glyphs.Get(*g[i].source, g[i].glyph, c.size, g[i].x);
+                    out[i] = PlacedGlyph{};
+                    if (!g[i].source) continue;
+                    const text::GlyphBitmap* bm = glyphs.Get(*g[i].source, g[i].glyph, c.size, g[i].x);
+                    if (!bm) continue;
+                    if (!glyphs.Keeps(bm)) {
+                        unkept_.push_back({c.glyphBegin + i, index});
+                        continue;
+                    }
+                    if (bm->width <= 0 || bm->height <= 0) continue;
+                    out[i] = PlacedGlyph{bm, FloorToInt(g[i].x) + bm->left, RoundToInt(g[i].y) + bm->top};
                 }
             } else if (c.type == CommandType::Icon) {
                 icons.Get(c.icon, RoundToInt(c.rect.w));
             }
         }
     }
+    // A glyph the cache did not keep is drawn only if a later Get of its key kept it.
+    for (const auto& [i, index] : unkept_) {
+        const GlyphInstance& g = list.GlyphArena()[i];
+        const Command& c = commands[index];
+        const text::GlyphBitmap* bm = glyphs.Find(text::GlyphCache::KeyFor(*g.source, g.glyph, c.size, g.x));
+        if (bm && bm->width > 0 && bm->height > 0) {
+            placed_[i] = PlacedGlyph{bm, FloorToInt(g.x) + bm->left, RoundToInt(g.y) + bm->top};
+        }
+    }
 
     // Raster: tile threads and this one take dirty tiles by an atomic counter.
     list_ = &list;
-    glyphCache_ = &glyphs;
     iconCache_ = &icons;
     target_ = target;
     background_ = background;

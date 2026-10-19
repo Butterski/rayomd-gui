@@ -12,9 +12,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace rgui::ui {
+
+// A glyph of the current Render as the prepare pass placed it: its cached bitmap (nullptr when
+// there is nothing to draw) and the device position of the bitmap's top-left pixel.
+struct PlacedGlyph {
+    const text::GlyphBitmap* bitmap = nullptr;
+    int x0 = 0;
+    int y0 = 0;
+};
 
 class Compositor {
 public:
@@ -70,11 +79,12 @@ private:
     std::vector<uint32_t> dirtyTiles_;
     std::vector<uint8_t> dirtyMask_;
     std::vector<uint8_t> prepared_;
+    std::vector<PlacedGlyph> placed_;   // per glyph of the list's arena, of the prepared commands
+    std::vector<std::pair<uint32_t, uint32_t>> unkept_;  // (arena index, command index) of glyphs Get did not keep
     std::vector<gfx::RectI> damage_;
 
     // The job of the current Render, read by tile threads.
     const DisplayList* list_ = nullptr;
-    const text::GlyphCache* glyphCache_ = nullptr;
     const IconCache* iconCache_ = nullptr;
     gfx::Surface target_;
     uint32_t background_ = 0;

@@ -3,6 +3,8 @@
 // widgets, headless into owned images.
 #include "runner.h"
 
+#include "gfx/canvas.h"
+#include "gfx/path.h"
 #include "gfx/surface.h"
 #include "text/fontchoice.h"
 #include "text/fontindex.h"
@@ -372,6 +374,59 @@ RGUI_TEST("ui.compositor_draws") {
     CHECK_EQ(px(238, 138), 0xFFFFFFFFu);
     CHECK(px(258, 108) != 0xFF000000u);    // the cross's centre
     CHECK_EQ(px(250, 108), 0xFF000000u);   // left of the cross's arms
+}
+
+RGUI_TEST("ui.compositor_occlusion") {
+    // Tiles an opaque rectangle or a copied image covers start at that command; the pixels are
+    // those of drawing every command in order on one canvas.
+    gfx::Image photo;
+    photo.width = 150;
+    photo.height = 140;
+    for (int i = 0; i < photo.width * photo.height; i++) photo.pixels.push_back(0xFF000000u | static_cast<uint32_t>(i * 2654435761u >> 8));
+    photo.id = 9;
+    gfx::Image translucent = photo;
+    translucent.opaque = false;
+    for (uint32_t& p : translucent.pixels) p = 0x80402010u;
+    translucent.id = 10;
+    DisplayList list;
+    list.Reset(400, 300, 1.0);
+    list.FillRect({0, 0, 400, 300}, 0x80102030u);
+    list.FillRect({5, 5, 395, 295}, 0xFF203040u);                   // covers most tiles
+    list.FillRoundRect({20, 20, 200, 100}, 12, 0xC0800000u);
+    list.DrawImage(photo, {64, 64, 150, 140}, 255);                   // copied: covers tile (1, 1)
+    list.FillRect({70, 70, 140, 140}, 0x40FFFFFFu);                   // translucent over it
+    list.DrawImage(photo, {230.5f, 10, 150, 140}, 255);               // not on whole pixels: sampled
+    list.DrawImage(translucent, {200, 150, 150, 140}, 255);
+    list.PushClip({0, 0, 400, 150});
+    list.FillRect({128, 0, 400, 300}, 0xFF00FF00u);                   // covers within its clip only
+    list.PopClip();
+    list.FillRect({0, 192, 64, 256}, 0xFF0000FFu);                    // exactly one tile
+    Framebuffer a, b;
+    a.Resize(400, 300);
+    b.Resize(400, 300);
+    text::GlyphCache glyphs;
+    IconCache icons;
+    Compositor compositor(2);
+    compositor.Render(list, 0xFF000000u, a.Surface(), glyphs, icons);
+    gfx::Canvas canvas(b.Surface());
+    canvas.FillRect({0, 0, 400, 300}, 0xFF000000u);
+    for (const Command& c : list.Commands()) {
+        if (c.type == CommandType::ClipPush || c.type == CommandType::ClipPop) continue;
+        canvas.PushClipRect(c.clip);
+        if (c.type == CommandType::Rect) {
+            canvas.FillRect({static_cast<int>(c.rect.x), static_cast<int>(c.rect.y), static_cast<int>(c.rect.x + c.rect.w),
+                             static_cast<int>(c.rect.y + c.rect.h)},
+                            c.color);
+        } else if (c.type == CommandType::Image) {
+            canvas.DrawImage(*c.image, gfx::Matrix{c.rect.w, 0, 0, c.rect.h, c.rect.x, c.rect.y}, c.opacity, true);
+        } else if (c.type == CommandType::RoundRect) {
+            gfx::Path path;
+            path.AddRoundRect(c.rect.x, c.rect.y, c.rect.w, c.rect.h, c.radius);
+            canvas.FillPath(path, gfx::Matrix(), gfx::FillRule::NonZero, gfx::Paint::Solid(c.color));
+        }
+        canvas.PopClip();
+    }
+    CHECK(a.image.pixels == b.image.pixels);
 }
 
 RGUI_TEST("ui.display_list_bounds") {

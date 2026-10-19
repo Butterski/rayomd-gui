@@ -19,7 +19,7 @@ namespace {
 std::atomic<uint64_t> g_nextImageId{1};
 
 size_t ImageBytes(const gfx::Image* image) {
-    return (image ? image->pixels.size() * sizeof(uint32_t) : 0) + 64;
+    return (image ? image->pixels.capacity() * sizeof(uint32_t) : 0) + 64;
 }
 
 // The strips of `count` that hold rows [top, bottom) (top == bottom: row `top`), clamped.
@@ -330,7 +330,8 @@ void PreviewPages::Run() {
         }
         pdf::RenderEnvironment environment{fontIndex_, &pdf::SharedImageCache(), &pdf::SharedFontCache()};
         environment.cancel = cancel.get();
-        auto image = std::make_shared<gfx::Image>();
+        // Drawn into storage of an image the cache dropped, when there is one.
+        auto image = pdf::NewRecycledImage();
         pdf::RenderStats stats;
         bool ok = false;
         if (job.strip < 0) {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The pixel and JPEG kernels. Every kernel's arithmetic is defined exactly, so the C++ scalar
-// reference and the x86-64 assembly (gfx/x86_64/*.S) produce the same bytes for every input.
+// reference and the x86-64 code (the assembly of gfx/x86_64/*.S, the intrinsics of
+// gfx/kernels_simd.cpp) produce the same bytes for every input.
 // mul255(a, b) = (t + (t >> 8)) >> 8 with t = a * b + 128.
 //
 // accumulate_row: for i in [0, width): acc += cells[2i]; v = (acc << 9) - cells[2i+1] (int32,
@@ -18,6 +19,12 @@
 // ycc_to_bgra: with cb' = Cb - 128, cr' = Cr - 128: R = Y + ((91881 cr' + 32768) >> 16),
 //   G = Y + ((-22554 cb' - 46802 cr' + 32768) >> 16), B = Y + ((116130 cb' + 32768) >> 16),
 //   each clamped to 0..255, alpha 255. planes[0..2] are Y, Cb, Cr, n samples each.
+// bilinear_row: for i in [0, n): x = xs[i], w0 = ws[i] & 0xFFFF, w1 = ws[i] >> 16 (w0 + w1 =
+//   256), y0 = 256 - wy1 (wy1 in 0..255); per channel c, with a = rowA[x], b = rowA[x + 1],
+//   p = rowB[x], q = rowB[x + 1]: v = (a_c y0 + p_c y1) w0 + (b_c y0 + q_c y1) w1, dst[i]_c =
+//   (v + 32768) >> 16. Reads rowA and rowB only at xs[i] and xs[i] + 1.
+// blend_mask: blend_solid of each of h rows, row r of dst at dst + r * dstStride (pixels) under
+//   coverage at mask + r * maskStride (bytes), w pixels each (a glyph or icon mask drawn whole).
 #pragma once
 
 #include <cstddef>
@@ -30,6 +37,10 @@ void rgui_blend_solid_scalar(uint32_t* dst, const uint8_t* coverage, size_t n, u
 void rgui_blend_span_scalar(uint32_t* dst, const uint32_t* src, const uint8_t* coverage, size_t n);
 void rgui_idct_islow_scalar(const int16_t* coefficients, uint8_t* out, size_t stride);
 void rgui_ycc_to_bgra_scalar(const uint8_t* const* planes, uint32_t* dst, size_t n);
+void rgui_bilinear_row_scalar(const uint32_t* rowA, const uint32_t* rowB, uint32_t wy1, const int32_t* xs,
+                              const uint32_t* ws, size_t n, uint32_t* dst);
+void rgui_blend_mask_scalar(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w,
+                            size_t h, uint32_t color);
 
 // The x86-64 assembly (gfx/x86_64/*.S): same signatures and results, any n including 0, any
 // pointer alignment. The avx2 variants need a CPU with AVX2.
@@ -43,6 +54,17 @@ void rgui_idct_islow_sse2(const int16_t* coefficients, uint8_t* out, size_t stri
 void rgui_ycc_to_bgra_sse2(const uint8_t* const* planes, uint32_t* dst, size_t n);
 void rgui_ycc_to_bgra_avx2(const uint8_t* const* planes, uint32_t* dst, size_t n);
 
+// The intrinsics (gfx/kernels_simd.cpp): same signatures and results, any n including 0, any
+// pointer alignment. The avx2 variants need a CPU with AVX2.
+void rgui_bilinear_row_sse2(const uint32_t* rowA, const uint32_t* rowB, uint32_t wy1, const int32_t* xs,
+                            const uint32_t* ws, size_t n, uint32_t* dst);
+void rgui_bilinear_row_avx2(const uint32_t* rowA, const uint32_t* rowB, uint32_t wy1, const int32_t* xs,
+                            const uint32_t* ws, size_t n, uint32_t* dst);
+void rgui_blend_mask_sse2(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w, size_t h,
+                          uint32_t color);
+void rgui_blend_mask_avx2(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w, size_t h,
+                          uint32_t color);
+
 } // extern "C"
 
 namespace rgui::gfx {
@@ -52,6 +74,10 @@ struct Kernels {
     void (*blendSolid)(uint32_t* dst, const uint8_t* coverage, size_t n, uint32_t color);
     void (*blendSpan)(uint32_t* dst, const uint32_t* src, const uint8_t* coverage, size_t n);
     void (*yccToBgra)(const uint8_t* const* planes, uint32_t* dst, size_t n);
+    void (*bilinearRow)(const uint32_t* rowA, const uint32_t* rowB, uint32_t wy1, const int32_t* xs, const uint32_t* ws,
+                        size_t n, uint32_t* dst);
+    void (*blendMask)(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w, size_t h,
+                      uint32_t color);
     const char* isa;  // "scalar", "sse2" or "avx2"
 };
 

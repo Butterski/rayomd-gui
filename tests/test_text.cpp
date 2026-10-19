@@ -497,6 +497,60 @@ RGUI_TEST("text.glyph_cache_ceiling") {
     CHECK(cache.Find(GlyphCache::KeyFor(font.face, g, 300.0f, 0.0f)) == nullptr);
 }
 
+namespace {
+
+// A glyph source that counts the outlines it hands out.
+struct CountingSource final : rgui::text::GlyphSource {
+    const rgui::text::GlyphSource& inner;
+    mutable int paths = 0;
+    explicit CountingSource(const rgui::text::GlyphSource& source) : inner(source) {}
+    uint32_t SourceId() const override { return inner.SourceId(); }
+    bool GlyphPath(uint16_t glyph, gfx::Path& out) const override {
+        paths++;
+        return inner.GlyphPath(glyph, out);
+    }
+    gfx::Matrix UnitsToEm(uint16_t glyph) const override { return inner.UnitsToEm(glyph); }
+};
+
+} // namespace
+
+// Caches over one store rasterize a glyph once between them, with the same bitmap; a glyph whose
+// budget ran out is not stored; the store keeps to its budget.
+RGUI_TEST("text.glyph_store") {
+    TestFont font;
+    if (!font.Load(kSans, "text.glyph_store")) return;
+    const CountingSource source(font.face);
+    const uint16_t g = font.face.GlyphForCodePoint('g');
+    rgui::text::GlyphStore store;
+    GlyphCache a(GlyphCache::kDefaultBudget, &store), b(GlyphCache::kDefaultBudget, &store);
+    const GlyphBitmap* fromA = a.Get(source, g, 16.0f, 10.25f);
+    const GlyphBitmap* fromB = b.Get(source, g, 16.0f, 10.25f);
+    CHECK_EQ(source.paths, 1);
+    CHECK(fromA != fromB);
+    CHECK(fromA->left == fromB->left && fromA->top == fromB->top && fromA->width == fromB->width &&
+          fromA->height == fromB->height && fromA->alpha == fromB->alpha);
+    GlyphBitmap alone;
+    rgui::text::RasterizeGlyph(font.face, g, 16.0f, 0.25f, alone);
+    CHECK(alone.alpha == fromB->alpha);
+    b.Get(source, g, 16.0f, 10.75f);
+    CHECK_EQ(source.paths, 2);
+    CHECK(store.Bytes() > 0);
+    // Out of budget: not stored, so the next cache rasterizes it again.
+    gfx::WorkBudget starved;
+    starved.pixels = 10;
+    a.Get(source, GlyphCache::KeyFor(source, g, 300.0f, 0.0f), &starved);
+    CHECK(starved.Stopped());
+    GlyphCache c(GlyphCache::kDefaultBudget, &store);
+    const GlyphBitmap* big = c.Get(source, g, 300.0f, 0.0f);
+    CHECK(big->width > 100);
+    CHECK_EQ(source.paths, 4);
+    // A store of 64 KiB keeps about that much.
+    rgui::text::GlyphStore small(64 * 1024);
+    GlyphCache d(GlyphCache::kDefaultBudget, &small);
+    for (int i = 0; i < 400; i++) d.Get(source, g, 20.0f + i * 0.25f, 0.0f);
+    CHECK(small.Bytes() <= 64 * 1024);
+}
+
 RGUI_TEST("text.fontconfig_user") {
     // Exactly what `omarchy-font-set "Fira Code"` writes.
     const std::string xml = ReadText(Fixture("fonts.conf"));

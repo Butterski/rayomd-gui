@@ -3,6 +3,7 @@ list(APPEND RGUI_CORE_SOURCES
     gfx/canvas.cpp
     gfx/crc32.c
     gfx/kernels.cpp
+    gfx/kernels_simd.cpp
     gfx/path.cpp
     gfx/png_write.cpp
     gfx/raster.cpp
