@@ -199,13 +199,32 @@ void SetError(std::string* error, std::string_view text) {
     if (error) error->assign(text.data(), text.size());
 }
 
-// A non-negative decimal integer token.
+// A non-negative decimal integer token: digits only, at most INT64_MAX (what ParseNumber reads as
+// an Int without a sign).
 bool ReadUnsigned(std::string_view token, uint64_t& out) {
-    PdfValue value;
-    if (token.empty() || token[0] == '+' || token[0] == '-') return false;
-    if (!syntax::ParseNumber(token, value) || value.type != PdfValue::Type::Int) return false;
-    out = static_cast<uint64_t>(value.integer);
+    size_t i = 0;
+    while (i < token.size() && token[i] == '0') i++;
+    if (token.empty() || token.size() - i > 19) return false;
+    uint64_t value = 0;
+    for (; i < token.size(); i++) {
+        const unsigned d = static_cast<unsigned>(token[i]) - '0';
+        if (d > 9) return false;
+        value = value * 10 + d;
+    }
+    if (value > static_cast<uint64_t>(INT64_MAX)) return false;
+    out = value;
     return true;
+}
+
+// A cross-reference entry in its fixed form at data[at]: 10 digits, a space, 5 digits, a space,
+// 'n' or 'f' ending the token. False (nothing read) for any other form, which the token reader
+// then takes.
+bool FixedXrefEntry(std::string_view data, size_t at, uint64_t& offset, uint64_t& gen, char& type) {
+    if (data.size() - at < 18 || data[at + 10] != ' ' || data[at + 16] != ' ') return false;
+    if (at + 18 < data.size() && syntax::IsRegular(static_cast<unsigned char>(data[at + 18]))) return false;
+    type = data[at + 17];
+    return (type == 'n' || type == 'f') && ReadUnsigned(data.substr(at, 10), offset) &&
+           ReadUnsigned(data.substr(at + 11, 5), gen);
 }
 
 } // namespace
@@ -307,22 +326,32 @@ bool PdfFile::ReadXref(std::string* error) {
             // Every entry takes at least three tokens of the file, so `count` cannot outrun it.
             for (uint64_t k = 0; k < count && ok; k++) {
                 syntax::SkipSpace(c);
-                const std::string_view entryOffset = syntax::ReadToken(c);
-                syntax::SkipSpace(c);
-                const std::string_view entryGen = syntax::ReadToken(c);
-                syntax::SkipSpace(c);
-                const std::string_view entryType = syntax::ReadToken(c);
                 uint64_t objectOffset = 0;
                 uint64_t gen = 0;
-                if (!ReadUnsigned(entryOffset, objectOffset) || !ReadUnsigned(entryGen, gen) || gen > 65535 ||
-                    (entryType != "n" && entryType != "f")) {
+                char type = 0;
+                if (FixedXrefEntry(data, c.pos, objectOffset, gen, type)) {
+                    c.pos += 18;
+                } else {
+                    const std::string_view entryOffset = syntax::ReadToken(c);
+                    syntax::SkipSpace(c);
+                    const std::string_view entryGen = syntax::ReadToken(c);
+                    syntax::SkipSpace(c);
+                    const std::string_view entryType = syntax::ReadToken(c);
+                    if (!ReadUnsigned(entryOffset, objectOffset) || !ReadUnsigned(entryGen, gen) ||
+                        (entryType != "n" && entryType != "f")) {
+                        ok = false;
+                        break;
+                    }
+                    type = entryType[0];
+                }
+                if (gen > 65535) {
                     ok = false;
                     break;
                 }
                 const uint64_t num = first + k;
                 if (num < limit && num >= first) {
                     entries.push_back({num, objectOffset, static_cast<uint32_t>(gen),
-                                       entryType == "n" && objectOffset < data.size()});
+                                       type == 'n' && objectOffset < data.size()});
                 }
             }
             if (!ok) break;

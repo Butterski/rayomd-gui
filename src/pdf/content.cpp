@@ -9,9 +9,9 @@ namespace {
 
 using syntax::Cursor;
 
-void Push(std::vector<PdfValue>& operands, PdfValue&& value) {
-    if (operands.size() >= ContentLexer::kMaxOperands) operands.clear();
-    operands.push_back(std::move(value));
+// The operand just added stays; past kMaxOperands it is the only one.
+void Kept(std::vector<PdfValue>& operands) {
+    if (operands.size() > ContentLexer::kMaxOperands) operands.erase(operands.begin(), operands.end() - 1);
 }
 
 // An inline image entry under its abbreviation or its full name.
@@ -69,23 +69,24 @@ bool ContentLexer::Next(std::string_view& op, std::vector<PdfValue>& operands) {
         const unsigned char ch = c.Peek();
         if (syntax::IsRegular(ch)) {
             const std::string_view token = syntax::ReadToken(c);
-            PdfValue value;
+            // Read into a new last operand, dropped again for an operator.
+            PdfValue& value = operands.emplace_back();
             if (token == "true" || token == "false") {
                 value.type = PdfValue::Type::Bool;
                 value.boolean = token == "true";
             } else if (token != "null" && !(syntax::StartsNumber(ch) && syntax::ParseNumber(token, value))) {
+                operands.pop_back();
                 op = token;
                 if (token == "BI") ReadInlineImage(operands);
                 return true;
             }
-            Push(operands, std::move(value));
+            Kept(operands);
             continue;
         }
         if (ch == '/' || ch == '(' || ch == '<' || ch == '[') {
             const size_t start = c.pos;
-            PdfValue value;
-            if (syntax::ParseValue(c, syntax::Mode::Content, 0, value)) {
-                Push(operands, std::move(value));
+            if (syntax::ParseValue(c, syntax::Mode::Content, 0, operands.emplace_back())) {
+                Kept(operands);
             } else {
                 if (c.pos == start) c.pos++;
                 operands.clear();

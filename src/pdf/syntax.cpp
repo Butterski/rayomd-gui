@@ -120,16 +120,14 @@ bool ParseNumber(std::string_view token, PdfValue& out) {
     if (digits == 0) return false;
     // 19 digits stay below 2^64; past INT64_MAX the number is a Real.
     if (!point && scale == 0 && mantissa <= static_cast<uint64_t>(INT64_MAX)) {
-        out = PdfValue();
-        out.type = PdfValue::Type::Int;
+        out.Reset(PdfValue::Type::Int);
         out.integer = negative ? -static_cast<int64_t>(mantissa) : static_cast<int64_t>(mantissa);
         return true;
     }
     double value = static_cast<double>(mantissa);
     if (scale > 0) value *= PowerOfTen(scale);
     if (fraction > 0) value /= PowerOfTen(fraction);
-    out = PdfValue();
-    out.type = PdfValue::Type::Real;
+    out.Reset(PdfValue::Type::Real);
     out.real = negative ? -value : value;
     return true;
 }
@@ -226,24 +224,21 @@ bool ParseValue(Cursor& c, Mode mode, int depth, PdfValue& out) {
     const unsigned char ch = c.Peek();
     switch (ch) {
         case '/':
-            out = PdfValue();
-            out.type = PdfValue::Type::Name;
+            out.Reset(PdfValue::Type::Name);
             ReadName(c, out.text);
             return true;
         case '(':
-            out = PdfValue();
-            out.type = PdfValue::Type::String;
+            out.Reset(PdfValue::Type::String);
             return ReadLiteralString(c, out.text);
         case '<':
             if (c.Peek(1) != '<') {
-                out = PdfValue();
-                out.type = PdfValue::Type::String;
+                out.Reset(PdfValue::Type::String);
                 return ReadHexString(c, out.text);
             } else {
                 if (depth >= kMaxDepth) return false;
                 c.pos += 2;
-                PdfValue dict;
-                dict.type = PdfValue::Type::Dict;
+                // Filled in place; on failure `out` is left half filled, which callers drop.
+                out.Reset(PdfValue::Type::Dict);
                 for (;;) {
                     SkipSpace(c);
                     if (c.AtEnd()) return false;
@@ -252,21 +247,21 @@ bool ParseValue(Cursor& c, Mode mode, int depth, PdfValue& out) {
                         break;
                     }
                     if (c.Peek() != '/') return false;
-                    PdfDictEntry entry;
+                    PdfDictEntry& entry = out.entries.emplace_back();
                     ReadName(c, entry.key);
                     SkipSpace(c);
-                    if (c.Peek() == '>' && c.Peek(1) == '>') continue;  // a key without a value
+                    if (c.Peek() == '>' && c.Peek(1) == '>') {  // a key without a value
+                        out.entries.pop_back();
+                        continue;
+                    }
                     if (!ParseValue(c, mode, depth + 1, entry.value)) return false;
-                    dict.entries.push_back(std::move(entry));
                 }
-                out = std::move(dict);
                 return true;
             }
         case '[': {
             if (depth >= kMaxDepth) return false;
             c.pos++;
-            PdfValue array;
-            array.type = PdfValue::Type::Array;
+            out.Reset(PdfValue::Type::Array);
             for (;;) {
                 SkipSpace(c);
                 if (c.AtEnd()) return false;
@@ -274,11 +269,8 @@ bool ParseValue(Cursor& c, Mode mode, int depth, PdfValue& out) {
                     c.pos++;
                     break;
                 }
-                PdfValue item;
-                if (!ParseValue(c, mode, depth + 1, item)) return false;
-                array.items.push_back(std::move(item));
+                if (!ParseValue(c, mode, depth + 1, out.items.emplace_back())) return false;
             }
-            out = std::move(array);
             return true;
         }
         default:
@@ -287,13 +279,12 @@ bool ParseValue(Cursor& c, Mode mode, int depth, PdfValue& out) {
     if (!IsRegular(ch)) return false;
     const std::string_view token = ReadToken(c);
     if (token == "true" || token == "false") {
-        out = PdfValue();
-        out.type = PdfValue::Type::Bool;
+        out.Reset(PdfValue::Type::Bool);
         out.boolean = token == "true";
         return true;
     }
     if (token == "null") {
-        out = PdfValue();
+        out.Reset(PdfValue::Type::Null);
         return true;
     }
     if (!ParseNumber(token, out)) return false;
@@ -308,8 +299,7 @@ bool ParseValue(Cursor& c, Mode mode, int depth, PdfValue& out) {
             SkipSpace(ahead);
             if (gen <= 65535 && ReadToken(ahead) == "R") {
                 const uint32_t num = static_cast<uint32_t>(out.integer);
-                out = PdfValue();
-                out.type = PdfValue::Type::Ref;
+                out.Reset(PdfValue::Type::Ref);
                 out.refNum = num;
                 out.refGen = gen;
                 c = ahead;

@@ -56,11 +56,28 @@ struct PdfValue {
     // The entry under `key` of a dictionary or stream, unresolved (the first one when a key
     // repeats); nullptr when absent or when this is no dictionary.
     const PdfValue* Find(std::string_view key) const;
+    // What PdfValue() with `type` set is, the storage of text, items and entries kept: the
+    // parsers' way to fill a value in place.
+    inline void Reset(Type t);
 };
 
 struct PdfDictEntry {
     std::string key;
     PdfValue value;
 };
+
+inline void PdfValue::Reset(Type t) {
+    type = t;
+    boolean = false;
+    integer = 0;
+    real = 0;
+    refNum = 0;
+    refGen = 0;
+    streamOffset = 0;
+    streamLength = 0;
+    text.clear();
+    items.clear();
+    entries.clear();
+}
 
 } // namespace rgui::pdf
