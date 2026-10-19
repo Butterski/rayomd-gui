@@ -214,21 +214,29 @@ void rgui_bilinear_row_scalar(const uint32_t* rowA, const uint32_t* rowB, uint32
     }
 }
 
+void rgui_blend_mask_scalar(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w,
+                            size_t h, uint32_t color) {
+    for (size_t r = 0; r < h; r++) rgui_blend_solid_scalar(dst + r * dstStride, mask + r * maskStride, w, color);
+}
+
 } // extern "C"
 
 namespace rgui::gfx {
 
 const Kernels& ScalarKernels() {
     static const Kernels kernels{rgui_accumulate_row_scalar, rgui_blend_solid_scalar, rgui_blend_span_scalar,
-                                 rgui_ycc_to_bgra_scalar, rgui_bilinear_row_scalar, "scalar"};
+                                 rgui_ycc_to_bgra_scalar,    rgui_bilinear_row_scalar, rgui_blend_mask_scalar,
+                                 "scalar"};
     return kernels;
 }
 
 const Kernels& ActiveKernels() {
-    static const Kernels sse2{rgui_accumulate_row_sse2, rgui_blend_solid_sse2, rgui_blend_span_sse2,
-                              rgui_ycc_to_bgra_sse2, rgui_bilinear_row_sse2, "sse2"};
-    static const Kernels avx2{rgui_accumulate_row_avx2, rgui_blend_solid_avx2, rgui_blend_span_avx2,
-                              rgui_ycc_to_bgra_avx2, rgui_bilinear_row_avx2, "avx2"};
+    static const Kernels sse2{rgui_accumulate_row_sse2, rgui_blend_solid_sse2,   rgui_blend_span_sse2,
+                              rgui_ycc_to_bgra_sse2,    rgui_bilinear_row_sse2, rgui_blend_mask_sse2,
+                              "sse2"};
+    static const Kernels avx2{rgui_accumulate_row_avx2, rgui_blend_solid_avx2,   rgui_blend_span_avx2,
+                              rgui_ycc_to_bgra_avx2,    rgui_bilinear_row_avx2, rgui_blend_mask_avx2,
+                              "avx2"};
     // libgcc's check includes the OS saving the ymm state (OSXSAVE and XCR0).
     static const Kernels* const active = [] {
         __builtin_cpu_init();

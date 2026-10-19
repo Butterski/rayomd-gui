@@ -549,7 +549,9 @@ void Canvas::FillRect(RectI rect, uint32_t color) {
     } else if ((color >> 24) == 255) {
         for (int y = r.y0; y < r.y1; ++y) FillRun(c.Dst(y, r.x0), w, color);
     } else {
-        for (int y = r.y0; y < r.y1; ++y) c.k.blendSolid(c.Dst(y, r.x0), c.full.data(), w, color);
+        // One row of full coverage for every row.
+        c.k.blendMask(c.Dst(r.y0, r.x0), static_cast<size_t>(c.target.stride), c.full.data(), 0, w,
+                      static_cast<size_t>(r.Height()), color);
     }
 }
 
@@ -672,8 +674,15 @@ void Canvas::DrawMask(const uint8_t* alpha, int stride, RectI dst, uint32_t colo
     if (alpha == nullptr) return;
     const RectI r = dst.Intersect(c.Clip().rect);
     if (r.Empty() || !c.Spend(Impl::Area(r))) return;
+    const uint8_t* first = alpha + static_cast<ptrdiff_t>(r.y0 - dst.y0) * stride + (r.x0 - dst.x0);
+    if (c.Clip().mask < 0) {
+        // The rectangle at once: the kernel's setup once, not per row.
+        c.k.blendMask(c.Dst(r.y0, r.x0), static_cast<size_t>(c.target.stride), first, static_cast<size_t>(stride),
+                      static_cast<size_t>(r.Width()), static_cast<size_t>(r.Height()), color);
+        return;
+    }
     for (int y = r.y0; y < r.y1; ++y) {
-        const uint8_t* row = alpha + static_cast<ptrdiff_t>(y - dst.y0) * stride + (r.x0 - dst.x0);
+        const uint8_t* row = first + static_cast<ptrdiff_t>(y - r.y0) * stride;
         c.k.blendSolid(c.Dst(y, r.x0), c.Masked(row, y, r.x0, r.Width()), static_cast<size_t>(r.Width()), color);
     }
 }

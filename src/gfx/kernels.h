@@ -23,6 +23,8 @@
 //   256), y0 = 256 - wy1 (wy1 in 0..255); per channel c, with a = rowA[x], b = rowA[x + 1],
 //   p = rowB[x], q = rowB[x + 1]: v = (a_c y0 + p_c y1) w0 + (b_c y0 + q_c y1) w1, dst[i]_c =
 //   (v + 32768) >> 16. Reads rowA and rowB only at xs[i] and xs[i] + 1.
+// blend_mask: blend_solid of each of h rows, row r of dst at dst + r * dstStride (pixels) under
+//   coverage at mask + r * maskStride (bytes), w pixels each (a glyph or icon mask drawn whole).
 #pragma once
 
 #include <cstddef>
@@ -37,6 +39,8 @@ void rgui_idct_islow_scalar(const int16_t* coefficients, uint8_t* out, size_t st
 void rgui_ycc_to_bgra_scalar(const uint8_t* const* planes, uint32_t* dst, size_t n);
 void rgui_bilinear_row_scalar(const uint32_t* rowA, const uint32_t* rowB, uint32_t wy1, const int32_t* xs,
                               const uint32_t* ws, size_t n, uint32_t* dst);
+void rgui_blend_mask_scalar(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w,
+                            size_t h, uint32_t color);
 
 // The x86-64 assembly (gfx/x86_64/*.S): same signatures and results, any n including 0, any
 // pointer alignment. The avx2 variants need a CPU with AVX2.
@@ -56,6 +60,10 @@ void rgui_bilinear_row_sse2(const uint32_t* rowA, const uint32_t* rowB, uint32_t
                             const uint32_t* ws, size_t n, uint32_t* dst);
 void rgui_bilinear_row_avx2(const uint32_t* rowA, const uint32_t* rowB, uint32_t wy1, const int32_t* xs,
                             const uint32_t* ws, size_t n, uint32_t* dst);
+void rgui_blend_mask_sse2(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w, size_t h,
+                          uint32_t color);
+void rgui_blend_mask_avx2(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w, size_t h,
+                          uint32_t color);
 
 } // extern "C"
 
@@ -68,6 +76,8 @@ struct Kernels {
     void (*yccToBgra)(const uint8_t* const* planes, uint32_t* dst, size_t n);
     void (*bilinearRow)(const uint32_t* rowA, const uint32_t* rowB, uint32_t wy1, const int32_t* xs, const uint32_t* ws,
                         size_t n, uint32_t* dst);
+    void (*blendMask)(uint32_t* dst, size_t dstStride, const uint8_t* mask, size_t maskStride, size_t w, size_t h,
+                      uint32_t color);
     const char* isa;  // "scalar", "sse2" or "avx2"
 };
 
