@@ -152,11 +152,11 @@ Windows and the tests: [Building](#building).
 
 </details>
 
-| Package | Size, 1.3.3 | For |
+| Package | Size, 1.3.4 | For |
 |---|---:|---|
-| `rayomd-gui-<version>-1-x86_64.pkg.tar.zst` | 1,608 KB | Omarchy and Arch Linux: `pacman -U` |
-| `rayomd-gui-<version>-linux-x64.tar.gz` | 1,518 KB | Linux with glibc 2.34 or newer: the program, its menu entry and icons |
-| `rayomd-gui-<version>-windows-x64.zip` | 1,924 KB | Windows x64: one `rayomd-gui.exe` |
+| `rayomd-gui-<version>-1-x86_64.pkg.tar.zst` | 1,624 KB | Omarchy and Arch Linux: `pacman -U` |
+| `rayomd-gui-<version>-linux-x64.tar.gz` | 1,534 KB | Linux with glibc 2.34 or newer: the program, its menu entry and icons |
+| `rayomd-gui-<version>-windows-x64.zip` | 1,935 KB | Windows x64: one `rayomd-gui.exe` |
 
 <p align="right"><a href="#readme-top">back to top ↑</a></p>
 
