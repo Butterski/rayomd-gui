@@ -146,35 +146,35 @@ void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& opt
     watched_.clear();
     TinyPdf::Internal::Vault vault(options.vaultRoot, options.sourcePath);
     if (!vault.Valid()) return;
-    fs::path folder = RayoMd::File::PathFromUtf8(options.sourcePath).parent_path();
-    if (folder.empty()) folder = ".";
-    folder = TinyPdf::Internal::ResolvedPath(folder);
+    std::string folder(TinyPdf::Internal::ParentOf(options.sourcePath));
+    folder = TinyPdf::Internal::ResolvedPath(folder.empty() ? std::string_view(".") : std::string_view(folder));
     if (folder.empty()) return;
     // Breadth first: the document's embeds, then theirs, as deep and as many bytes as the
     // engine reads (EmbedSet's limits).
     struct Note {
-        fs::path folder;
+        std::string folder;
         std::string text;
         int depth;
     };
     std::deque<Note> notes;
     size_t budget = EmbedSet::kMaxBytes;
-    auto visit = [&](std::string_view from, const fs::path& in, int depth) {
+    auto visit = [&](std::string_view from, std::string_view in, int depth) {
         if (depth >= EmbedSet::kMaxDepth) return;
         ForEachEmbeddedNote(from, kMaxWatched, [&](std::string_view target) {
             if (watched_.size() >= kMaxWatched) return;
-            const fs::path path = vault.Find(in, target, true);
+            const std::string path = vault.Find(in, target, true);
             if (path.empty()) return;
+            const fs::path file = RayoMd::File::PathFromUtf8(path);
             for (const Watched& known : watched_) {
-                if (known.path == path) return;
+                if (known.path == file) return;
             }
             // Stamped before it is read: a change after this shows as one.
-            watched_.push_back({path, RayoMd::File::StampOf(path)});
+            watched_.push_back({file, RayoMd::File::StampOf(file)});
             Note note;
             RayoMd::File::FileIdentity identity;
             if (budget > 0 && vault.Read(path, budget, note.text, identity)) {
                 budget -= std::min(budget, note.text.size());
-                note.folder = path.parent_path();
+                note.folder = std::string(TinyPdf::Internal::ParentOf(path));
                 note.depth = depth + 1;
                 notes.push_back(std::move(note));
             }

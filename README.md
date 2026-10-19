@@ -9,7 +9,7 @@
 **Markdown on the left, the real PDF on the right, updated as you type.**<br>
 A native desktop app for Omarchy, Wayland desktops and Windows. No browser. No Qt. No Electron.
 
-<a href="https://github.com/Butterski/rayomd-gui/releases/latest"><img alt="Version: 1.3.0" src="https://img.shields.io/badge/version-1.3.0-informational?style=for-the-badge"></a>
+<a href="https://github.com/Butterski/rayomd-gui/releases/latest"><img alt="Version: 1.3.1" src="https://img.shields.io/badge/version-1.3.1-informational?style=for-the-badge"></a>
 <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge"></a>
 <a href="https://omarchy.org"><img alt="Made for Omarchy" src="https://img.shields.io/badge/made%20for-Omarchy-7aa2f7?style=for-the-badge"></a>
 
@@ -101,8 +101,8 @@ While the repository is private, download the assets with a logged-in
 <summary><b>Omarchy and Arch Linux</b>: the package</summary>
 
 ```sh
-gh release download v1.3.0 --repo Butterski/rayomd-gui --pattern '*.pkg.tar.zst'
-sudo pacman -U rayomd-gui-1.3.0-1-x86_64.pkg.tar.zst
+gh release download v1.3.1 --repo Butterski/rayomd-gui --pattern '*.pkg.tar.zst'
+sudo pacman -U rayomd-gui-1.3.1-1-x86_64.pkg.tar.zst
 rayomd-gui notes.md
 ```
 
@@ -114,16 +114,16 @@ It installs the program, its menu entry and its icons.
 <summary><b>Other Linux</b>: glibc 2.34 or newer and a Wayland desktop</summary>
 
 ```sh
-gh release download v1.3.0 --repo Butterski/rayomd-gui --pattern '*-linux-x64.tar.gz'
-tar -xzf rayomd-gui-1.3.0-linux-x64.tar.gz
-./rayomd-gui-1.3.0-linux-x64/rayomd-gui notes.md
+gh release download v1.3.1 --repo Butterski/rayomd-gui --pattern '*-linux-x64.tar.gz'
+tar -xzf rayomd-gui-1.3.1-linux-x64.tar.gz
+./rayomd-gui-1.3.1-linux-x64/rayomd-gui notes.md
 ```
 
 For the application menu, put the program on your `PATH` and copy its menu entry and icons:
 
 ```sh
-install -Dm755 rayomd-gui-1.3.0-linux-x64/rayomd-gui ~/.local/bin/rayomd-gui
-cp -r rayomd-gui-1.3.0-linux-x64/share/. ~/.local/share/
+install -Dm755 rayomd-gui-1.3.1-linux-x64/rayomd-gui ~/.local/bin/rayomd-gui
+cp -r rayomd-gui-1.3.1-linux-x64/share/. ~/.local/share/
 ```
 
 </details>
@@ -131,7 +131,7 @@ cp -r rayomd-gui-1.3.0-linux-x64/share/. ~/.local/share/
 <details>
 <summary><b>Windows</b>: <code>rayomd-gui.exe</code></summary>
 
-Download `rayomd-gui-1.3.0-windows-x64.zip` from the
+Download `rayomd-gui-1.3.1-windows-x64.zip` from the
 [release page](https://github.com/Butterski/rayomd-gui/releases/latest), unpack it and
 start `rayomd-gui.exe`, or drop a Markdown file on it.
 
@@ -152,11 +152,11 @@ Windows and the tests: [Building](#building).
 
 </details>
 
-| Package | Size, 1.3.0 | For |
+| Package | Size, 1.3.1 | For |
 |---|---:|---|
-| `rayomd-gui-<version>-1-x86_64.pkg.tar.zst` | 1,675 KB | Omarchy and Arch Linux: `pacman -U` |
-| `rayomd-gui-<version>-linux-x64.tar.gz` | 1,579 KB | Linux with glibc 2.34 or newer: the program, its menu entry and icons |
-| `rayomd-gui-<version>-windows-x64.zip` | 1,870 KB | Windows x64: one `rayomd-gui.exe` |
+| `rayomd-gui-<version>-1-x86_64.pkg.tar.zst` | 1,679 KB | Omarchy and Arch Linux: `pacman -U` |
+| `rayomd-gui-<version>-linux-x64.tar.gz` | 1,583 KB | Linux with glibc 2.34 or newer: the program, its menu entry and icons |
+| `rayomd-gui-<version>-windows-x64.zip` | 1,876 KB | Windows x64: one `rayomd-gui.exe` |
 
 <p align="right"><a href="#readme-top">back to top ↑</a></p>
 
