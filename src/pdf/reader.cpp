@@ -247,6 +247,60 @@ bool FixedXrefEntry(std::string_view data, size_t at, uint64_t& offset, uint64_t
            ReadUnsigned(data.substr(at + 11, 5), gen);
 }
 
+// `from` (a value of another file, which holds its bytes, items and entries apart from that file's
+// bytes) copied into `arena` as `out`, with every byte, item and entry of its own; a stream's data
+// `shift` bytes further on. False when the arena gives out.
+bool CopyValue(const PdfValue& from, PdfArena& arena, int64_t shift, PdfValue& out) {
+    out = from;
+    switch (from.type) {
+        case PdfValue::Type::String:
+        case PdfValue::Type::Name: {
+            if (from.count == 0) return true;
+            void* bytes = arena.Allocate(from.count);
+            if (!bytes) return false;
+            std::memcpy(bytes, from.data, from.count);
+            out.data = bytes;
+            return true;
+        }
+        case PdfValue::Type::Array: {
+            if (from.count == 0) return true;
+            auto* items = static_cast<PdfValue*>(arena.Allocate(sizeof(PdfValue) * from.count));
+            if (!items) return false;
+            const PdfSpan<PdfValue> source = from.Array();
+            for (size_t i = 0; i < source.size(); i++) {
+                new (&items[i]) PdfValue();
+                if (!CopyValue(source[i], arena, shift, items[i])) return false;
+            }
+            out.data = items;
+            return true;
+        }
+        case PdfValue::Type::Dict:
+        case PdfValue::Type::Stream: {
+            if (from.type == PdfValue::Type::Stream) {
+                out.streamOffset = static_cast<size_t>(static_cast<int64_t>(from.streamOffset) + shift);
+            }
+            if (from.count == 0) return true;
+            auto* entries = static_cast<PdfDictEntry*>(arena.Allocate(sizeof(PdfDictEntry) * from.count));
+            if (!entries) return false;
+            const PdfSpan<PdfDictEntry> source = from.Entries();
+            for (size_t i = 0; i < source.size(); i++) {
+                new (&entries[i]) PdfDictEntry();
+                const std::string_view key = source[i].key;
+                if (!key.empty()) {
+                    void* bytes = arena.Allocate(key.size());
+                    if (!bytes) return false;
+                    std::memcpy(bytes, key.data(), key.size());
+                    entries[i].key = std::string_view(static_cast<const char*>(bytes), key.size());
+                }
+                if (!CopyValue(source[i].value, arena, shift, entries[i].value)) return false;
+            }
+            out.data = entries;
+            return true;
+        }
+        default: return true;
+    }
+}
+
 } // namespace
 
 struct PdfFile::Slot {
@@ -305,11 +359,37 @@ PdfFile::~PdfFile() {
     for (int i = 0; i < pageCount_; i++) delete pages_[i].joined.load(std::memory_order_relaxed);
 }
 
-std::shared_ptr<const PdfFile> PdfFile::Parse(std::string bytes, std::string* error) {
+std::shared_ptr<const PdfFile> PdfFile::Parse(std::string bytes, std::string* error, const PdfFile* previous) {
     std::shared_ptr<PdfFile> file(new PdfFile());
     file->bytes_ = std::move(bytes);
-    if (!file->ReadXref(error) || !file->ReadPages(error)) return nullptr;
+    if (!file->ReadXref(error)) return nullptr;
+    // Only while the page tree is read: the file keeps nothing of `previous`.
+    file->adopt_ = previous;
+    const bool pages = file->ReadPages(error);
+    file->adopt_ = nullptr;
+    if (!pages) return nullptr;
     return file;
+}
+
+bool PdfFile::Adopt(uint32_t num, PdfValue& out, size_t& extent) const {
+    const PdfFile& from = *adopt_;
+    if (num >= from.objectCount_) return false;
+    const Slot& was = from.slots_[num];
+    const Slot& slot = slots_[num];
+    if (!was.used || was.gen != slot.gen) return false;
+    // Published after its extent was set; a preview thread may parse more of `from` meanwhile.
+    const PdfValue* value = was.value.load(std::memory_order_acquire);
+    if (!value || was.extent <= was.offset) return false;
+    const size_t length = was.extent - static_cast<size_t>(was.offset);
+    if (slot.offset > bytes_.size() || bytes_.size() - slot.offset < length ||
+        std::memcmp(bytes_.data() + slot.offset, from.bytes_.data() + was.offset, length) != 0) {
+        return false;
+    }
+    if (!CopyValue(*value, parsing_->arena, static_cast<int64_t>(slot.offset) - static_cast<int64_t>(was.offset), out)) {
+        return false;
+    }
+    extent = static_cast<size_t>(slot.offset) + length;
+    return true;
 }
 
 bool PdfFile::ReadXref(std::string* error) {
@@ -599,7 +679,7 @@ const PdfValue& PdfFile::Object(uint32_t num) const {
     PdfValue parsed;
     const PdfValue* candidate = &Null();
     size_t extent = 0;
-    if (ParseObjectAt(num, true, parsed, &extent)) {
+    if ((adopt_ && Adopt(num, parsed, extent)) || ParseObjectAt(num, true, parsed, &extent)) {
         if (void* block = parsing_->arena.Allocate(sizeof(PdfValue))) {
             candidate = new (block) PdfValue(parsed);
             slot.extent = extent;

@@ -316,7 +316,8 @@ void BuildWorker::RunPreview(Job& job) {
         ready.error = BuildErrorText(result.error);
     } else {
         std::string parseError;
-        ready.pdf = pdf::PdfFile::Parse(std::move(bytes), &parseError);
+        // The pages the edit did not change are copied from the last preview's parse.
+        ready.pdf = pdf::PdfFile::Parse(std::move(bytes), &parseError, lastPreview_.get());
         if (!ready.pdf) {
             ready.error = "the preview PDF cannot be read (" + parseError + ")";
         } else {

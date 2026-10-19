@@ -65,8 +65,12 @@ class PdfFile {
 public:
     // Reads the cross-reference table from `startxref` and the page tree. Nullptr, with
     // `error` (when not nullptr) set to what failed ("startxref", "xref", "trailer", "root",
-    // "pages", "no pages"), when the file has no readable page.
-    static std::shared_ptr<const PdfFile> Parse(std::string bytes, std::string* error);
+    // "pages", "no pages"), when the file has no readable page. With `previous` (an earlier build
+    // of the same document), the objects of the page tree whose bytes are those `previous` parsed
+    // under the same object number are copied from it instead of parsed again: the pages an edit
+    // did not change. The file keeps no reference to `previous`.
+    static std::shared_ptr<const PdfFile> Parse(std::string bytes, std::string* error,
+                                                const PdfFile* previous = nullptr);
 
     ~PdfFile();
     PdfFile(const PdfFile&) = delete;
@@ -136,6 +140,10 @@ private:
     // Needs parsing_->mutex held; values go to its arena. `extent` (when given) gets where the
     // bytes that decided the parse end, or 0 when it also read bytes elsewhere.
     bool ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out, size_t* extent = nullptr) const;
+    // Object `num` as adopt_ parsed it, when its bytes there (up to the extent that decided its
+    // parse) are the bytes here, copied into this file's arena; `extent` as ParseObjectAt sets it.
+    // Needs parsing_->mutex held, or Parse running.
+    bool Adopt(uint32_t num, PdfValue& out, size_t& extent) const;
     bool StreamEnd(size_t start, size_t& end) const;
     bool GenerationMatches(const PdfValue& ref) const;
     PdfHash ObjectHash(uint32_t num, HashContext& context) const;
@@ -152,6 +160,8 @@ private:
     // Where "endstream" occurs, found once on first need (a stream whose /Length is wrong).
     mutable std::once_flag endstreamsOnce_;
     mutable std::vector<size_t> endstreams_;
+    // The earlier build Parse copies unchanged objects from; set only while Parse reads the pages.
+    const PdfFile* adopt_ = nullptr;
 };
 
 } // namespace rgui::pdf

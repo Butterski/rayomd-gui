@@ -198,7 +198,8 @@ private:
     EmbedWatch embeds_;           // worker thread only: the last preview's embedded notes
     bool embedsReported_ = false; // worker thread only: their change was told
     // Worker thread only: the last preview's PDF (most often the one the window shows), whose
-    // stream hashes the next preview takes over (PdfFile::InheritHashes).
+    // stream hashes (PdfFile::InheritHashes) and page tree (PdfFile::Parse) the next preview takes
+    // over where unchanged.
     std::shared_ptr<const pdf::PdfFile> lastPreview_;
     std::thread thread_;
 };
