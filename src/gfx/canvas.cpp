@@ -12,6 +12,8 @@
 #include <cstring>
 #include <limits>
 
+#include <emmintrin.h>
+
 namespace rgui::gfx {
 
 namespace {
@@ -65,6 +67,80 @@ uint32_t GradientColor(const LinearGradient& g, double t) {
     return Premultiply(mix(a->r, b->r), mix(a->g, b->g), mix(a->b, b->b), g.alpha);
 }
 
+// SSE2, the x86-64 baseline, 16 coverage bytes at a time.
+
+// The first index in [i, n) whose byte is 0, or 255 when `full` counts too; n when none.
+inline int NextStop(const uint8_t* c, int i, int n, bool full) {
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i other = full ? _mm_set1_epi8(-1) : zero;
+    for (; i + 16 <= n; i += 16) {
+        const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(c + i));
+        const int hits = _mm_movemask_epi8(_mm_or_si128(_mm_cmpeq_epi8(v, zero), _mm_cmpeq_epi8(v, other)));
+        if (hits != 0) return i + __builtin_ctz(static_cast<unsigned>(hits));
+    }
+    for (; i < n; ++i) {
+        if (c[i] == 0 || (full && c[i] == 255)) return i;
+    }
+    return n;
+}
+
+// The first index in [i, n) whose byte is not v; n when none.
+inline int RunEnd(const uint8_t* c, int i, int n, uint8_t v) {
+    const __m128i want = _mm_set1_epi8(static_cast<char>(v));
+    for (; i + 16 <= n; i += 16) {
+        const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i*>(c + i));
+        const int misses = _mm_movemask_epi8(_mm_cmpeq_epi8(bytes, want)) ^ 0xFFFF;
+        if (misses != 0) return i + __builtin_ctz(static_cast<unsigned>(misses));
+    }
+    while (i < n && c[i] == v) ++i;
+    return i;
+}
+
+// Mul255 of 16 byte pairs: t = a b + 128 is at most 65,153 and t + (t >> 8) at most 65,407,
+// both exact in 16-bit lanes.
+inline __m128i Mul255x16(__m128i a, __m128i b) {
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i half = _mm_set1_epi16(128);
+    __m128i lo = _mm_add_epi16(_mm_mullo_epi16(_mm_unpacklo_epi8(a, zero), _mm_unpacklo_epi8(b, zero)), half);
+    __m128i hi = _mm_add_epi16(_mm_mullo_epi16(_mm_unpackhi_epi8(a, zero), _mm_unpackhi_epi8(b, zero)), half);
+    lo = _mm_srli_epi16(_mm_add_epi16(lo, _mm_srli_epi16(lo, 8)), 8);
+    hi = _mm_srli_epi16(_mm_add_epi16(hi, _mm_srli_epi16(hi, 8)), 8);
+    return _mm_packus_epi16(lo, hi);
+}
+
+// out[i] = Mul255(a[i], b[i]) for i in [0, n); out may be a.
+inline void MulRow(const uint8_t* a, const uint8_t* b, uint8_t* out, int n) {
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        const __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i));
+        const __m128i y = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), Mul255x16(x, y));
+    }
+    for (; i < n; ++i) out[i] = static_cast<uint8_t>(Mul255(a[i], b[i]));
+}
+
+// out[i] = Mul255(a[i], k) for i in [0, n).
+inline void MulRowBy(const uint8_t* a, uint8_t k, uint8_t* out, int n) {
+    const __m128i y = _mm_set1_epi8(static_cast<char>(k));
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        const __m128i x = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i));
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), Mul255x16(x, y));
+    }
+    for (; i < n; ++i) out[i] = static_cast<uint8_t>(Mul255(a[i], k));
+}
+
+// p[0..n) = v.
+inline void FillPixels(uint32_t* p, size_t n, uint32_t v) {
+    const __m128i four = _mm_set1_epi32(static_cast<int>(v));
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p + i), four);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(p + i + 4), four);
+    }
+    for (; i < n; ++i) p[i] = v;
+}
+
 } // namespace
 
 struct Canvas::Impl {
@@ -116,7 +192,7 @@ struct Canvas::Impl {
         const uint8_t* row = m.alpha.data() + static_cast<ptrdiff_t>(y - m.bounds.y0) * m.bounds.Width() +
                              (x0 - m.bounds.x0);
         uint8_t* out = cov.data();
-        for (int i = 0; i < w; ++i) out[i] = static_cast<uint8_t>(Mul255(alpha[i], row[i]));
+        MulRow(alpha, row, out, w);
         return out;
     }
 
@@ -131,17 +207,14 @@ struct Canvas::Impl {
         const bool opaque = (color >> 24) == 255;
         int start = 0;
         int i = 0;
-        while (i < w) {
+        for (;;) {
+            i = NextStop(c, i, w, opaque);
+            if (i >= w) break;
             const uint8_t v = c[i];
-            if (v != 0 && !(v == 255 && opaque)) {
-                ++i;
-                continue;
-            }
-            int end = i + 1;
-            while (end < w && c[end] == v) ++end;
+            const int end = RunEnd(c, i + 1, w, v);
             if (end - i >= kMinRun) {
                 if (i > start) k.blendSolid(dst + start, c + start, static_cast<size_t>(i - start), color);
-                if (v == 255) std::fill_n(dst + i, end - i, color);
+                if (v == 255) FillPixels(dst + i, static_cast<size_t>(end - i), color);
                 start = end;
             }
             i = end;
@@ -156,14 +229,11 @@ struct Canvas::Impl {
         uint32_t* dst = Dst(y, x0);
         int start = 0;
         int i = 0;
-        while (i < w) {
+        for (;;) {
+            i = NextStop(c, i, w, opaqueSrc);
+            if (i >= w) break;
             const uint8_t v = c[i];
-            if (v != 0 && !(v == 255 && opaqueSrc)) {
-                ++i;
-                continue;
-            }
-            int end = i + 1;
-            while (end < w && c[end] == v) ++end;
+            const int end = RunEnd(c, i + 1, w, v);
             if (end - i >= kMinRun) {
                 if (i > start) k.blendSpan(dst + start, s + start, c + start, static_cast<size_t>(i - start));
                 if (v == 255) std::memcpy(dst + i, s + i, static_cast<size_t>(end - i) * sizeof(uint32_t));
@@ -341,15 +411,13 @@ struct Canvas::Impl::ImageSink final : SpanSink {
     ImageSink(Impl& canvas, const Image& img, const Matrix& inverse, uint8_t op, bool sm)
         : c(canvas), image(img), inv(inverse), opacity(op), smooth(sm) {}
 
-    // The span's coverage times the clip mask and the opacity, in c.cov.
-    static uint8_t* Coverage(Impl& canvas, const uint8_t* alpha, int y, int x0, int w, uint8_t opacity) {
+    // The span's coverage times the clip mask and the opacity: `alpha` itself when neither
+    // changes it, otherwise in c.cov.
+    static const uint8_t* Coverage(Impl& canvas, const uint8_t* alpha, int y, int x0, int w, uint8_t opacity) {
         const uint8_t* a = canvas.Masked(alpha, y, x0, w);
+        if (opacity == 255) return a;
         uint8_t* cov = canvas.cov.data();
-        if (opacity == 255) {
-            if (a != cov) std::memcpy(cov, a, static_cast<size_t>(w));
-        } else {
-            for (int i = 0; i < w; ++i) cov[i] = static_cast<uint8_t>(Mul255(a[i], opacity));
-        }
+        MulRowBy(a, opacity, cov, w);
         return cov;
     }
 
@@ -437,7 +505,7 @@ void Canvas::FillRect(RectI rect, uint32_t color) {
             c.SolidRow(y, r.x0, r.Width(), c.Masked(c.full.data(), y, r.x0, r.Width()), color);
         }
     } else if ((color >> 24) == 255) {
-        for (int y = r.y0; y < r.y1; ++y) std::fill_n(c.Dst(y, r.x0), w, color);
+        for (int y = r.y0; y < r.y1; ++y) FillPixels(c.Dst(y, r.x0), w, color);
     } else {
         for (int y = r.y0; y < r.y1; ++y) c.k.blendSolid(c.Dst(y, r.x0), c.full.data(), w, color);
     }
@@ -578,7 +646,7 @@ bool Canvas::Impl::RasterMask(const Path& path, const Matrix& m, FillRule rule, 
             uint8_t* row = mask.alpha.data() + static_cast<ptrdiff_t>(y - bounds.y0) * bounds.Width();
             const uint8_t* prev = o.alpha.data() + static_cast<ptrdiff_t>(y - o.bounds.y0) * o.bounds.Width() +
                                   (bounds.x0 - o.bounds.x0);
-            for (int x = 0; x < bounds.Width(); ++x) row[x] = static_cast<uint8_t>(Mul255(row[x], prev[x]));
+            MulRow(row, prev, row, bounds.Width());
         }
     }
     return true;
