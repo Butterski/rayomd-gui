@@ -100,11 +100,21 @@ public:
             n--;
         }
         length_ += n & ~size_t(7);
+        // The state in registers; each word loaded at once (SipHash reads words little-endian, as
+        // x86-64 stores them).
+        static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "words are read little-endian");
+        uint64_t v0 = v0_, v1 = v1_, v2 = v2_, v3 = v3_;
         for (; n >= 8; n -= 8, p += 8) {
-            uint64_t w = 0;
-            for (int i = 0; i < 8; i++) w |= static_cast<uint64_t>(p[i]) << (8 * i);
-            Word(w);
+            uint64_t w;
+            std::memcpy(&w, p, sizeof w);
+            v3 ^= w;
+            Round(v0, v1, v2, v3);
+            v0 ^= w;
         }
+        v0_ = v0;
+        v1_ = v1;
+        v2_ = v2;
+        v3_ = v3;
         while (n-- > 0) Byte(*p++);
     }
 
