@@ -116,11 +116,13 @@ private:
     struct Slot;
     struct Page;
     struct HashContext;
+    struct Parsing;
     class Hasher;
 
     PdfFile();
     bool ReadXref(std::string* error);
     bool ReadPages(std::string* error);
+    // Needs parsing_->mutex held; values go to its arena.
     bool ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out) const;
     bool StreamEnd(size_t start, size_t& end) const;
     bool GenerationMatches(const PdfValue& ref) const;
@@ -133,6 +135,8 @@ private:
     std::unique_ptr<Slot[]> slots_;
     int pageCount_ = 0;
     std::unique_ptr<Page[]> pages_;
+    // Where parsed values live (as long as the file), and the lock of whoever parses an object.
+    std::unique_ptr<Parsing> parsing_;
     // Where "endstream" occurs, found once on first need (a stream whose /Length is wrong).
     mutable std::once_flag endstreamsOnce_;
     mutable std::vector<size_t> endstreams_;

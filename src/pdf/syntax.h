@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace rgui::pdf::syntax {
 
@@ -46,14 +47,26 @@ std::string_view ReadToken(Cursor& c);
 // `token` as an Int or a Real: [+-]digits[.digits] or [+-].digits. An integer beyond int64 is a
 // Real. False for anything else.
 bool ParseNumber(std::string_view token, PdfValue& out);
-// A name; the cursor is at '/'.
-void ReadName(Cursor& c, std::string& out);
+
+// Where ParseValue puts what it reads: strings, items and entries go to `arena`; arrays and
+// dictionaries are read on the stacks (kept from value to value, so they stop allocating) and
+// copied to the arena whole when they end.
+struct Builder {
+    explicit Builder(PdfArena& storage) : arena(storage) {}
+    PdfArena& arena;
+    std::vector<PdfValue> items;
+    std::vector<PdfDictEntry> entries;
+    std::string scratch;
+};
+
+// A name into the arena; the cursor is at '/'. False when the arena cannot hold it.
+bool ReadName(Cursor& c, Builder& b, std::string_view& out);
 // A literal string with its escapes and balanced parentheses; the cursor is at '('. False when
 // it does not end.
-bool ReadLiteralString(Cursor& c, std::string& out);
+bool ReadLiteralString(Cursor& c, Builder& b, std::string_view& out);
 // A hexadecimal string; the cursor is at '<' (not "<<"). False on a byte that is neither a hex
 // digit nor white space, or when it does not end.
-bool ReadHexString(Cursor& c, std::string& out);
+bool ReadHexString(Cursor& c, Builder& b, std::string_view& out);
 
 enum class Mode : uint8_t {
     File,     // "n g R" is a reference
@@ -63,7 +76,7 @@ enum class Mode : uint8_t {
 // The value at the cursor (the caller skipped space before it): a number, true, false, null,
 // a name, a string, an array or a dictionary, or in File mode a reference. A bare keyword, a
 // stray delimiter or nesting deeper than kMaxDepth fails; the cursor is then left anywhere
-// at or after where it started.
-bool ParseValue(Cursor& c, Mode mode, int depth, PdfValue& out);
+// at or after where it started, and what it read so far stays in the arena unused.
+bool ParseValue(Cursor& c, Mode mode, int depth, Builder& b, PdfValue& out);
 
 } // namespace rgui::pdf::syntax

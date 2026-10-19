@@ -87,11 +87,11 @@ bool ReadSimpleWidths(const PdfFile& file, const PdfValue& dict, std::array<doub
     const PdfValue& list = file.Get(dict, "Widths");
     if (!list.IsArray()) return false;
     const int64_t first = file.Get(dict, "FirstChar").Int(0);
-    for (size_t i = 0; i < list.items.size(); i++) {
+    for (size_t i = 0; i < list.Array().size(); i++) {
         const int64_t code = first + static_cast<int64_t>(i);
         if (code < 0 || code > 255) continue;
         double w = 0;
-        if (!file.Number(list.items[i], w)) continue;
+        if (!file.Number(list.Array()[i], w)) continue;
         widths[static_cast<size_t>(code)] = w;
         has[static_cast<size_t>(code)] = true;
     }
@@ -247,11 +247,11 @@ std::vector<WidthRun> ReadCidWidths(const PdfFile& file, const PdfValue& cidFont
         if (first < 0 || first > 0xFFFF || i + 1 >= items.size()) break;
         const PdfValue& next = file.Resolve(items[i + 1]);
         if (next.IsArray()) {
-            for (size_t k = 0; k < next.items.size() && runs.size() < kMaxRuns; k++) {
+            for (size_t k = 0; k < next.Array().size() && runs.size() < kMaxRuns; k++) {
                 const uint32_t cid = static_cast<uint32_t>(first) + static_cast<uint32_t>(k);
                 double w = 0;
                 if (cid > 0xFFFF) break;
-                if (file.Number(next.items[k], w)) runs.push_back({cid, cid, w});
+                if (file.Number(next.Array()[k], w)) runs.push_back({cid, cid, w});
             }
             i += 2;
         } else {

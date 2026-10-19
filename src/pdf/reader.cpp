@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <new>
 #include <unordered_map>
 
 #if defined(__linux__)
@@ -257,13 +258,16 @@ struct PdfFile::HashContext {
     std::unordered_map<uint32_t, PdfHash> local;
 };
 
-PdfFile::PdfFile() = default;
+struct PdfFile::Parsing {
+    Parsing() : builder(arena) {}
+    std::mutex mutex;
+    PdfArena arena;
+    syntax::Builder builder;
+};
+
+PdfFile::PdfFile() : parsing_(std::make_unique<Parsing>()) {}
 
 PdfFile::~PdfFile() {
-    for (uint32_t i = 0; i < objectCount_; i++) {
-        const PdfValue* value = slots_[i].value.load(std::memory_order_relaxed);
-        if (value != &Null()) delete value;
-    }
     for (int i = 0; i < pageCount_; i++) delete pages_[i].joined.load(std::memory_order_relaxed);
 }
 
@@ -359,7 +363,9 @@ bool PdfFile::ReadXref(std::string* error) {
         PdfValue trailer;
         if (ok) {
             syntax::SkipSpace(c);
-            ok = syntax::ParseValue(c, syntax::Mode::File, 0, trailer) && trailer.type == PdfValue::Type::Dict;
+            // Parse runs on one thread: no lock needed yet.
+            ok = syntax::ParseValue(c, syntax::Mode::File, 0, parsing_->builder, trailer) &&
+                 trailer.type == PdfValue::Type::Dict;
         }
         if (!ok) {
             if (newest) {
@@ -372,7 +378,7 @@ bool PdfFile::ReadXref(std::string* error) {
         const bool more = prev && prev->type == PdfValue::Type::Int && prev->integer >= 0 &&
                           static_cast<uint64_t>(prev->integer) < data.size();
         if (more) offset = static_cast<uint64_t>(prev->integer);
-        if (newest) trailer_ = std::move(trailer);
+        if (newest) trailer_ = trailer;
         if (!more) break;
     }
 
@@ -493,7 +499,7 @@ bool PdfFile::ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out) con
     syntax::SkipSpace(c);
     if (syntax::ReadToken(c) != "obj") return false;
     syntax::SkipSpace(c);
-    if (!syntax::ParseValue(c, syntax::Mode::File, 0, out)) return false;
+    if (!syntax::ParseValue(c, syntax::Mode::File, 0, parsing_->builder, out)) return false;
     if (out.type != PdfValue::Type::Dict) return true;
     syntax::SkipSpace(c);
     if (syntax::ReadToken(c) != "stream") return true;
@@ -535,19 +541,17 @@ const PdfValue& PdfFile::Object(uint32_t num) const {
     Slot& slot = slots_[num];
     const PdfValue* known = slot.value.load(std::memory_order_acquire);
     if (known) return *known;
-    // Threads that ask at once parse it each; the first to finish publishes its copy.
-    PdfValue* parsed = new PdfValue();
-    const PdfValue* candidate = parsed;
-    if (!ParseObjectAt(num, true, *parsed)) {
-        delete parsed;
-        candidate = &Null();
+    // One thread parses at a time, into the file's arena; one that waited finds it parsed.
+    std::lock_guard<std::mutex> lock(parsing_->mutex);
+    known = slot.value.load(std::memory_order_acquire);
+    if (known) return *known;
+    PdfValue parsed;
+    const PdfValue* candidate = &Null();
+    if (ParseObjectAt(num, true, parsed)) {
+        if (void* block = parsing_->arena.Allocate(sizeof(PdfValue))) candidate = new (block) PdfValue(parsed);
     }
-    const PdfValue* expected = nullptr;
-    if (slot.value.compare_exchange_strong(expected, candidate, std::memory_order_acq_rel, std::memory_order_acquire)) {
-        return *candidate;
-    }
-    if (candidate != &Null()) delete candidate;
-    return *expected;
+    slot.value.store(candidate, std::memory_order_release);
+    return *candidate;
 }
 
 const PdfValue& PdfFile::Resolve(const PdfValue& value) const {
@@ -573,10 +577,10 @@ bool PdfFile::Number(const PdfValue& value, double& out) const {
 
 bool PdfFile::Rect(const PdfValue& value, PdfRect& out) const {
     const PdfValue& array = Resolve(value);
-    if (!array.IsArray() || array.items.size() != 4) return false;
+    if (!array.IsArray() || array.Array().size() != 4) return false;
     double v[4];
     for (int i = 0; i < 4; i++) {
-        if (!Number(array.items[i], v[i]) || !Finite(v[i])) return false;
+        if (!Number(array.Array()[i], v[i]) || !Finite(v[i])) return false;
     }
     out = {std::min(v[0], v[2]), std::min(v[1], v[3]), std::max(v[0], v[2]), std::max(v[1], v[3])};
     return true;
@@ -589,7 +593,7 @@ bool PdfFile::StreamData(const PdfValue& stream, std::string_view& data, std::st
         return false;
     }
     const PdfValue& filter = Get(resolved, "Filter");
-    const PdfValue* first = filter.IsArray() ? (filter.items.empty() ? nullptr : &Resolve(filter.items[0]))
+    const PdfValue* first = filter.IsArray() ? (filter.Array().empty() ? nullptr : &Resolve(filter.Array()[0]))
                                              : (filter.IsNull() ? nullptr : &filter);
     if (first) {
         if (error) *error = "filter:" + std::string(first->IsName() ? first->Name() : std::string_view("?"));
@@ -619,17 +623,17 @@ void PdfFile::HashInto(const PdfValue& value, Hasher& hash, HashContext& context
         case PdfValue::Type::Real: hash.Double(value.real); break;
         case PdfValue::Type::String:
         case PdfValue::Type::Name:
-            hash.U64(value.text.size());
-            hash.Bytes(value.text);
+            hash.U64(value.count);
+            hash.Bytes(value.Text());
             break;
         case PdfValue::Type::Array:
-            hash.U64(value.items.size());
-            for (const PdfValue& item : value.items) HashInto(item, hash, context);
+            hash.U64(value.Array().size());
+            for (const PdfValue& item : value.Array()) HashInto(item, hash, context);
             break;
         case PdfValue::Type::Dict:
         case PdfValue::Type::Stream:
-            hash.U64(value.entries.size());
-            for (const PdfDictEntry& entry : value.entries) {
+            hash.U64(value.count);
+            for (const PdfDictEntry& entry : value.Entries()) {
                 hash.U64(entry.key.size());
                 hash.Bytes(entry.key);
                 // /Parent leads up a tree (pages, outlines) to everything else in it.
@@ -723,9 +727,9 @@ bool PdfFile::PageContent(int page, std::string_view& content, std::string* erro
         return true;
     }
     std::string joined;
-    for (size_t i = 0; i < contents.items.size(); i++) {
+    for (size_t i = 0; i < contents.Array().size(); i++) {
         std::string_view part;
-        if (!StreamData(contents.items[i], part, error)) return false;
+        if (!StreamData(contents.Array()[i], part, error)) return false;
         if (i > 0) joined.push_back('\n');
         joined.append(part.data(), part.size());
     }
@@ -758,8 +762,8 @@ PdfHash PdfFile::PageKey(int page) const {
     };
     const PdfValue& contents = Get(*entry.dict, "Contents");
     if (contents.IsArray()) {
-        hash.U64(contents.items.size());
-        for (const PdfValue& item : contents.items) mixStream(Resolve(item));
+        hash.U64(contents.Array().size());
+        for (const PdfValue& item : contents.Array()) mixStream(Resolve(item));
     } else {
         mixStream(contents);
     }

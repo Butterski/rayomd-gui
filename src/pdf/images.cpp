@@ -25,12 +25,12 @@ bool ReadFilter(const PdfFile& file, const PdfRawStream& raw, Filter& filter, co
     parms = raw.decodeParms;
     const PdfValue* name = raw.filter;
     if (name && name->IsArray()) {
-        if (name->items.size() > 1) {
+        if (name->Array().size() > 1) {
             SetReason(reason, "filter:chain");
             return false;
         }
-        name = name->items.empty() ? nullptr : &file.Resolve(name->items[0]);
-        if (parms && parms->IsArray()) parms = parms->items.empty() ? nullptr : &file.Resolve(parms->items[0]);
+        name = name->Array().empty() ? nullptr : &file.Resolve(name->Array()[0]);
+        if (parms && parms->IsArray()) parms = parms->Array().empty() ? nullptr : &file.Resolve(parms->Array()[0]);
     }
     if (!name || name->IsNull()) return true;
     if (name->IsName("FlateDecode") || name->IsName("Fl")) {
@@ -49,12 +49,12 @@ bool ReadFilter(const PdfFile& file, const PdfRawStream& raw, Filter& filter, co
 int ColorComponents(const PdfFile& file, const PdfValue& space, std::string* reason) {
     const PdfValue& cs = file.Resolve(space);
     std::string_view family = cs.Name();
-    if (cs.IsArray() && !cs.items.empty()) family = file.Resolve(cs.items[0]).Name();
+    if (cs.IsArray() && !cs.Array().empty()) family = file.Resolve(cs.Array()[0]).Name();
     if (family == "DeviceGray" || family == "G" || family == "CalGray") return 1;
     if (family == "DeviceRGB" || family == "RGB" || family == "CalRGB") return 3;
     if (family == "DeviceCMYK" || family == "CMYK") return 4;
-    if (family == "ICCBased" && cs.items.size() >= 2) {
-        const int64_t n = file.Get(cs.items[1], "N").Int(0);
+    if (family == "ICCBased" && cs.Array().size() >= 2) {
+        const int64_t n = file.Get(cs.Array()[1], "N").Int(0);
         if (n == 1 || n == 3 || n == 4) return static_cast<int>(n);
     }
     SetReason(reason, "colorspace:" + std::string(family.empty() ? std::string_view("?") : family));
