@@ -257,6 +257,7 @@ struct Canvas::Impl::SolidSink final : SpanSink {
     void Span(int y, int x0, int w, const uint8_t* alpha) override {
         c.SolidRow(y, x0, w, c.Masked(alpha, y, x0, w), color);
     }
+    bool Splittable() const override { return true; }
 };
 
 struct Canvas::Impl::GradientSink final : SpanSink {
@@ -446,6 +447,7 @@ struct Canvas::Impl::SamplesSink final : SpanSink {
                               static_cast<size_t>(a - s.rect.x0);
         c.SpanRow(y, a, b - a, src, cov, s.opaque && opacity == 255);
     }
+    bool Splittable() const override { return true; }
 };
 
 namespace {
@@ -453,6 +455,7 @@ namespace {
 struct MaskSink final : SpanSink {
     MaskBuffer& m;
     explicit MaskSink(MaskBuffer& mask) : m(mask) {}
+    bool Splittable() const override { return true; }
     void Span(int y, int x0, int w, const uint8_t* alpha) override {
         if (y < m.bounds.y0 || y >= m.bounds.y1) return;
         const int a = std::max(x0, m.bounds.x0), b = std::min(x0 + w, m.bounds.x1);

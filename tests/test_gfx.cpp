@@ -954,6 +954,80 @@ RGUI_TEST("gfx.raster_random_triangles") {
 
 namespace {
 
+// A Grid that takes rows in pieces, counting them.
+struct SplitGrid final : SpanSink {
+    Grid grid;
+    size_t spans = 0;
+    explicit SplitGrid(RectI c) : grid(c) {}
+    void Span(int y, int x0, int width, const uint8_t* alpha) override {
+        spans++;
+        grid.Span(y, x0, width, alpha);
+    }
+    bool Splittable() const override { return true; }
+};
+
+} // namespace
+
+// A Splittable sink gets the coverage a whole-row sink gets, in more pieces where long rows have
+// runs of zero coverage: stroked boxes, rows of shapes with gaps, shapes open past the clip's
+// right edge, both fill rules, clips of several widths and offsets.
+RGUI_TEST("gfx.raster_split_rows") {
+    uint64_t state = 0x6A09E667F3BCC908ull;
+    const auto unit = [&] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return static_cast<float>(state >> 40) / 16777216.0f;
+    };
+    bool same = true, split = false;
+    for (int round = 0; round < 300 && same; ++round) {
+        const int width = 64 + static_cast<int>(unit() * 5000), height = 1 + static_cast<int>(unit() * 60);
+        const RectI clip{static_cast<int>(unit() * 100) - 50, static_cast<int>(unit() * 20), 0, 0};
+        const RectI c{clip.x0, clip.y0, clip.x0 + width, clip.y0 + height};
+        Path p;
+        const int shapes = 1 + static_cast<int>(unit() * 12);
+        for (int s = 0; s < shapes; ++s) {
+            const float x = c.x0 - 20 + unit() * (width + 40), y = c.y0 - 5 + unit() * (height + 10);
+            const float w = unit() * width, h = unit() * height + 1;
+            const int kind = static_cast<int>(unit() * 3);
+            if (kind == 0) {
+                // A box outline: outer and inner contours.
+                const float t = 0.3f + unit() * 3;
+                p.AddRect(x, y, w + 2 * t, h + 2 * t);
+                p.MoveTo(x + t, y + t);
+                p.LineTo(x + t, y + t + h);
+                p.LineTo(x + t + w, y + t + h);
+                p.LineTo(x + t + w, y + t);
+                p.Close();
+            } else if (kind == 1) {
+                p.MoveTo(x, y);
+                p.LineTo(x + w, y + unit() * h);
+                p.LineTo(x + unit() * w, y + h);
+                p.Close();
+            } else {
+                p.AddRect(x, y, w, h);
+            }
+        }
+        for (const FillRule rule : {FillRule::NonZero, FillRule::EvenOdd}) {
+            Rasterizer r;
+            r.Reset(c);
+            r.AddPath(p, {});
+            Grid whole(c);
+            r.Sweep(rule, whole);
+            r.Reset(c);
+            r.AddPath(p, {});
+            SplitGrid pieces(c);
+            r.Sweep(rule, pieces);
+            same = same && whole.a == pieces.grid.a && !whole.outside && !pieces.grid.outside;
+            split = split || pieces.spans > static_cast<size_t>(height);
+        }
+    }
+    CHECK(same);
+    CHECK(split);
+}
+
+namespace {
+
 // Segments of a flattening, and the rasterizer fed segment by segment: no culling.
 struct CountLines final : LineSink {
     Rasterizer* raster = nullptr;
