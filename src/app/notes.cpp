@@ -153,7 +153,7 @@ void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& opt
     // engine reads (EmbedSet's limits).
     struct Note {
         std::string folder;
-        std::string text;
+        std::shared_ptr<const std::string> text;   // the engine's note cache shares it
         int depth;
     };
     std::deque<Note> notes;
@@ -170,13 +170,12 @@ void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& opt
             }
             // Stamped before it is read: a change after this shows as one.
             watched_.push_back({file, RayoMd::File::StampOf(file)});
-            Note note;
+            if (budget == 0) return;
             RayoMd::File::FileIdentity identity;
-            if (budget > 0 && vault.Read(path, budget, note.text, identity)) {
-                budget -= std::min(budget, note.text.size());
-                note.folder = std::string(TinyPdf::Internal::ParentOf(path));
-                note.depth = depth + 1;
-                notes.push_back(std::move(note));
+            std::shared_ptr<const std::string> read = vault.Read(path, budget, identity);
+            if (read) {
+                budget -= std::min(budget, read->size());
+                notes.push_back({std::string(TinyPdf::Internal::ParentOf(path)), std::move(read), depth + 1});
             }
         });
     };
@@ -184,7 +183,7 @@ void EmbedWatch::Resolve(const std::string& text, const TinyPdf::PdfOptions& opt
     while (!notes.empty() && watched_.size() < kMaxWatched) {
         Note note = std::move(notes.front());
         notes.pop_front();
-        visit(note.text, note.folder, note.depth);
+        visit(*note.text, note.folder, note.depth);
     }
 }
 
