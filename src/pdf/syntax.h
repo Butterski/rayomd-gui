@@ -16,14 +16,22 @@ namespace rgui::pdf::syntax {
 // Arrays and dictionaries nest at most this deep; a deeper value fails.
 constexpr int kMaxDepth = 64;
 
-inline bool IsWhite(unsigned char c) {
-    return c == 0 || c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == ' ';
-}
-inline bool IsDelimiter(unsigned char c) {
-    return c == '(' || c == ')' || c == '<' || c == '>' || c == '[' || c == ']' || c == '{' ||
-           c == '}' || c == '/' || c == '%';
-}
-inline bool IsRegular(unsigned char c) { return !IsWhite(c) && !IsDelimiter(c); }
+// The classes of the 256 bytes, one load per test: white space (NUL, HT, LF, FF, CR, space) and
+// delimiters; the rest are regular characters.
+struct ByteClasses {
+    static constexpr uint8_t kWhite = 1;
+    static constexpr uint8_t kDelimiter = 2;
+    uint8_t of[256] = {};
+    constexpr ByteClasses() {
+        for (int c : {0, 9, 10, 12, 13, 32}) of[c] = kWhite;
+        for (char c : {'(', ')', '<', '>', '[', ']', '{', '}', '/', '%'}) of[static_cast<unsigned char>(c)] = kDelimiter;
+    }
+};
+inline constexpr ByteClasses kByteClasses;
+
+inline bool IsWhite(unsigned char c) { return (kByteClasses.of[c] & ByteClasses::kWhite) != 0; }
+inline bool IsDelimiter(unsigned char c) { return (kByteClasses.of[c] & ByteClasses::kDelimiter) != 0; }
+inline bool IsRegular(unsigned char c) { return kByteClasses.of[c] == 0; }
 // The first byte of a number: a digit, a sign or a decimal point.
 inline bool StartsNumber(unsigned char c) { return (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'; }
 
