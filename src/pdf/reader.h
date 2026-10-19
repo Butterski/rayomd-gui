@@ -102,6 +102,11 @@ public:
     // the hash of the object it names (each object hashed once per file) and the /Parent entry
     // of dictionaries left out. Object numbers never enter it.
     PdfHash ValueHash(const PdfValue& value) const;
+    // Takes over the ObjectHash of every object `previous` (an earlier build of the same
+    // document) hashed whose bytes this file holds unchanged under the same object number and
+    // whose references took the same hashes here: font programs and their dictionaries, images,
+    // are then neither parsed nor read again for a page's key. Call it before the file is shared.
+    void InheritHashes(const PdfFile& previous) const;
 
     int PageCount() const { return pageCount_; }
     // The page's dictionary.
@@ -128,8 +133,9 @@ private:
     PdfFile();
     bool ReadXref(std::string* error);
     bool ReadPages(std::string* error);
-    // Needs parsing_->mutex held; values go to its arena.
-    bool ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out) const;
+    // Needs parsing_->mutex held; values go to its arena. `extent` (when given) gets where the
+    // bytes that decided the parse end, or 0 when it also read bytes elsewhere.
+    bool ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out, size_t* extent = nullptr) const;
     bool StreamEnd(size_t start, size_t& end) const;
     bool GenerationMatches(const PdfValue& ref) const;
     PdfHash ObjectHash(uint32_t num, HashContext& context) const;

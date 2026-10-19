@@ -200,6 +200,25 @@ void SetError(std::string* error, std::string_view text) {
     if (error) error->assign(text.data(), text.size());
 }
 
+// An object whose hash follows more references than this is not inherited (InheritHashes).
+constexpr size_t kMaxInheritRefs = 1u << 16;
+
+// The references in `value` that ValueHash follows (none under /Parent); false past `limit` of
+// them (values nest at most syntax::kMaxDepth deep).
+bool References(const PdfValue& value, std::vector<PdfValue>& out, size_t limit) {
+    if (value.IsRef()) {
+        out.push_back(value);
+        return out.size() <= limit;
+    }
+    for (const PdfValue& item : value.Array()) {
+        if (!References(item, out, limit)) return false;
+    }
+    for (const PdfDictEntry& entry : value.Entries()) {
+        if (entry.key != "Parent" && !References(entry.value, out, limit)) return false;
+    }
+    return true;
+}
+
 // A non-negative decimal integer token: digits only, at most INT64_MAX (what ParseNumber reads as
 // an Int without a sign).
 bool ReadUnsigned(std::string_view token, uint64_t& out) {
@@ -236,6 +255,10 @@ struct PdfFile::Slot {
     bool assigned = false;  // set by the newest cross-reference section naming the object
     bool used = false;      // an in-use entry ('n') within the file
     std::atomic<const PdfValue*> value{nullptr};
+    // Where the bytes that decided the parse of `value` end (set before `value` is published);
+    // 0 when the parse also depended on bytes elsewhere (a /Length by reference, a stream end
+    // found by searching).
+    size_t extent = 0;
     // ObjectHash once known (`hashed` set after both halves).
     std::atomic<uint64_t> hashLo{0};
     std::atomic<uint64_t> hashHi{0};
@@ -263,6 +286,17 @@ struct PdfFile::Parsing {
     std::mutex mutex;
     PdfArena arena;
     syntax::Builder builder;
+    // The objects whose ObjectHash is known and whose parse depended on their own bytes only
+    // (Slot::extent), with what InheritHashes needs of them: those bytes' length from the
+    // object's offset and the references the hash followed (refs[firstRef, firstRef + refCount)).
+    struct Known {
+        uint32_t num;
+        uint32_t refCount;
+        size_t length;
+        size_t firstRef;
+    };
+    std::vector<Known> known;
+    std::vector<PdfValue> refs;
 };
 
 PdfFile::PdfFile() : parsing_(std::make_unique<Parsing>()) {}
@@ -487,7 +521,8 @@ bool PdfFile::StreamEnd(size_t start, size_t& end) const {
     return true;
 }
 
-bool PdfFile::ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out) const {
+bool PdfFile::ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out, size_t* extent) const {
+    if (extent) *extent = 0;
     const Slot& slot = slots_[num];
     Cursor c{bytes_, static_cast<size_t>(slot.offset)};
     syntax::SkipSpace(c);
@@ -500,18 +535,32 @@ bool PdfFile::ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out) con
     if (syntax::ReadToken(c) != "obj") return false;
     syntax::SkipSpace(c);
     if (!syntax::ParseValue(c, syntax::Mode::File, 0, parsing_->builder, out)) return false;
-    if (out.type != PdfValue::Type::Dict) return true;
+    // The value, then "endobj": all that decided the parse (a reference's look-ahead stops at it).
+    const auto ended = [&](Cursor at) {
+        syntax::SkipSpace(at);
+        if (extent && syntax::ReadToken(at) == "endobj") *extent = at.pos;
+    };
+    if (out.type != PdfValue::Type::Dict) {
+        ended(c);
+        return true;
+    }
+    const Cursor afterValue = c;
     syntax::SkipSpace(c);
-    if (syntax::ReadToken(c) != "stream") return true;
+    if (syntax::ReadToken(c) != "stream") {
+        ended(afterValue);
+        return true;
+    }
     // The data begins after the end of line of "stream": CR LF or LF (a lone CR tolerated).
     if (c.Peek() == '\r') c.pos++;
     if (c.Peek() == '\n') c.pos++;
     const size_t start = c.pos;
 
     int64_t length = -1;
+    bool direct = false;
     if (const PdfValue* entry = out.Find("Length")) {
         if (entry->type == PdfValue::Type::Int) {
             length = entry->integer;
+            direct = true;
         } else if (entry->IsRef() && resolveLength && entry->refNum != 0 && GenerationMatches(*entry)) {
             // Parsed apart from the object cache, without following a /Length of its own, so
             // that two streams naming each other cannot recurse.
@@ -528,6 +577,8 @@ bool PdfFile::ParseObjectAt(uint32_t num, bool resolveLength, PdfValue& out) con
         syntax::SkipWhite(after);
         found = syntax::ReadToken(after) == "endstream";
         end = start + static_cast<size_t>(length);
+        // Data whose length the stream itself gives and "endstream" after it.
+        if (found && direct && extent) *extent = after.pos;
     }
     if (!found && !StreamEnd(start, end)) return false;
     out.type = PdfValue::Type::Stream;
@@ -547,8 +598,12 @@ const PdfValue& PdfFile::Object(uint32_t num) const {
     if (known) return *known;
     PdfValue parsed;
     const PdfValue* candidate = &Null();
-    if (ParseObjectAt(num, true, parsed)) {
-        if (void* block = parsing_->arena.Allocate(sizeof(PdfValue))) candidate = new (block) PdfValue(parsed);
+    size_t extent = 0;
+    if (ParseObjectAt(num, true, parsed, &extent)) {
+        if (void* block = parsing_->arena.Allocate(sizeof(PdfValue))) {
+            candidate = new (block) PdfValue(parsed);
+            slot.extent = extent;
+        }
     }
     slot.value.store(candidate, std::memory_order_release);
     return *candidate;
@@ -672,16 +727,24 @@ PdfHash PdfFile::ObjectHash(uint32_t num, HashContext& context) const {
     context.incomplete = false;
     context.stack.push_back(num);
     Hasher hasher;
-    HashInto(Object(num), hasher, context);
+    const PdfValue& value = Object(num);
+    HashInto(value, hasher, context);
     context.stack.pop_back();
     const PdfHash hash = hasher.Finish();
     if (context.incomplete) {
         context.local.emplace(num, hash);
     } else {
-        // Racing threads store the same halves.
+        // Racing threads store the same halves; the first notes what InheritHashes needs.
         slot.hashLo.store(hash.lo, std::memory_order_relaxed);
         slot.hashHi.store(hash.hi, std::memory_order_relaxed);
-        slot.hashed.store(true, std::memory_order_release);
+        std::vector<PdfValue> refs;
+        if (!slot.hashed.exchange(true, std::memory_order_acq_rel) && slot.extent != 0 &&
+            References(value, refs, kMaxInheritRefs)) {
+            std::lock_guard<std::mutex> lock(parsing_->mutex);
+            parsing_->known.push_back({num, static_cast<uint32_t>(refs.size()), slot.extent - static_cast<size_t>(slot.offset),
+                                       parsing_->refs.size()});
+            parsing_->refs.insert(parsing_->refs.end(), refs.begin(), refs.end());
+        }
     }
     context.incomplete = context.incomplete || outerIncomplete;
     return hash;
@@ -692,6 +755,76 @@ PdfHash PdfFile::ValueHash(const PdfValue& value) const {
     Hasher hash;
     HashInto(value, hash, context);
     return hash.Finish();
+}
+
+void PdfFile::InheritHashes(const PdfFile& previous) const {
+    std::vector<Parsing::Known> known;
+    std::vector<PdfValue> refs;
+    {
+        std::lock_guard<std::mutex> lock(previous.parsing_->mutex);
+        known = previous.parsing_->known;
+        refs = previous.parsing_->refs;
+    }
+    // An object takes the hash when its bytes are the same here and every object it refers to
+    // took the same hash: passes until one takes none (references first, then what holds them).
+    enum : uint8_t { kOpen, kSameBytes, kDone };
+    std::vector<uint8_t> state(known.size(), kOpen);
+    for (bool progress = true; progress;) {
+        progress = false;
+        for (size_t i = 0; i < known.size(); i++) {
+            if (state[i] == kDone) continue;
+            const Parsing::Known& k = known[i];
+            const Slot& old = previous.slots_[k.num];
+            if (k.num >= objectCount_ || !slots_[k.num].used || slots_[k.num].gen != old.gen ||
+                slots_[k.num].hashed.load(std::memory_order_acquire)) {
+                state[i] = kDone;
+                continue;
+            }
+            Slot& slot = slots_[k.num];
+            if (state[i] == kOpen) {
+                // Equal bytes from "num gen obj" to where its parse ended: an equal value.
+                if (slot.offset > bytes_.size() || bytes_.size() - slot.offset < k.length ||
+                    std::memcmp(bytes_.data() + slot.offset, previous.bytes_.data() + old.offset, k.length) != 0) {
+                    state[i] = kDone;
+                    continue;
+                }
+                state[i] = kSameBytes;
+            }
+            bool ready = true;
+            bool differs = false;
+            for (size_t r = k.firstRef; r < k.firstRef + k.refCount && !differs; r++) {
+                const PdfValue& ref = refs[r];
+                const bool here = GenerationMatches(ref);
+                if (here != previous.GenerationMatches(ref)) {
+                    differs = true;
+                } else if (here) {
+                    const Slot& target = slots_[ref.refNum];
+                    const Slot& before = previous.slots_[ref.refNum];
+                    if (!before.hashed.load(std::memory_order_acquire)) {
+                        differs = true;
+                    } else if (!target.hashed.load(std::memory_order_acquire)) {
+                        ready = false;
+                    } else {
+                        differs = target.hashLo.load(std::memory_order_relaxed) != before.hashLo.load(std::memory_order_relaxed) ||
+                                  target.hashHi.load(std::memory_order_relaxed) != before.hashHi.load(std::memory_order_relaxed);
+                    }
+                }
+            }
+            if (differs) {
+                state[i] = kDone;
+                continue;
+            }
+            if (!ready) continue;
+            slot.hashLo.store(old.hashLo.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            slot.hashHi.store(old.hashHi.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            slot.hashed.store(true, std::memory_order_release);
+            parsing_->known.push_back({k.num, k.refCount, k.length, parsing_->refs.size()});
+            parsing_->refs.insert(parsing_->refs.end(), refs.begin() + static_cast<std::ptrdiff_t>(k.firstRef),
+                                  refs.begin() + static_cast<std::ptrdiff_t>(k.firstRef + k.refCount));
+            state[i] = kDone;
+            progress = true;
+        }
+    }
 }
 
 const PdfValue& PdfFile::PageDict(int page) const {

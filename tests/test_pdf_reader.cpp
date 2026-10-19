@@ -258,6 +258,71 @@ RGUI_TEST("pdf.page_key_edit") {
     CHECK(fontNumbers(*base) != fontNumbers(*linked));
 }
 
+RGUI_TEST("pdf.inherit_hashes") {
+    // A later build takes over the hashes of the earlier one's unchanged streams: its keys are
+    // those it computes alone, after an edit, after a renumbering (a link), and after a font
+    // program changed under its old object number and length.
+    const std::string head = "# Keys\n\nPage one: żółw and $x^2 + y$.\n\n\\pagebreak\n\n";
+    const std::string baseBytes = Build(head + "Page two text abc.\n");
+    const auto keys = [](const PdfFile& file) {
+        std::vector<rgui::pdf::PdfHash> all;
+        for (int i = 0; i < file.PageCount(); i++) all.push_back(file.PageKey(i));
+        return all;
+    };
+    const auto base = PdfFile::Parse(baseBytes, nullptr);
+    CHECK(base);
+    if (!base) return;
+    const std::vector<rgui::pdf::PdfHash> baseKeys = keys(*base);
+
+    // A byte in the middle of page 1's first embedded font program, flipped.
+    std::string tampered = baseBytes;
+    bool flipped = false;
+    for (const auto& entry : base->Get(base->PageResources(0), "Font").Entries()) {
+        const PdfValue& font = base->Resolve(entry.value);
+        const PdfValue& descendants = base->Get(font, "DescendantFonts");
+        const PdfValue& cid = descendants.IsArray() && !descendants.Array().empty() ? base->Resolve(descendants.Array()[0]) : font;
+        const PdfValue& descriptor = base->Get(cid, "FontDescriptor");
+        for (const char* program : {"FontFile2", "FontFile3"}) {
+            rgui::pdf::PdfRawStream raw;
+            if (flipped || !base->RawStream(base->Get(descriptor, program), raw) || raw.data.size() < 2048) continue;
+            const size_t at = static_cast<size_t>(raw.data.data() - base->Bytes().data()) + raw.data.size() / 2;
+            tampered[at] = static_cast<char>(tampered[at] ^ 0x55);
+            flipped = true;
+        }
+    }
+    CHECK(flipped);
+
+    for (const std::string& later : {Build(head + "Page two text bca.\n"),
+                                     Build(head + "Page two text [abc](https://example.com).\n"), tampered}) {
+        const auto inheriting = PdfFile::Parse(later, nullptr);
+        const auto alone = PdfFile::Parse(later, nullptr);
+        CHECK(inheriting && alone);
+        if (!inheriting || !alone) continue;
+        inheriting->InheritHashes(*base);
+        CHECK(keys(*inheriting) == keys(*alone));
+    }
+    const auto changed = PdfFile::Parse(tampered, nullptr);
+    if (changed) {
+        changed->InheritHashes(*base);
+        CHECK(changed->PageKey(0) != baseKeys[0]);
+    }
+
+    // A chain: each build inherits from the one before, which inherited what it did not hash.
+    std::shared_ptr<const PdfFile> last = base;
+    for (const char* words : {"bca", "abc", "cab", "abc"}) {
+        const std::string bytes = Build(head + "Page two text " + words + ".\n");
+        const auto next = PdfFile::Parse(bytes, nullptr);
+        const auto alone = PdfFile::Parse(bytes, nullptr);
+        CHECK(next && alone);
+        if (!next || !alone) return;
+        next->InheritHashes(*last);
+        CHECK(next->PageKey(0) == alone->PageKey(0));
+        CHECK(keys(*next) == keys(*alone));
+        last = next;
+    }
+    CHECK(keys(*last) == baseKeys);
+}
+
 RGUI_TEST("pdf.reader_objects") {
     const std::vector<std::string> bodies = {
         /* 1 */ "<< /Type /Catalog /Pages 2 0 R >>",

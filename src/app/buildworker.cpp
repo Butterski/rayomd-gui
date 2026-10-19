@@ -318,7 +318,10 @@ void BuildWorker::RunPreview(Job& job) {
         if (!ready.pdf) {
             ready.error = "the preview PDF cannot be read (" + parseError + ")";
         } else {
-            // The pages in view start rendering now; the rest of the result follows.
+            // The pages in view start rendering now; the rest of the result follows. Streams the
+            // last preview hashed (its fonts and images) need not be hashed again for their keys.
+            if (lastPreview_) ready.pdf->InheritHashes(*lastPreview_);
+            lastPreview_ = ready.pdf;
             if (prefetch_) ready.pageKeys = prefetch_(ready.pdf, job.generation);
             std::vector<double> heights(static_cast<size_t>(ready.pdf->PageCount()));
             for (size_t i = 0; i < heights.size(); i++) {
