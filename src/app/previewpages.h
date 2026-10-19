@@ -2,8 +2,12 @@
 // The preview's page images (plan Phase 8 step 5): a pool of preview threads renders the pages
 // of the newest preview PDF with pdf::RenderPage, the pages nearest the viewport first. Images
 // are kept by (PdfFile::PageKey, width) in a 256 MiB LRU, so the pages an edit did not change
-// reuse their images in the next build at once. Until a page's new image is ready, the image it
-// showed before (the previous build's, or another width's) stays on screen. The build worker
+// reuse their images in the next build at once. An image a page showed before an edit (its
+// earlier key at the same width) stays in the cache as one of the kKeptVersions newest such, for
+// an edit undone; beyond them it is dropped as soon as nothing shows it, and its pixel storage
+// goes to the next render (pdf::NewRecycledImage) instead of fresh memory whose page faults cost
+// more than drawing the page. Until a page's new image is ready, the image it showed before (the
+// previous build's, or another width's) stays on screen. The build worker
 // hands each new PDF to Prefetch as soon as it is parsed: the pages the window wanted last start
 // rendering then, and their keys are computed there, off the UI thread.
 //
@@ -21,6 +25,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <list>
 #include <memory>
@@ -46,6 +51,8 @@ public:
     static constexpr size_t kCacheBudget = size_t(256) << 20;
     // Rows of a strip of a tall page.
     static constexpr int kStripRows = 2048;
+    // Images of a page's earlier builds kept in the cache (see above).
+    static constexpr size_t kKeptVersions = 8;
 
     // The strips a page `widthPt` x `heightPt` points is drawn in at `widthPx`: 0 (drawn whole)
     // unless its image (pdf::RenderHeight) is over kStripRows rows and either more than twice
@@ -206,7 +213,13 @@ private:
     // Looks `key` up (moving it to the front); false on a miss. Needs mutex_.
     bool Lookup(const CacheKey& key, std::shared_ptr<const gfx::Image>& image);
     void Insert(const CacheKey& key, std::shared_ptr<const gfx::Image> image);
-    static void Assign(PageSlot& slot, const CacheKey& key, std::shared_ptr<const gfx::Image> image);
+    // Shows `image` (key `key`) on the page or its strip. True, with `replaced`, when it replaces
+    // an image of another key at the same width: an earlier build's (Supersede).
+    static bool Assign(PageSlot& slot, const CacheKey& key, std::shared_ptr<const gfx::Image> image,
+                       CacheKey& replaced);
+    // `key` no longer shown where it was: the oldest beyond kKeptVersions such leave the cache
+    // unless shown elsewhere. Needs mutex_.
+    void Supersede(const CacheKey& key);
     static bool StripCurrent(const PageSlot& slot, int strip);
     // Lays the page's strips out for `widthPx` (`count` of them): those of another width go
     // under the new ones while they have images.
@@ -239,6 +252,8 @@ private:
     std::unordered_map<CacheKey, std::list<CacheEntry>::iterator, CacheKeyHash> cache_;
     size_t cacheBytes_ = 0;
     uint64_t rendered_ = 0;
+    // Keys Supersede noted, the oldest first; a key looked up or inserted again leaves it.
+    std::deque<CacheKey> superseded_;
     uint64_t cancelled_ = 0;
     std::vector<std::thread> threads_;
 };
