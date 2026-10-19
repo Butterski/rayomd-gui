@@ -61,6 +61,15 @@ struct PdfPageKey {
     PdfHash key;
 };
 
+// An empty string for the bytes of the next PDF to build and Parse: with the storage of a dropped
+// PdfFile's bytes when one is kept (the largest; up to kRecycledByteBuffers of them, each at most
+// kRecycledByteCapacity), else none. A preview's PDF of a long document is tens of MB that the
+// system would otherwise map afresh, page by page, for every build (and unmap when the preview
+// before it goes): the build worker takes its output buffer from here. Any thread.
+constexpr size_t kRecycledByteBuffers = 2;
+constexpr size_t kRecycledByteCapacity = size_t(256) << 20;
+std::string RecycledBytes();
+
 class PdfFile {
 public:
     // Reads the cross-reference table from `startxref` and the page tree. Nullptr, with
@@ -72,6 +81,7 @@ public:
     static std::shared_ptr<const PdfFile> Parse(std::string bytes, std::string* error,
                                                 const PdfFile* previous = nullptr);
 
+    // Gives its bytes' storage to RecycledBytes.
     ~PdfFile();
     PdfFile(const PdfFile&) = delete;
     PdfFile& operator=(const PdfFile&) = delete;

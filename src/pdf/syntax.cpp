@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <vector>
 
 namespace rgui::pdf {
 
@@ -30,10 +32,56 @@ const PdfValue* PdfValue::Find(std::string_view key) const {
     return nullptr;
 }
 
+namespace {
+
+// Chunks of the largest regular size (kBigChunk with their header) that arenas dropped, for the
+// next arena: a preview's PDF of a long document fills a few MB of them per parse, which the
+// system would otherwise map afresh every time. At most kKeptChunks; never destroyed (arenas may
+// go during the process's exit).
+constexpr size_t kBigChunk = size_t(1) << 20;
+constexpr size_t kKeptChunks = 16;
+
+struct ChunkPool {
+    std::mutex mutex;
+    std::vector<void*> chunks;
+};
+
+ChunkPool& Chunks() {
+    static ChunkPool* const pool = new ChunkPool;
+    return *pool;
+}
+
+void FreeChunk(void* chunk, size_t size) {
+    if (size == kBigChunk) {
+        ChunkPool& pool = Chunks();
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        if (pool.chunks.size() < kKeptChunks) {
+            pool.chunks.push_back(chunk);
+            return;
+        }
+    }
+    std::free(chunk);
+}
+
+void* NewChunk(size_t bytes) {
+    if (bytes == kBigChunk) {
+        ChunkPool& pool = Chunks();
+        std::lock_guard<std::mutex> lock(pool.mutex);
+        if (!pool.chunks.empty()) {
+            void* chunk = pool.chunks.back();
+            pool.chunks.pop_back();
+            return chunk;
+        }
+    }
+    return std::malloc(bytes);
+}
+
+} // namespace
+
 PdfArena::~PdfArena() {
     while (head_) {
         Chunk* next = head_->next;
-        std::free(head_);
+        FreeChunk(head_, sizeof(Chunk) + head_->size);
         head_ = next;
     }
 }
@@ -43,10 +91,11 @@ void* PdfArena::Allocate(size_t bytes) {
     if (bytes > (size_t(1) << 40)) return nullptr;
     bytes = (bytes + 7) & ~size_t(7);
     if (bytes > static_cast<size_t>(end_ - at_)) {
-        // Chunks double from 4 KiB to 1 MiB; a bigger block gets a chunk of its own size.
-        const size_t grown = std::min<size_t>(std::max<size_t>(head_ ? head_->size * 2 : 0, 4096), size_t(1) << 20);
+        // Chunks double from 4 KiB to 1 MiB with their header; a bigger block gets a chunk of its own.
+        constexpr size_t kLargest = kBigChunk - sizeof(Chunk);
+        const size_t grown = std::min<size_t>(std::max<size_t>(head_ ? head_->size * 2 : 0, 4096), kLargest);
         const size_t size = std::max(grown, bytes);
-        Chunk* chunk = static_cast<Chunk*>(std::malloc(sizeof(Chunk) + size));
+        Chunk* chunk = static_cast<Chunk*>(NewChunk(sizeof(Chunk) + size));
         if (!chunk) return nullptr;
         chunk->next = head_;
         chunk->size = size;
@@ -65,7 +114,7 @@ void PdfArena::Reset() {
     Chunk* rest = head_->next;
     while (rest) {
         Chunk* next = rest->next;
-        std::free(rest);
+        FreeChunk(rest, sizeof(Chunk) + rest->size);
         rest = next;
     }
     head_->next = nullptr;

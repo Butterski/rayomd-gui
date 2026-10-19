@@ -353,10 +353,56 @@ struct PdfFile::Parsing {
     std::vector<PdfValue> refs;
 };
 
+namespace {
+
+// The storage of dropped PdfFiles' bytes (RecycledBytes). Never destroyed: files may be dropped
+// during the process's exit.
+struct BytePool {
+    std::mutex mutex;
+    std::vector<std::string> buffers;
+};
+
+BytePool& Bytes() {
+    static BytePool* const pool = new BytePool;
+    return *pool;
+}
+
+void RecycleBytes(std::string&& bytes) {
+    // Small ones are cheap to allocate; huge ones not worth holding.
+    if (bytes.capacity() < (size_t(64) << 10) || bytes.capacity() > kRecycledByteCapacity) return;
+    bytes.clear();
+    std::string dropped;
+    BytePool& pool = Bytes();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+    if (pool.buffers.size() >= kRecycledByteBuffers) {
+        // The smallest goes (freed after the lock), unless it is this one.
+        auto smallest = std::min_element(pool.buffers.begin(), pool.buffers.end(),
+                                         [](const std::string& a, const std::string& b) { return a.capacity() < b.capacity(); });
+        if (smallest->capacity() >= bytes.capacity()) return;
+        dropped = std::move(*smallest);
+        pool.buffers.erase(smallest);
+    }
+    pool.buffers.push_back(std::move(bytes));
+}
+
+} // namespace
+
+std::string RecycledBytes() {
+    BytePool& pool = Bytes();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+    if (pool.buffers.empty()) return {};
+    auto largest = std::max_element(pool.buffers.begin(), pool.buffers.end(),
+                                    [](const std::string& a, const std::string& b) { return a.capacity() < b.capacity(); });
+    std::string out = std::move(*largest);
+    pool.buffers.erase(largest);
+    return out;
+}
+
 PdfFile::PdfFile() : parsing_(std::make_unique<Parsing>()) {}
 
 PdfFile::~PdfFile() {
     for (int i = 0; i < pageCount_; i++) delete pages_[i].joined.load(std::memory_order_relaxed);
+    RecycleBytes(std::move(bytes_));
 }
 
 std::shared_ptr<const PdfFile> PdfFile::Parse(std::string bytes, std::string* error, const PdfFile* previous) {

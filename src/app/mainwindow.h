@@ -321,6 +321,9 @@ private:
     std::unique_ptr<DocumentLoader> loader_;
     bool previewDirty_ = false;     // changed since the last build started
     bool previewInFlight_ = false;  // a build was started and its result has not come back
+    // The storage the next preview's copy of the text goes into: the text of a build that came
+    // back (PreviewReady::text).
+    std::string spareText_;
     int discardThrough_ = 0;        // results of these generations and older are dropped
     uint64_t budgetTimer_ = 0;      // the build in flight's kPreviewBudgetMs
     bool inFrame_ = false;
