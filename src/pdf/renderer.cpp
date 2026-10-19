@@ -8,10 +8,13 @@
 #include "text/glyphcache.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <limits>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace rgui::pdf {
 
@@ -1377,6 +1380,52 @@ std::shared_ptr<const std::vector<BandIndex::Group>> Kept(std::vector<BandIndex:
     return std::make_shared<const std::vector<BandIndex::Group>>(std::move(groups));
 }
 
+// Pixel storage of dropped render images (NewRecycledImage), for the next render.
+constexpr size_t kRecycledBuffers = 4;
+constexpr size_t kRecycledBufferBytes = 32u << 20;
+
+struct PixelPool {
+    std::mutex mutex;
+    std::vector<std::vector<uint32_t>> buffers;
+};
+
+// Never destroyed: images may be dropped during the process's exit.
+PixelPool& Pixels() {
+    static PixelPool* const pool = new PixelPool;
+    return *pool;
+}
+
+// Storage for `n` pixels: the kept buffer that fits best (at least n, at most a quarter more: a
+// strip's for an A4 page at the same width), else none.
+std::vector<uint32_t> TakePixels(size_t n) {
+    PixelPool& pool = Pixels();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+    size_t best = pool.buffers.size();
+    for (size_t i = 0; i < pool.buffers.size(); i++) {
+        const size_t capacity = pool.buffers[i].capacity();
+        if (capacity >= n && capacity - n <= n / 4 &&
+            (best == pool.buffers.size() || capacity < pool.buffers[best].capacity())) {
+            best = i;
+        }
+    }
+    if (best == pool.buffers.size()) return {};
+    std::vector<uint32_t> out = std::move(pool.buffers[best]);
+    pool.buffers.erase(pool.buffers.begin() + static_cast<std::ptrdiff_t>(best));
+    return out;
+}
+
+void RecyclePixels(std::vector<uint32_t>&& pixels) {
+    if (pixels.capacity() == 0 || pixels.capacity() > kRecycledBufferBytes / sizeof(uint32_t)) return;
+    std::vector<uint32_t> dropped;
+    PixelPool& pool = Pixels();
+    std::lock_guard<std::mutex> lock(pool.mutex);
+    if (pool.buffers.size() >= kRecycledBuffers) {
+        dropped = std::move(pool.buffers.front());  // the oldest, freed after the lock
+        pool.buffers.erase(pool.buffers.begin());
+    }
+    pool.buffers.push_back(std::move(pixels));
+}
+
 // Rows [top, top + rows) of page `page`, MediaBox `box`, at `widthPx`, of the page's `heightPx`
 // (RenderHeight), the band checked against the limits by the caller.
 bool RenderRows(const PdfFile& file, int page, const PdfRect& box, int widthPx, int heightPx, int top, int rows,
@@ -1402,7 +1451,8 @@ bool RenderRows(const PdfFile& file, int page, const PdfRect& box, int widthPx, 
         if (fill) band.fill = &filled;
     }
     const uint64_t pixelBudget = budget.pixels;
-    std::vector<uint32_t> pixels(static_cast<size_t>(bandPixels), 0xFFFFFFFFu);
+    std::vector<uint32_t> pixels = TakePixels(static_cast<size_t>(bandPixels));
+    pixels.assign(static_cast<size_t>(bandPixels), 0xFFFFFFFFu);
     Scratch& scratch = ThreadScratch();
     scratch.glyphs.BeginFrame();
     scratch.canvas.SetTarget(gfx::Surface{pixels.data(), widthPx, rows, widthPx}, top);
@@ -1438,7 +1488,10 @@ bool RenderRows(const PdfFile& file, int page, const PdfRect& box, int widthPx, 
     st.glyphCacheBytes = scratch.glyphs.Bytes();
     switch (budget.stop) {
     case gfx::WorkBudget::Stop::None: break;
-    case gfx::WorkBudget::Stop::Cancelled: st.cancelled = true; return false;
+    case gfx::WorkBudget::Stop::Cancelled:
+        st.cancelled = true;
+        RecyclePixels(std::move(pixels));
+        return false;
     case gfx::WorkBudget::Stop::Geometry: st.AddUnknown("geometry"); break;
     case gfx::WorkBudget::Stop::Pixels:
     case gfx::WorkBudget::Stop::Dashes: st.AddUnknown("budget"); break;
@@ -1502,6 +1555,13 @@ void BandIndex::Fill(std::shared_ptr<const std::vector<Group>> groups) {
     std::lock_guard<std::mutex> lock(mutex_);
     filling_ = false;
     if (groups) groups_ = std::move(groups);
+}
+
+std::shared_ptr<gfx::Image> NewRecycledImage() {
+    return std::shared_ptr<gfx::Image>(new gfx::Image(), [](gfx::Image* image) {
+        RecyclePixels(std::move(image->pixels));
+        delete image;
+    });
 }
 
 size_t BandIndex::Bytes() const {

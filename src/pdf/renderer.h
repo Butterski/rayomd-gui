@@ -176,4 +176,11 @@ private:
 bool RenderPageRows(const PdfFile& file, int page, int widthPx, int top, int rows, gfx::Image& out,
                     RenderStats* stats, const RenderEnvironment& environment, BandIndex* index = nullptr);
 
+// An empty image for RenderPage or RenderPageRows to draw into whose pixel storage, once the
+// last holder drops it, is kept for the next render (a few buffers of up to 32 MiB, the best
+// fitting taken). A raster the size of a page is otherwise fresh memory the system maps page by
+// page as it is first written: about 2,000 page faults and 3-4 ms of system time for an A4 page
+// at 1,200 px, more than drawing it takes. The preview's images come from here.
+std::shared_ptr<gfx::Image> NewRecycledImage();
+
 } // namespace rgui::pdf
