@@ -47,7 +47,7 @@ drawn by the app's own PDF renderer.
 <td width="33%" valign="top">
 
 ### Live
-A keystroke reaches the preview in about **3 ms** in `tester.md`. No waiting timer, and a slow
+A keystroke reaches the preview in about **2 ms** in `tester.md`. No waiting timer, and a slow
 build never holds up typing.
 
 </td>
