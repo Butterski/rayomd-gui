@@ -369,6 +369,9 @@ Rgba Palette::Muted() const { return Color("muted", Foreground()); }
 Rgba Palette::Red() const { return Color("red", Rgba{0xf7, 0x76, 0x8e, 255}); }
 Rgba Palette::Yellow() const { return Color("yellow", Rgba{0xe0, 0xaf, 0x68, 255}); }
 Rgba Palette::Green() const { return Color("green", Rgba{0x9e, 0xce, 0x6a, 255}); }
+Rgba Palette::Blue() const { return Color("blue", Rgba{0x7a, 0xa2, 0xf7, 255}); }
+Rgba Palette::Magenta() const { return Color("magenta", Rgba{0xbb, 0x9a, 0xf7, 255}); }
+Rgba Palette::Cyan() const { return Color("cyan", Rgba{0x7d, 0xcf, 0xff, 255}); }
 
 Palette ResolvePalette(const Toml& colors, bool lightModeFile) {
     Palette palette;

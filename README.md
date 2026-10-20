@@ -176,6 +176,15 @@ moment by a bar beside it, and a double click on a page puts the caret on the Ma
 made it. With *Sync scrolling* (on by default, in the options' Interface section), scrolling
 either pane brings the other to the same place.
 
+The Markdown shows in the theme's colours as you type: headings, list, quote and table markers,
+emphasis delimiters, code spans and fenced code (one colour, the fence's language named), links,
+images and footnotes, formulas, HTML comments, the front matter and, with the Obsidian dialect,
+wiki links. The font, the characters and their cells stay as they are, and the selection keeps
+its own colour. Only the lines in view are coloured, and an edit recolours what it changed: a
+fence typed at the top of a document recolours the lines below it a slice of about 0.2 ms per
+frame, plain until their colours are known. *Syntax colors*, in the options' Interface section,
+turns them off.
+
 Typing helps with the Markdown. Enter continues a list or a quote (`- `, `1. ` counting up,
 `- [ ] `, `> `, at the same indentation) and Enter on an empty item ends it; Tab and Shift+Tab
 indent and outdent a list item. `Ctrl+I`, or the footer's insert button, opens a list at the caret:
@@ -265,8 +274,9 @@ where startup's time went; the end-to-end tests run it on headless compositors.
 
 Measured on 2026-10-20 on Linux with an AMD Ryzen 5 PRO 4650GE in an Arch Linux container, pinned
 to six cores, on headless Wayland compositors (medians of three runs; the keystroke rows with the
-engine's incremental preview builds, `TinyPdf::BuildSession`, before: 1.3.4 in the same test),
-and on Windows on GitHub's runners (the CI runs of 2026-10-19 and 2026-10-20).
+engine's incremental preview builds, `TinyPdf::BuildSession`, before: 1.3.4 in the same test;
+the editor rows with syntax colours, medians of 12 runs, 1.3.4 in the same runs), and on Windows
+on GitHub's runners (the CI runs of 2026-10-19 and 2026-10-20).
 
 | Measure | Result |
 |---|---:|
@@ -274,8 +284,10 @@ and on Windows on GitHub's runners (the CI runs of 2026-10-19 and 2026-10-20).
 | The same, 8 copies (42 KB, 40 pages) | 1.9 / 2.8 ms (3.2 / 3.8) |
 | The same, 70 copies (364 KB, 350 pages) | 3.7 / 5.3 ms (9.3 / 11.0) |
 | The same, 700 copies (3.6 MB, 3,500 pages; the build worker's part is 17 ms; p99 is the first keystroke after a whole build) | 19 / 40 ms (75 / 102) |
-| One keystroke in a 1 MiB document, editor and drawing, median / p99 | 0.17 / 0.22 ms |
-| A frame while the preview / the editor scrolls, 1788×1097 window, 40 pages, median / p99 | 2.8 / 4.1 ms, 2.9 / 3.7 ms |
+| One keystroke in a 1 MiB document, editor and drawing, median / p99 | 0.15 / 0.20 ms (1.3.4: 0.17 / 0.20) |
+| A frame while the preview / the editor scrolls, 1788×1097 window, 40 pages, median / p99 | 3.1 / 4.0 ms, 3.1 / 3.8 ms (1.3.4: 3.0 / 3.8, 3.1 / 3.7) |
+| Syntax colours of a 10 MiB document (363,111 lines): its first scan, or after a fence typed at its top | 85 frames of at most 0.18 ms, 15 ms in all |
+| Syntax colours' memory and size | 2 bytes a line (0.8 MiB for 10 MiB) and the lines in view; 48 KB of program |
 | Frames on Windows runners | one at each refresh of their 64 Hz display (15.6 ms apart) |
 | Page 1 of `tester.md` at 1,200 px, first time / with warm caches | 6.5 / 1.1 ms |
 | A 210 × 5080 mm page at 1,200 px (29,042 rows, 15 strips), its first strip / an A4 page whole, new preview thread / all 15 strips | 3.0 / 1.3 / 38 ms |
@@ -285,9 +297,12 @@ and on Windows on GitHub's runners (the CI runs of 2026-10-19 and 2026-10-20).
 A keystroke used to wait 80 ms for typing to pause (84 ms in `tester.md`); a build that is no
 longer wanted is now abandoned, so quitting during the 3.6 MB build takes 25 ms. On Windows,
 animated scrolling used to wait on a 16 ms timer, which the system clock's 15.6 ms ticks turn
-into 31 ms; frames now come at each refresh of the display. The tests `bench.preview_latency`,
-`bench.typing` and `bench.scroll` print these numbers, `pdf.golden` and `pdf.preview_strips` the
-page renders', `win32.frame_pacer` the Windows frame rate; `--snapshot` prints the startup ones.
+into 31 ms; frames now come at each refresh of the display. A keystroke is quicker with syntax
+colours than without them in 1.3.4: each colour's glyphs cover only their own tiles of the
+compositor, where a row's text used to span the pane. The tests `bench.preview_latency`,
+`bench.typing`, `bench.scroll` and `bench.highlight` print these numbers (`RGUI_SYNTAX_COLORS=0`
+runs the first three without syntax colours), `pdf.golden` and `pdf.preview_strips` the page
+renders', `win32.frame_pacer` the Windows frame rate; `--snapshot` prints the startup ones.
 
 ## Boundaries
 
@@ -296,7 +311,9 @@ page renders', `win32.frame_pacer` the Windows frame rate; `--snapshot` prints t
 > not render is in its [README](https://github.com/Butterski/rayomd#features) and
 > [Native Markdown Support](https://github.com/Butterski/rayomd/wiki/Native-Markdown-Support).
 
-- The editor is plain text, without Markdown highlighting; the preview shows the formatting.
+- The editor colours a Markdown subset, its rules in `src/ui/markdownhighlight.h`: inline syntax
+  never spans lines, indented code and HTML blocks are not recognised, and fenced code takes one
+  colour, not its language's.
 - Linux needs a Wayland desktop; there is no X11 backend. x86-64 only.
 - URL images are fetched on Windows only: the Linux program links no libcurl, so they show their
   alt text there.

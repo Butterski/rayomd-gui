@@ -88,6 +88,9 @@ struct Palette {
     Rgba Red() const;
     Rgba Yellow() const;
     Rgba Green() const;
+    Rgba Blue() const;
+    Rgba Magenta() const;
+    Rgba Cyan() const;
 };
 
 // resolve_theme_colors and resolve_theme_mode of bin/omarchy-theme-color over parsed colors.toml

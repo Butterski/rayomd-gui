@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Markdown editor: a TextBuffer on a cell grid (the interface family, soft-wrapped), with
-// caret, selection, word motions, mouse selection, clipboard, undo/redo and IME preedit. No
-// highlighting: the preview shows the formatting. Enter continues list items and quotes and Tab
-// indents list items (ui/markdownedit.h), each as one undo group. Metrics follow omawrite
-// (src/Main.qml): 140 % line height, 24 px side margins, 16 px top margin, `# Start writing` as the
-// placeholder.
+// caret, selection, word motions, mouse selection, clipboard, undo/redo and IME preedit. Markdown
+// syntax shows in foreground colours only (ui/markdownhighlight.h: same font, cells and characters;
+// the selection's colour wins; the preedit stays plain); the preview shows the formatting. Enter
+// continues list items and quotes and Tab indents list items (ui/markdownedit.h), each as one undo
+// group. Metrics follow omawrite (src/Main.qml): 140 % line height, 24 px side margins, 16 px top
+// margin, `# Start writing` as the placeholder.
 #pragma once
 
 #include "text/textlayout.h"
+#include "ui/markdownhighlight.h"
 #include "ui/textbuffer.h"
 #include "ui/textwrap.h"
 #include "ui/ui.h"
@@ -64,6 +66,20 @@ public:
     bool SettleWrap(size_t bytes) { return wrap_.Settle(buffer_, bytes); }
     // How far an edit rewraps past itself before cutting (WrapLayout::SetEditBudget).
     void SetWrapEditBudget(size_t bytes) { wrap_.SetEditBudget(bytes); }
+
+    // ---- Syntax colours ---------------------------------------------------------------------
+    // On by default. Off, the highlighter holds nothing and rows draw as they did without it.
+    void SetSyntaxColors(bool on);
+    bool SyntaxColors() const { return syntaxColors_; }
+    // Wiki links and embeds coloured (Obsidian's dialect).
+    void SetWikiLinks(bool on) { highlight_.SetWikiLinks(on); }
+    const MarkdownHighlighter& Highlighter() const { return highlight_; }
+    // The work units Frame gives the highlighter's scan, and the line bytes its view may
+    // tokenize, per frame (MarkdownHighlighter::kFrameBudget, kViewBudget; tests set small ones).
+    void SetHighlightBudgets(size_t scan, size_t view) {
+        highlightBudget_ = scan;
+        viewBudget_ = view;
+    }
 
     // ---- Text -------------------------------------------------------------------------------
     // Replaces the text (CRLF and CR become LF, malformed UTF-8 U+FFFD); clears undo, the
@@ -264,8 +280,14 @@ private:
     bool pressed_ = false;        // PressedThisFrame
     float zoomWheel_ = 0;
     double lastAutoScroll_ = 0;
-    // The glyphs of a row being drawn, normal and selected.
-    std::vector<GlyphInstance> glyphs_[2];
+    // The glyphs of a row being drawn, by colour: kSyntaxRoleCount roles, then the selected ones.
+    static constexpr int kSelectedSlot = kSyntaxRoleCount;
+    std::vector<GlyphInstance> glyphs_[kSyntaxRoleCount + 1];
+
+    MarkdownHighlighter highlight_;
+    bool syntaxColors_ = true;
+    size_t highlightBudget_ = MarkdownHighlighter::kFrameBudget;
+    size_t viewBudget_ = MarkdownHighlighter::kViewBudget;
 };
 
 } // namespace rgui::ui

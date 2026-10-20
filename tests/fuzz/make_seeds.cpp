@@ -309,6 +309,18 @@ int main(int argc, char** argv) {
     Write("markdown", "typing.md",
           "---\ntitle: x\n---\n# One ##\n\n- a\n  - [ ] b\n    1. c\n> > [!NOTE]\n> - d\n```py\n# no\n```\n"
           "~~~~\n~~~\n## Two\n\t3) e\n- - -\n```\n[[#One]] [[\n");
+    // The highlighter's: a text, a NUL, then edits of five bytes (position, removed bytes,
+    // inserted bytes, budget) and their inserted bytes.
+    const std::string syntax =
+        "---\ntitle: x\n---\n# H *a* `b` [l](u \"t\") ![i](p) [[w|x]] $m$ <https://x> www.y.z\n"
+        "Title\n===\na | b\n--|--\nc | `|`\n> [!NOTE]\n> q **s** ~~t~~ _u_ \\* [^1]\n"
+        "```js\nx = *1*\n```\n$$\nx^2\n$$\n\\[ y \\]\n- [ ] t\n1. o\n[r]: /u\n<!-- c -->\n";
+    Write("highlight", "syntax.md", syntax);
+    Write("highlight", "edits.md",
+          syntax + std::string(1, '\0') + std::string("\x01\x00\x00\x04\x10```\n", 9) +
+              std::string("\x00\x40\x05\x00\x01", 5) + std::string("\x00\x02\x00\x02\xff$$", 7) +
+              std::string("\x00\x00\x00\x04\x08---\n", 9));
+    Write("highlight", "tester.md", Read(source / "external/rayomd/tester.md"));
     CopyDir("xkb", source / "tests/data/xkb", ".xkb");
     Write("compose", "Compose", Read(source / "tests/data/xkb/compose/Compose"));
     Write("compose", "self.Compose", Read(source / "tests/data/xkb/compose/locale/self.Compose"));

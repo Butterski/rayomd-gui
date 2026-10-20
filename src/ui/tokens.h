@@ -101,7 +101,22 @@ struct DerivedColors {
     Rgba scrim;                 // background at 0.5
     Rgba scrollbarThumb;        // foreground at 0.25
     Rgba scrollbarThumbActive;  // foreground at 0.4
+    // The editor's Markdown syntax colours (ui/markdownhighlight.h's roles), each readable on the
+    // background: a palette colour under kMinSyntaxContrast is mixed toward the foreground until
+    // it passes (ReadableOn).
+    Rgba syntaxMarker;          // mutedText
+    Rgba syntaxHeading;         // accent
+    Rgba syntaxCode;            // green
+    Rgba syntaxLink;            // blue
+    Rgba syntaxUrl;             // cyan
+    Rgba syntaxMath;            // magenta
+    Rgba syntaxInfo;            // yellow
+    Rgba syntaxComment;         // mutedText
 };
+
+// The contrast every syntax colour keeps with the background (WCAG 2's ratio for large text and
+// interface components).
+constexpr double kMinSyntaxContrast = 3.0;
 
 struct Tokens {
     FontSizes font;
@@ -153,5 +168,9 @@ Toml MergedShellValues(const Palette& palette, const TokenSources& sources);
 
 // WCAG 2 contrast ratio of two opaque colours, 1..21.
 double ContrastRatio(Rgba a, Rgba b);
+
+// `color`, or when its contrast with `background` is under `minContrast`, `color` mixed toward
+// `foreground` a quarter at a time until it passes (`foreground` itself at the end).
+Rgba ReadableOn(Rgba color, Rgba background, Rgba foreground, double minContrast);
 
 } // namespace rgui::ui

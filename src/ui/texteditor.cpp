@@ -18,6 +18,14 @@ constexpr int kDefaultWrapCells = 80;
 
 TextEditor::TextEditor() {
     wrap_.Reset(buffer_, kDefaultWrapCells);
+    highlight_.Reset(buffer_);
+}
+
+void TextEditor::SetSyntaxColors(bool on) {
+    if (on == syntaxColors_) return;
+    syntaxColors_ = on;
+    if (on) highlight_.Reset(buffer_);
+    else highlight_.Clear();
 }
 
 // ---- Text -----------------------------------------------------------------------------------
@@ -25,6 +33,7 @@ TextEditor::TextEditor() {
 void TextEditor::SetText(std::string_view text) {
     buffer_.SetText(NormalizeEditorText(text));
     wrap_.Reset(buffer_, wrap_.WrapCells());
+    if (syntaxColors_) highlight_.Reset(buffer_);
     caret_ = anchor_ = 0;
     atRowEnd_ = false;
     desiredCol_ = -1;
@@ -51,6 +60,7 @@ void TextEditor::Apply(size_t pos, size_t len, std::string_view bytes) {
     buffer_.Insert(edit.pos, bytes);
     edit.newLastLine = edit.firstLine + static_cast<size_t>(std::count(bytes.begin(), bytes.end(), '\n'));
     wrap_.OnEdit(buffer_, edit);
+    if (syntaxColors_) highlight_.OnEdit(buffer_, edit);
 }
 
 void TextEditor::Changed() {
@@ -774,6 +784,8 @@ void TextEditor::Frame(Context& ctx, RectF rect) {
     // A line an edit left cut is rewrapped a budget a frame, the frames going on until it is
     // done.
     if (wrap_.Pending() && wrap_.Settle(buffer_, kSettleBytes)) ctx.RequestAnimation();
+    // Likewise the syntax states an edit or a new text left unknown; settled, nothing runs.
+    if (syntaxColors_ && highlight_.Pending() && highlight_.Settle(buffer_, highlightBudget_)) ctx.RequestAnimation();
 
     // Keys, clicks and auto-scroll move the view at once; the wheel eases.
     scroll_.SetMax(MaxScrollY());
@@ -847,6 +859,14 @@ void TextEditor::Draw(Context& ctx, RectF rect, bool focused) {
         const float baseline = ctx.SnapToDevice(y + (lineHeight_ - ascent_ - descent_) / 2 + ascent_);
         ctx.DrawText("# Start writing", rect.x + kEditorPadX, baseline, fontSize_, colors.mutedText);
     } else {
+        // The syntax runs of the lines in view: made for lines that lack them, kept otherwise.
+        if (syntaxColors_ && first < rows) {
+            const size_t shown = static_cast<size_t>((rect.Bottom() - y) / lineHeight_) + 1;
+            size_t firstLine = 0, lastLine = 0, rowInLine = 0;
+            wrap_.LineOfRow(first, firstLine, rowInLine);
+            wrap_.LineOfRow(std::min(rows - 1, first + shown), lastLine, rowInLine);
+            if (highlight_.PrepareView(buffer_, firstLine, lastLine, viewBudget_)) ctx.RequestAnimation();
+        }
         for (size_t row = first; row < rows && y < rect.Bottom(); row++, y += lineHeight_) {
             DrawRow(ctx, rect, row, y, focused);
         }
@@ -892,21 +912,48 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
     const float baseline = static_cast<float>(RayoMd::ExactMath::LlRound(
         (static_cast<double>(y) + (lineHeight_ - ascent_ - descent_) / 2.0 + ascent_) * ctx.Scale()));
     const text::FontFace* main = fonts && fonts->IsLoaded() ? &fonts->Face(false) : nullptr;
-    glyphs_[0].clear();
-    glyphs_[1].clear();
+    // The row's syntax runs (line-relative): the last one starting at or before the row's start,
+    // its role and where the next one starts (absolute; never, without runs).
+    size_t runCount = 0, run = 0, lineStart = 0;
+    const SyntaxRun* runs = syntaxColors_ ? highlight_.Runs(line, runCount) : nullptr;
+    int runSlot = 0;
+    size_t nextRun = static_cast<size_t>(-1);
+    if (runs) {
+        lineStart = buffer_.LineStart(line);
+        const uint32_t from = static_cast<uint32_t>(start - lineStart);
+        run = static_cast<size_t>(std::upper_bound(runs, runs + runCount, from,
+                                                   [](uint32_t at, const SyntaxRun& entry) { return at < entry.start; }) - runs);
+        run = run > 0 ? run - 1 : 0;
+        runSlot = static_cast<int>(runs[run].role);
+        if (run + 1 < runCount) nextRun = lineStart + runs[run + 1].start;
+    }
     // At most kMaxRowBytes of text, and at most kMaxZeroWidthRun marks per cell (CellCursor).
     CellCursor cell;
     const int& col = cell.col;
-    auto place = [&](uint32_t cp, int w, bool selected) {
+    // The colours the row uses (a bit each; their glyph lists are empty otherwise) and, with
+    // syntax colours, each one's leftmost pen and the right end of its advances (device px), for
+    // its bounds.
+    uint32_t used = 0;
+    float slotLeft[kSelectedSlot + 1] = {}, slotRight[kSelectedSlot + 1] = {};
+    auto place = [&](uint32_t cp, int w, int slot) {
         if (!main || cp == ' ' || cp == '\t' || cp < 0x20 || cp == 0x7F) return;
         const text::FontSet::Resolved g = fonts->Resolve(cp, false);
         if (!g.face) return;
         float x = textX + static_cast<float>(col) * colWidth_;
+        float advance = colWidth_;
         if (w > 0 && (g.face != main || w == 2)) {
             // Fallback glyphs and wide code points sit centred in their cells.
-            x += (static_cast<float>(w) * colWidth_ - text::GlyphAdvance(*g.face, g.glyph, fontSize_)) / 2;
+            advance = text::GlyphAdvance(*g.face, g.glyph, fontSize_);
+            x += (static_cast<float>(w) * colWidth_ - advance) / 2;
         }
-        glyphs_[selected ? 1 : 0].push_back({g.face, g.glyph, x * scale, baseline});
+        glyphs_[slot].push_back({g.face, g.glyph, x * scale, baseline});
+        const uint32_t bit = 1u << slot;
+        if (syntaxColors_) {
+            const float left = x * scale, right = (x + std::max(advance, colWidth_)) * scale;
+            slotLeft[slot] = used & bit ? std::min(slotLeft[slot], left) : left;
+            slotRight[slot] = used & bit ? std::max(slotRight[slot], right) : right;
+        }
+        used |= bit;
     };
 
     // The preedit shows at the caret, pushing the rest of the row right, underlined.
@@ -922,7 +969,7 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
                 len = 1;
             }
             const int w = cell.Width(cp);
-            place(cp, w, false);
+            place(cp, w, 0);
             cell.Advance(w);
             i += len;
         }
@@ -938,7 +985,13 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
         const int w = cell.Width(cp);
         const bool selected = p >= selStart && p < selEnd;
         if (selected && selColA < 0) selColA = col;
-        place(cp, w, selected);
+        if (p >= nextRun) {
+            while (run + 1 < runCount && lineStart + runs[run + 1].start <= p) run++;
+            runSlot = static_cast<int>(runs[run].role);
+            nextRun = run + 1 < runCount ? lineStart + runs[run + 1].start : static_cast<size_t>(-1);
+        }
+        const int slot = runSlot;
+        place(cp, w, selected ? kSelectedSlot : slot);
         cell.Advance(w);
         if (selected) selColB = col;
         p += len;
@@ -956,12 +1009,29 @@ void TextEditor::DrawRow(Context& ctx, RectF rect, size_t row, float y, bool foc
             static_cast<float>(selColB - selColA) * colWidth_, lineHeight_}, colors.selection);
     }
 
-    // Glyph ink stays near the row; a quarter line of slack for tall accents.
+    // Glyph ink stays near the row; a quarter line of slack for tall accents. One command per
+    // colour the row uses (at most kSyntaxRoleCount + 1). Without syntax colours, the text's and
+    // the selection's span the row, as before. With them, each command covers its own glyphs from
+    // 1 em left of the first pen (a combining mark's ink reaches back over its base) to 0.5 em past
+    // the farthest advance (a glyph's overhang), so a colour touches only its own tiles and the
+    // compositor's tiles hold fewer commands than one per row across the pane would give them.
     const gfx::RectI ink = ctx.ToDevice({rect.x, y - lineHeight_ * 0.25f, rect.w, lineHeight_ * 1.5f});
-    const uint32_t colorsOut[2] = {ctx.Color(colors.text), ctx.Color(colors.selectedText)};
-    for (int k = 0; k < 2; k++) {
-        if (glyphs_[k].empty()) continue;
-        ctx.List().Glyphs(glyphs_[k].data(), glyphs_[k].size(), fontSize_ * scale, colorsOut[k], &ink);
+    static_assert(kSyntaxRoleCount == 9, "a colour for every SyntaxRole");
+    const Rgba* const roleColors[kSyntaxRoleCount + 1] = {
+        &colors.text,        &colors.syntaxMarker, &colors.syntaxHeading, &colors.syntaxCode,    &colors.syntaxLink,
+        &colors.syntaxUrl,   &colors.syntaxMath,   &colors.syntaxInfo,    &colors.syntaxComment, &colors.selectedText,
+    };
+    const float em = fontSize_ * scale;
+    for (int k = 0; used != 0; k++, used >>= 1) {
+        if (!(used & 1)) continue;
+        std::vector<GlyphInstance>& glyphs = glyphs_[k];
+        gfx::RectI bounds = ink;
+        if (syntaxColors_) {
+            bounds.x0 = std::max(ink.x0, static_cast<int>(RayoMd::ExactMath::Floor(slotLeft[k] - em)));
+            bounds.x1 = std::min(ink.x1, static_cast<int>(RayoMd::ExactMath::Ceil(slotRight[k] + 0.5f * em)));
+        }
+        ctx.List().Glyphs(glyphs.data(), glyphs.size(), em, ctx.Color(*roleColors[k]), &bounds);
+        glyphs.clear();
     }
     if (preeditX1 > preeditX0) {
         ctx.FillRect({preeditX0, y + lineHeight_ - 1, preeditX1 - preeditX0, 1}, colors.text);

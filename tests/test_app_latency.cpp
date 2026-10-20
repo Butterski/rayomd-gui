@@ -4,7 +4,8 @@
 // documents of 1, 8, 70 and 700 copies of tester.md; each sample runs from the key event to the
 // frame in which the preview shows the build of the new text with every visible page (the
 // edited page among them) current. It also sums the UI thread's own time per keystroke (input,
-// frames, posted results; not the time it waits).
+// frames, posted results; not the time it waits). RGUI_SYNTAX_COLORS=0 turns the editor's syntax
+// colours off.
 #include "app_harness.h"
 #include "headless_platform.h"
 #include "runner.h"
@@ -14,7 +15,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #if defined(__has_feature)
@@ -73,9 +76,12 @@ RGUI_TEST("bench.preview_latency") {
     // Sanitized builds check the path, not the time (and run it in rayomd-gui-unit).
     const Row rows[] = {{1, 5}, {8, 5}};
 #else
-    const Row rows[] = {{1, 40}, {8, 40}, {70, 20}, {700, 10}};
+    const Row rows[] = {{1, 100}, {8, 100}, {70, 40}, {700, 20}};
 #endif
-    std::printf("bench.preview_latency: keystroke -> edited page's preview current (real clock, real threads)\n");
+    const char* syntaxEnv = std::getenv("RGUI_SYNTAX_COLORS");
+    const bool syntax = !(syntaxEnv && std::string_view(syntaxEnv) == "0");
+    std::printf("bench.preview_latency: keystroke -> edited page's preview current (real clock, real threads), "
+                "syntax colours %s\n", syntax ? "on" : "off");
     std::printf("  %7s %10s %6s %4s | %21s | %21s | %25s\n", "copies", "bytes", "pages", "n", "before p50 / p99 ms",
                 "after p50 / p99 ms", "UI ms/key before / after");
     for (const Row& row : rows) {
@@ -87,7 +93,7 @@ RGUI_TEST("bench.preview_latency") {
         const fs::path file = h.dir / "doc.md";
         CHECK(RayoMd::File::WriteAll(file, text));
         h.platform.UseRealClock();
-        h.Start("ui.theme=tokyo-night\n", file.u8string());
+        h.Start(syntax ? "ui.theme=tokyo-night\n" : "ui.theme=tokyo-night\nui.syntaxColors=false\n", file.u8string());
         if (!h.Settle(120000)) {
             CHECK(false);
             return;

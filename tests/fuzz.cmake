@@ -10,7 +10,8 @@ list(APPEND RGUI_TEST_SOURCES
     fuzz/fuzz_theme.cpp
     fuzz/fuzz_fontconf.cpp
     fuzz/fuzz_settings.cpp
-    fuzz/fuzz_markdown.cpp)
+    fuzz/fuzz_markdown.cpp
+    fuzz/fuzz_highlight.cpp)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND RGUI_TEST_SOURCES
         fuzz/fuzz_xkb.cpp

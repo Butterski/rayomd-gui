@@ -4,6 +4,7 @@ list(APPEND RGUI_CORE_SOURCES
     ui/displaylist.cpp
     ui/icons.cpp
     ui/markdownedit.cpp
+    ui/markdownhighlight.cpp
     ui/settingsfile.cpp
     ui/texteditor.cpp
     ui/textbuffer.cpp

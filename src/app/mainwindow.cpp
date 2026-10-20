@@ -138,9 +138,11 @@ void MainWindow::LoadSettings(const ui::SettingsFile& file) {
     splitRatio_ = static_cast<float>(ratio);
     optionsVisible_ = file.GetBool("ui.optionsVisible", false);
     syncScroll_ = file.GetBool("ui.syncScroll", true);
+    editor_.SetSyntaxColors(file.GetBool("ui.syntaxColors", true));
     lastDirectory_ = file.GetString("ui.lastDirectory");
     export_.Load(file);
     popup_.SetWikiLinks(export_.dialect == ExportSettings::kObsidian);
+    editor_.SetWikiLinks(export_.dialect == ExportSettings::kObsidian);
     export_.imageCacheDirectory = platform_.ImageCacheDir().u8string();
 }
 
@@ -151,6 +153,7 @@ void MainWindow::StoreSettings(ui::SettingsFile& file) const {
     file.SetDouble("ui.splitRatio", splitRatio_);
     file.SetBool("ui.optionsVisible", optionsVisible_);
     file.SetBool("ui.syncScroll", syncScroll_);
+    file.SetBool("ui.syntaxColors", editor_.SyntaxColors());
     if (lastDirectory_.empty() || !file.SetString("ui.lastDirectory", lastDirectory_)) file.Erase("ui.lastDirectory");
     export_.Store(file);
 }
@@ -161,6 +164,7 @@ void MainWindow::SetOmarchyAvailable(bool available) {
 }
 
 void MainWindow::SetWikiLinks(bool on) {
+    editor_.SetWikiLinks(on);
     if (on == popup_.WikiLinks()) return;
     popup_.SetWikiLinks(on);
     if (!on) {
@@ -589,6 +593,12 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     }
     bool sync = syncScroll_;
     if (ui::Checkbox(ctx, "Sync scrolling", sync, row())) SetSyncScroll(sync);
+    bool syntax = editor_.SyntaxColors();
+    if (ui::Checkbox(ctx, "Syntax colors", syntax, row())) {
+        editor_.SetSyntaxColors(syntax);
+        hooks_.settingsChanged();
+        Dirty();
+    }
 
     height = column.y - top;
     if (changed) {

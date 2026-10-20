@@ -4,6 +4,7 @@
 // seconds, frames every 16.7 ms as a 60 Hz display asks for them; each frame's time is the UI
 // thread's: input, layout, the display list, the compositor's raster of the tiles that changed and
 // the present. Also counts the frames that showed a page of the preview without its current image.
+// RGUI_SYNTAX_COLORS=0 turns the editor's syntax colours off.
 #include "app_harness.h"
 #include "headless_platform.h"
 #include "runner.h"
@@ -13,7 +14,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -102,7 +105,9 @@ RGUI_TEST("bench.scroll") {
     const fs::path file = h.dir / "doc.md";
     CHECK(RayoMd::File::WriteAll(file, text));
     h.platform.UseRealClock();
-    h.Start("ui.theme=tokyo-night\n", file.u8string());
+    const char* syntaxEnv = std::getenv("RGUI_SYNTAX_COLORS");
+    const bool syntax = !(syntaxEnv && std::string_view(syntaxEnv) == "0");
+    h.Start(syntax ? "ui.theme=tokyo-night\n" : "ui.theme=tokyo-night\nui.syntaxColors=false\n", file.u8string());
     constexpr int kWidth = 1788, kHeight = 1097;
     h.app->OnResize(kWidth, kHeight, 1.0);
     if (!h.Settle(120000)) {
@@ -112,8 +117,9 @@ RGUI_TEST("bench.scroll") {
     const ScrollResult preview = Scroll(h, kWidth * 0.75f, kHeight * 0.5f, 1.0f);
     const ScrollResult editor = Scroll(h, kWidth * 0.25f, kHeight * 0.5f, 1.0f);
     CHECK(h.Window().PreviewScroll() > 0);
-    std::printf("bench.scroll: %dx%d, %zu-byte document, %d pages, a notch every 50 ms, 60 frames a second:\n",
-                kWidth, kHeight, text.size(), h.Window().Preview().PageCount());
+    std::printf("bench.scroll: %dx%d, %zu-byte document, %d pages, a notch every 50 ms, 60 frames a second, syntax "
+                "colours %s:\n",
+                kWidth, kHeight, text.size(), h.Window().Preview().PageCount(), syntax ? "on" : "off");
     std::printf("  preview: frame p50 %.2f ms, p99 %.2f ms, max %.2f ms; %d of %zu frames with a page not yet drawn\n",
                 Percentile(preview.frameMs, 0.5), Percentile(preview.frameMs, 0.99),
                 Percentile(preview.frameMs, 1.0), preview.unsettledFrames, preview.frameMs.size());

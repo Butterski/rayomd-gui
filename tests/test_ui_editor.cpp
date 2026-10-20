@@ -908,10 +908,11 @@ RGUI_TEST("ui.editor_many_lines") {
     editor.SetText(std::string(kLines, '\n'));
     CHECK_EQ(editor.Buffer().LineCount(), kLines + 1);
     CHECK_EQ(editor.Wrap().RowCount(), kLines + 1);
-    const size_t bytes = editor.Buffer().LineIndexBytes() + editor.Wrap().MemoryBytes();
+    // The line index, the wrap layout and the syntax states (2 bytes a line).
+    const size_t bytes = editor.Buffer().LineIndexBytes() + editor.Wrap().MemoryBytes() + editor.Highlighter().MemoryBytes();
     std::printf("ui.editor_many_lines: %zu lines, %.2f bytes per line\n", kLines + 1,
         static_cast<double>(bytes) / static_cast<double>(kLines + 1));
-    CHECK(bytes <= (kLines + 1) * 9);
+    CHECK(bytes <= (kLines + 1) * 11);
 
     double now = 0;
     std::vector<double> ms;

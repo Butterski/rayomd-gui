@@ -562,6 +562,14 @@ double ContrastRatio(Rgba a, Rgba b) {
     return la > lb ? (la + 0.05) / (lb + 0.05) : (lb + 0.05) / (la + 0.05);
 }
 
+Rgba ReadableOn(Rgba color, Rgba background, Rgba foreground, double minContrast) {
+    for (const double t : {0.0, 0.25, 0.5, 0.75}) {
+        const Rgba mixed = Mix(color, foreground, t);
+        if (ContrastRatio(mixed, background) >= minContrast) return mixed;
+    }
+    return foreground;
+}
+
 Toml MergedShellValues(const Palette& palette, const TokenSources& sources) {
     Toml merged;
     const Renderer renderer{palette};
@@ -716,6 +724,15 @@ Tokens BuildTokens(const Palette& palette, const TokenSources& sources) {
     c.scrim = bg.WithAlpha(0.5);                                    // shell.toml.tpl [menu] scrim-alpha 0.5
     c.scrollbarThumb = fg.WithAlpha(0.25);                          // ours
     c.scrollbarThumbActive = fg.WithAlpha(0.4);                     // ours: hovered or dragged
+    const auto syntax = [&](Rgba color) { return ReadableOn(color, bg, fg, kMinSyntaxContrast); };
+    c.syntaxMarker = syntax(c.mutedText);                           // ours: markers recede
+    c.syntaxHeading = syntax(accent);                               // ours
+    c.syntaxCode = syntax(palette.Green());                         // ours: ANSI green
+    c.syntaxLink = syntax(palette.Blue());                          // ours: ANSI blue
+    c.syntaxUrl = syntax(palette.Cyan());                           // ours: ANSI cyan
+    c.syntaxMath = syntax(palette.Magenta());                       // ours: ANSI magenta
+    c.syntaxInfo = syntax(palette.Yellow());                        // ours: ANSI yellow
+    c.syntaxComment = syntax(c.mutedText);                          // ours
     return t;
 }
 
