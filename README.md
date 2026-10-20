@@ -54,7 +54,7 @@ build never holds up typing.
 <td width="33%" valign="top">
 
 ### The real PDF
-The preview shows the PDF Export writes, **0.4/255** from poppler's rendering on average over 45
+The preview shows the PDF Export writes, **0.5/255** from poppler's rendering on average over 51
 test pages.
 
 </td>
@@ -70,7 +70,7 @@ apps. 23 Omarchy themes are built in for other desktops.
 <td valign="top">
 
 ### Small
-A **1.4 MB** Linux download and a 1.7 MB Windows download. No browser engine, toolkit or runtime
+A **1.5 MB** Linux download and a 1.9 MB Windows download. No browser engine, toolkit or runtime
 to install.
 
 </td>
@@ -263,25 +263,24 @@ where startup's time went; the end-to-end tests run it on headless compositors.
 
 ## Performance
 
-Measured on 2026-10-15 and 2026-10-16 (the preview's rows on 2026-10-19, the keystroke rows on
-2026-10-20 with the engine's incremental preview builds, `TinyPdf::BuildSession`, after round 6,
-medians of three interleaved runs, before: 1.3.4): on Linux with an AMD
-Ryzen 5 PRO 4650GE in an Arch Linux container, pinned to six cores, on headless Wayland
-compositors; on Windows on GitHub's runners.
+Measured on 2026-10-20 on Linux with an AMD Ryzen 5 PRO 4650GE in an Arch Linux container, pinned
+to six cores, on headless Wayland compositors (medians of three runs; the keystroke rows with the
+engine's incremental preview builds, `TinyPdf::BuildSession`, before: 1.3.4 in the same test),
+and on Windows on GitHub's runners (the CI runs of 2026-10-19 and 2026-10-20).
 
 | Measure | Result |
 |---|---:|
-| Keystroke to the edited page's preview, `tester.md` (5 KB, 5 pages), median / p95 | **1.7 / 2.5 ms** (before 2.5 / 2.9) |
-| The same, 8 copies (42 KB, 40 pages) | 1.8 / 2.6 ms (3.4 / 3.8) |
-| The same, 70 copies (364 KB, 350 pages) | 3.5 / 4.9 ms (10.0 / 10.3) |
-| The same, 700 copies (3.6 MB, 3,500 pages; the build worker's part is 17 ms; p95 is the first keystroke after a whole build) | 19 / 41 ms (78 / 104) |
-| One keystroke in a 1 MiB document, editor and drawing, median | 0.31 ms |
-| A frame while the preview / the editor scrolls, 1788×1097 window, 40 pages, median / p99 | 2.7 / 3.8 ms, 2.6 / 3.8 ms |
-| Scrolling frames a second on Windows runners, before / now | 32 / 64 (every refresh of their 64 Hz display) |
-| Page 1 of `tester.md` at 1,200 px, first time / with warm caches | 6.6 / 1.1 ms |
-| A 210 × 5080 mm page at 1,200 px (29,042 rows, 15 strips), its first strip / an A4 page whole, new preview thread / all 15 strips | 3.3 / 1.4 / 39 ms |
-| Start to first frame / to the preview of `tester.md`, Linux | 12 / 37 ms |
-| The same on Windows runners | 15–26 / 74–161 ms |
+| Keystroke to the edited page's preview, `tester.md` (5 KB, 5 pages), median / p99 | **1.7 / 2.7 ms** (before 2.6 / 3.2) |
+| The same, 8 copies (42 KB, 40 pages) | 1.9 / 2.8 ms (3.2 / 3.8) |
+| The same, 70 copies (364 KB, 350 pages) | 3.7 / 5.3 ms (9.3 / 11.0) |
+| The same, 700 copies (3.6 MB, 3,500 pages; the build worker's part is 17 ms; p99 is the first keystroke after a whole build) | 19 / 40 ms (75 / 102) |
+| One keystroke in a 1 MiB document, editor and drawing, median / p99 | 0.17 / 0.22 ms |
+| A frame while the preview / the editor scrolls, 1788×1097 window, 40 pages, median / p99 | 2.8 / 4.1 ms, 2.9 / 3.7 ms |
+| Frames on Windows runners | one at each refresh of their 64 Hz display (15.6 ms apart) |
+| Page 1 of `tester.md` at 1,200 px, first time / with warm caches | 6.5 / 1.1 ms |
+| A 210 × 5080 mm page at 1,200 px (29,042 rows, 15 strips), its first strip / an A4 page whole, new preview thread / all 15 strips | 3.0 / 1.3 / 38 ms |
+| Start to first frame / to the preview of `tester.md`, Linux (Weston, Sway) | 10–12 / 30–38 ms |
+| The same on Windows runners | 14–29 / 67–161 ms (once 303 ms) |
 
 A keystroke used to wait 80 ms for typing to pause (84 ms in `tester.md`); a build that is no
 longer wanted is now abandoned, so quitting during the 3.6 MB build takes 25 ms. On Windows,
