@@ -96,6 +96,9 @@ public:
     bool maximized = false;
     std::optional<std::filesystem::path> omarchyThemeDir;
     std::optional<std::filesystem::path> omarchyUserShellToml;
+    // While set, tasks posted to the UI thread wait in the queue: a test orders input before a
+    // worker's result that could otherwise overtake it (a frame runs posted tasks before input).
+    bool holdPosted = false;
 
     // --- Platform ---
 

@@ -1430,9 +1430,13 @@ RGUI_TEST("app.image_drop_document_changed") {
     engine.hold = true;
     const fs::path picture = h.dir / "shot.png";
     RayoMd::File::WriteAll(picture, "png");
+    // The copy's result waits until the key is handled: a frame runs posted tasks before input, so
+    // a copy done before the key's frame would put its link into the old document first.
+    h.platform.holdPosted = true;
     h.app->OnDropFile(picture.u8string());
     h.KeyDown(Key::N, rgui::kModCtrl);   // unmodified: a new document at once
     CHECK(w.Doc().filePath.empty());
+    h.platform.holdPosted = false;
     StatusKind kind = StatusKind::Info;
     CHECK(h.RunUntil([&] { return StartsWith(w.ShownStatus(), "Copied "); }));
     CHECK_EQ(w.ShownStatus(&kind),

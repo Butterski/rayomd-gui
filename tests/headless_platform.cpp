@@ -77,6 +77,7 @@ std::vector<HeadlessPlatform::Timer>::iterator HeadlessPlatform::Find(uint64_t i
 }
 
 int HeadlessPlatform::RunPosted() {
+    if (holdPosted) return 0;
     std::deque<std::function<void()>> batch;
     {
         std::lock_guard<std::mutex> lock(mutex_);
