@@ -1255,7 +1255,9 @@ RGUI_TEST("app.buildworker.document_watch") {
     CHECK(quiet());
 
     // Replaced the way agents and editors save: a temporary file renamed over it, of the same size
-    // and modification time; the identity tells.
+    // and modification time; the identity tells. Windows' stamp has no file identity, and
+    // last_write_time sets whole seconds there (MinGW's _wutime): the replacement differs in its
+    // write time, which tells.
     const RayoMd::File::Stamp before = RayoMd::File::StampOf(doc);
     const fs::path temp = dir / ".doc.md.tmp";
     CHECK(RayoMd::File::WriteAll(temp, "# Doc\n\nAn agent's sentence.\n\n"));
@@ -1263,7 +1265,9 @@ RGUI_TEST("app.buildworker.document_watch") {
     fs::rename(temp, doc);
     const RayoMd::File::Stamp after = RayoMd::File::StampOf(doc);
     CHECK_EQ(after.size, before.size);
+#ifndef _WIN32
     CHECK_EQ(after.modified, before.modified);
+#endif
     expect(Kind::Changed, 1);
 
     // A newer watch: its generation. Deleted: told once; a directory in its place; the file back.
