@@ -2,6 +2,8 @@
 // The open document: its Markdown (LF line ends only), where it lives, and how it is saved.
 #pragma once
 
+#include "common/file_io.h"
+
 #include <cstddef>
 #include <string>
 
@@ -22,6 +24,10 @@ public:
     std::string displayName = kUntitledName;  // the file name the title shows
     bool modified = false;    // edited since it was opened or saved
     bool crlf = false;        // the file had CRLF line ends; Save writes them back
+    // The file's stamp (RayoMd::File::StampOf: size, times, identity) when it was opened (taken
+    // before the read, so a write during it shows as a change) or saved (after the rename); all
+    // zero without a file. The build worker compares it with the file on disk (WatchDocument).
+    RayoMd::File::Stamp stamp;
 
     // An empty, unnamed document.
     void New();
@@ -36,8 +42,9 @@ public:
 
     // Writes the text to `path` (UTF-8), with CRLF line ends when `crlf`, through a temporary
     // file renamed over it (WriteFileAtomically, WriteMode::Document: flushed, permissions kept,
-    // written through a symlink). On success the document lives at `path` and is unmodified;
-    // `status` is `Saved <name>`, else `Cannot save <name>` and the document is unchanged.
+    // written through a symlink). On success the document lives at `path`, is unmodified and has
+    // the stamp of the file written; `status` is `Saved <name>`, else `Cannot save <name>` and the
+    // document is unchanged.
     bool Save(const std::string& path, std::string& status);
 
     DocumentStats Stats() const { return ComputeStats(text); }

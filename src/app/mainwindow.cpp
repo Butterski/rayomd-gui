@@ -7,7 +7,9 @@
 #include "ui/widgets.h"
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
+#include <string_view>
 #include <utility>
 
 namespace rgui {
@@ -85,6 +87,34 @@ double Within(double value, double lo, double hi) {
     return value;
 }
 
+// The bytes `a` and `b` begin with alike, and (at most `limit`) end with alike: a reload replaces
+// only what lies between. A block compare first, so a large unchanged document goes at memcmp's
+// speed.
+size_t CommonPrefix(std::string_view a, std::string_view b) {
+    const size_t n = std::min(a.size(), b.size());
+    constexpr size_t kBlock = 64;
+    size_t i = 0;
+    while (i + kBlock <= n && std::memcmp(a.data() + i, b.data() + i, kBlock) == 0) i += kBlock;
+    while (i < n && a[i] == b[i]) i++;
+    return i;
+}
+
+size_t CommonSuffix(std::string_view a, std::string_view b, size_t limit) {
+    const size_t n = std::min(limit, std::min(a.size(), b.size()));
+    constexpr size_t kBlock = 64;
+    size_t i = 0;
+    while (i + kBlock <= n &&
+           std::memcmp(a.data() + a.size() - i - kBlock, b.data() + b.size() - i - kBlock, kBlock) == 0) {
+        i += kBlock;
+    }
+    while (i < n && a[a.size() - 1 - i] == b[b.size() - 1 - i]) i++;
+    return i;
+}
+
+bool Continuation(char c) {
+    return (static_cast<unsigned char>(c) & 0xC0) == 0x80;
+}
+
 } // namespace
 
 MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hooks hooks,
@@ -101,6 +131,7 @@ MainWindow::MainWindow(Platform& platform, const text::FontIndex* fontIndex, Hoo
         [this](ExportFinished finished) { OnExport(std::move(finished)); }, std::move(build));
     // A note the preview embeds changed on disk: build it again.
     worker_->SetOnEmbedsChanged([this] { MarkPreviewDirty(); });
+    worker_->SetOnDocumentChanged([this](DocumentChange change) { OnDocumentChanged(change); });
     preview_ = std::make_unique<PreviewPages>(platform_, fontIndex, [this] {
         if (hooks_.requestFrame) hooks_.requestFrame();
     });
@@ -952,12 +983,14 @@ void MainWindow::NewDocument() {
     // A file still opening is not wanted any more.
     loadId_ = 0;
     loading_ = false;
+    reloadId_ = 0;
     DropPreviewBuild();
     doc_.New();
     editor_.SetText({});
     popup_.Close();
     popup_.SetHeadings({});
     syncedRevision_ = editor_.Revision();
+    WatchDocument();
     stats_ = DocumentStats();
     ResetSourceSync();
     std::string().swap(spareText_);   // sized for the document before
@@ -971,17 +1004,24 @@ void MainWindow::NewDocument() {
 void MainWindow::Open(const std::string& path) {
     DropPreviewBuild();
     loading_ = true;
+    reloadId_ = 0;
     loadId_ = loader_->Load(path);
     SetStatus("Opening " + fs::u8path(path).filename().u8string() + "\xE2\x80\xA6", StatusKind::Info);
     if (hooks_.requestFrame) hooks_.requestFrame();
 }
 
 void MainWindow::OnLoaded(DocumentLoaded loaded) {
+    if (loaded.id == reloadId_) {
+        OnReloaded(std::move(loaded));
+        return;
+    }
     if (loaded.id != loadId_) return;  // a later open or a new document replaced it
     loading_ = false;
     if (!loaded.ok) {
         SetStatus(loaded.status, StatusKind::Error);
-        // The document stays; its preview build was dropped for the open.
+        // The document stays; its preview build was dropped for the open, and a change of its file
+        // told meanwhile was not taken: watched again from the stamp it has.
+        WatchDocument();
         PreviewNow();
         if (hooks_.requestFrame) hooks_.requestFrame();
         return;
@@ -992,6 +1032,7 @@ void MainWindow::OnLoaded(DocumentLoaded loaded) {
     popup_.Close();
     popup_.SetHeadings({});
     syncedRevision_ = editor_.Revision();
+    WatchDocument();
     stats_ = loaded.stats;
     ResetSourceSync();
     std::string().swap(spareText_);   // sized for the document before
@@ -1001,6 +1042,95 @@ void MainWindow::OnLoaded(DocumentLoaded loaded) {
     focusEditor_ = true;
     PreviewNow();
     if (hooks_.requestFrame) hooks_.requestFrame();
+}
+
+void MainWindow::WatchDocument() {
+    worker_->WatchDocument(doc_.filePath, doc_.stamp, ++watchGeneration_);
+}
+
+void MainWindow::OnDocumentChanged(DocumentChange change) {
+    // Told of the file as it was watched before an open, a save or a reload; or a file is opening,
+    // which replaces the document (a failed open watches it again).
+    if (change.generation != watchGeneration_ || doc_.filePath.empty() || loading_) return;
+    const std::string& name = doc_.displayName;
+    switch (change.kind) {
+    case DocumentChange::Kind::Changed:
+        if (doc_.modified) {
+            SetStatus(name + " changed on disk; not reloaded over the unsaved edits", StatusKind::Warning);
+        } else {
+            // A reload still reading is replaced, or its result dropped: this one is newer.
+            reloadId_ = loader_->Load(doc_.filePath);
+            reloads_++;
+        }
+        break;
+    case DocumentChange::Kind::Gone:
+        SetStatus(name + " was deleted or moved on disk; the text here is kept", StatusKind::Warning);
+        break;
+    case DocumentChange::Kind::NotRegular:
+        SetStatus(name + " on disk is no longer a regular file; the text here is kept", StatusKind::Warning);
+        break;
+    }
+    if (hooks_.requestFrame) hooks_.requestFrame();
+}
+
+void MainWindow::OnReloaded(DocumentLoaded loaded) {
+    reloadId_ = 0;
+    if (hooks_.requestFrame) hooks_.requestFrame();
+    if (!loaded.ok || loaded.document.filePath != doc_.filePath) {
+        // Unreadable now (gone again, too large, not UTF-8): the text here stays; the worker tells
+        // the next change.
+        if (!loaded.ok) SetStatus(loaded.status, StatusKind::Warning);
+        return;
+    }
+    if (doc_.modified) {
+        // Edited while it was read.
+        SetStatus(doc_.displayName + " changed on disk; not reloaded over the unsaved edits", StatusKind::Warning);
+        return;
+    }
+    // Only the bytes between the common start and end are replaced, as one undo group (a reload is
+    // no edit of the user's, but Undo then brings back the text before it, as an edit); past the
+    // undo limit the text is set as an open sets it, the history gone. Code points stay whole.
+    const std::string& text = loaded.document.text;
+    const std::string_view old = editor_.Text();
+    const size_t oldSize = old.size();
+    size_t prefix = CommonPrefix(old, text);
+    while (prefix > 0 && ((prefix < old.size() && Continuation(old[prefix])) ||
+                          (prefix < text.size() && Continuation(text[prefix])))) {
+        prefix--;
+    }
+    size_t suffix = CommonSuffix(old, text, std::min(old.size(), text.size()) - prefix);
+    while (suffix > 0 && Continuation(old[old.size() - suffix])) suffix--;
+    const size_t removed = oldSize - prefix - suffix;
+    const size_t inserted = text.size() - prefix - suffix;
+    // The caret and the selection stay on their text: before the change as they were, after it
+    // moved with it, inside it at its start. The view keeps its scroll offset (clamped).
+    const auto keep = [&](size_t pos) {
+        if (pos <= prefix) return pos;
+        if (pos >= oldSize - suffix) return pos - oldSize + text.size();
+        return prefix;
+    };
+    const size_t caret = keep(editor_.Caret());
+    const size_t anchor = keep(editor_.Anchor());
+    const float scroll = editor_.ScrollY();
+    const bool same = removed + inserted == 0;
+    if (removed + inserted > ui::TextEditor::kUndoLimitBytes) {
+        editor_.SetText(text);
+    } else if (!same) {
+        editor_.Replace(prefix, removed, std::string_view(text).substr(prefix, inserted), 0);
+    }
+    if (!same) {
+        editor_.Select(anchor, caret);
+        editor_.ScrollTo(scroll, false, 0);
+        popup_.Close();
+    }
+    doc_ = std::move(loaded.document);
+    syncedRevision_ = editor_.Revision();
+    stats_ = loaded.stats;
+    WatchDocument();
+    // Rewritten with the same text (touched, saved again): nothing to show.
+    if (same) return;
+    SetStatus("Reloaded " + doc_.displayName + ": it changed on disk", StatusKind::Info);
+    MarkPreviewDirty();
 }
 
 void MainWindow::OnImageCopied(ImageCopied copied) {
@@ -1039,6 +1169,9 @@ bool MainWindow::SaveTo(const std::string& path) {
     SetStatus(status, ok ? StatusKind::Info : StatusKind::Error);
     if (ok) {
         Remember(path);
+        // The file as saved is no change to reload; a reload still reading is older than it.
+        reloadId_ = 0;
+        WatchDocument();
         // Relative images now resolve from the new place.
         if (before != doc_.filePath) MarkPreviewDirty();
     }

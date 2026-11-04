@@ -132,12 +132,16 @@ memory, so it is the PDF, not an approximation of it.
   Never a predictable `<path>.tmp` or `RayoMd::File::WriteAll` for them.
 - Threads: the UI thread (platform event loop, UI, presenting); a tile pool of
   `clamp(hardware_concurrency - 1, 1, 4)` threads; one build worker for the engine (it also
-  stats the notes a preview embeds, `EmbedWatch`, on focus-in and every 2 s while focused, and
-  builds the book of an export with linked notes; its previews go through one
+  stats the notes a preview embeds, `EmbedWatch`, on focus-in and every 2 s while focused, and the
+  open document's file, `WatchDocument`, on focus-in and every second focused or not, one stat a
+  look; the stamp is `Document::stamp`, taken by the open before its read and by the save after
+  its rename, so the app's own save is no change; and it builds the book of an export with linked
+  notes; its previews go through one
   `TinyPdf::BuildSession`, which lays out only the top-level blocks an edit changed or moved, the
   same bytes and source map as `BuildPdf`; exports call `BuildPdf`); a preview
   pool of `clamp(hardware_concurrency / 2, 1, 3)` threads; one document loader that opens
-  files, copies dropped images (`CopyImageBeside`) and lists the note names `[[` completes
+  files, reloads the document when its file changed and the buffer is unmodified, copies dropped
+  images (`CopyImageBeside`) and lists the note names `[[` completes
   (`ListNoteNames`, bounded). Workers hand results to the UI thread only
   through `Platform::PostToUi`; the one call between workers is the build worker's
   `PreviewPages::Prefetch` (thread-safe), which starts the renders of a just-parsed preview's

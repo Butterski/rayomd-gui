@@ -1221,4 +1221,83 @@ RGUI_TEST("app.notes.embed_watch") {
     CHECK(watch.Empty());
 }
 
+// The open document's file: every stamp that differs from the last seen is told once, focused or
+// not, within kDocumentCheckMs: a rewrite, a replace by rename (same size and time, another
+// inode), a delete, a directory in its place, the file back; focus-in looks at once; the newest
+// WatchDocument's generation comes with it; an empty path stops the watch.
+RGUI_TEST("app.buildworker.document_watch") {
+    using Kind = rgui::DocumentChange::Kind;
+    const fs::path dir = TempDir("document-watch");
+    const fs::path doc = dir / "doc.md";
+    CHECK(WriteNote(doc, "# Doc\n"));
+    rgui::test::HeadlessPlatform platform;
+    std::vector<rgui::DocumentChange> changes;
+    rgui::BuildWorker worker(platform, nullptr, nullptr);
+    worker.SetOnDocumentChanged([&changes](rgui::DocumentChange change) { changes.push_back(change); });
+    worker.SetFocused(false);
+    constexpr int kPeriod = rgui::BuildWorker::kDocumentCheckMs;
+    // The next change told, within `timeoutMs`.
+    auto expect = [&](Kind kind, uint64_t generation, int timeoutMs = rgui::BuildWorker::kDocumentCheckMs * 3) {
+        CHECK(platform.PumpUntil([&] { return !changes.empty(); }, timeoutMs));
+        if (changes.empty()) return;
+        CHECK(changes[0].kind == kind);
+        CHECK_EQ(changes[0].generation, generation);
+        changes.erase(changes.begin());
+    };
+    // Nothing told for a while: a period and more, so at least one look came after the last change.
+    auto quiet = [&] { return !platform.PumpUntil([&] { return !changes.empty(); }, kPeriod + 300); };
+
+    worker.WatchDocument(Utf8(doc), RayoMd::File::StampOf(doc), 1);
+    CHECK(quiet());
+    // Rewritten in place, the window unfocused: told once.
+    CHECK(RayoMd::File::WriteAll(doc, "# Doc\n\nAn agent's paragraph.\n"));
+    expect(Kind::Changed, 1);
+    CHECK(quiet());
+
+    // Replaced the way agents and editors save: a temporary file renamed over it, of the same size
+    // and modification time; the identity tells.
+    const RayoMd::File::Stamp before = RayoMd::File::StampOf(doc);
+    const fs::path temp = dir / ".doc.md.tmp";
+    CHECK(RayoMd::File::WriteAll(temp, "# Doc\n\nAn agent's sentence.\n\n"));
+    fs::last_write_time(temp, fs::last_write_time(doc));
+    fs::rename(temp, doc);
+    const RayoMd::File::Stamp after = RayoMd::File::StampOf(doc);
+    CHECK_EQ(after.size, before.size);
+    CHECK_EQ(after.modified, before.modified);
+    expect(Kind::Changed, 1);
+
+    // A newer watch: its generation. Deleted: told once; a directory in its place; the file back.
+    worker.WatchDocument(Utf8(doc), RayoMd::File::StampOf(doc), 2);
+    fs::remove(doc);
+    expect(Kind::Gone, 2);
+    CHECK(quiet());
+    fs::create_directory(doc);
+    expect(Kind::NotRegular, 2);
+    fs::remove(doc);
+    expect(Kind::Gone, 2);
+    CHECK(WriteNote(doc, "# Back\n"));
+    expect(Kind::Changed, 2);
+
+    // Gaining the focus looks at once, before the period.
+    worker.WatchDocument(Utf8(doc), RayoMd::File::StampOf(doc), 3);
+    CHECK(RayoMd::File::WriteAll(doc, "# Back again\n"));
+    worker.SetFocused(true);
+    expect(Kind::Changed, 3, kPeriod / 2);
+
+    // No path: no watch.
+    worker.WatchDocument({}, {}, 4);
+    CHECK(RayoMd::File::WriteAll(doc, "# Unwatched\n"));
+    CHECK(quiet());
+
+    // What a periodic check costs: one stat.
+    const RayoMd::File::Path native = RayoMd::File::PathFromUtf8(Utf8(doc));
+    constexpr int kRounds = 10000;
+    uint64_t sizes = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < kRounds; i++) sizes += RayoMd::File::StampOf(native).size;
+    const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+    CHECK(sizes > 0);
+    std::printf("app.buildworker.document_watch: %.2f us a check\n", us / kRounds);
+}
+
 } // namespace

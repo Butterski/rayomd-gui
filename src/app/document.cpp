@@ -70,6 +70,7 @@ void Document::New() {
     displayName = kUntitledName;
     modified = false;
     crlf = false;
+    stamp = RayoMd::File::Stamp();
 }
 
 bool Document::Open(const std::string& path, std::string& status) {
@@ -97,11 +98,14 @@ bool Document::Open(const std::string& path, std::string& status) {
         filePath.clear();
         displayName = file.stem().u8string() + ".md";
         modified = false;
+        stamp = RayoMd::File::Stamp();
         status = "Recovered " + std::to_string(result.info.sourceBytes) + " validated bytes (SHA-256 valid) from " +
                  name + ". Ctrl+S saves the Markdown.";
         return true;
     }
 
+    // Stamped before the read: a write that lands while it reads shows as a change afterwards.
+    const RayoMd::File::Stamp before = RayoMd::File::StampOf(file);
     std::string bytes;
     if (!ReadRegularFile(file, kMaxTextBytes, bytes, nullptr)) {
         status = FileLargerThan(file, kMaxTextBytes) ? "Too large to open (over 128 MiB): " + name
@@ -118,6 +122,7 @@ bool Document::Open(const std::string& path, std::string& status) {
     filePath = path;
     displayName = name;
     modified = false;
+    stamp = before;
     return true;
 }
 
@@ -133,6 +138,8 @@ bool Document::Save(const std::string& path, std::string& status) {
     filePath = path;
     displayName = name;
     modified = false;
+    // After the rename: the file as written is the one not to reload.
+    stamp = RayoMd::File::StampOf(file);
     status = "Saved " + name;
     return true;
 }

@@ -4,17 +4,20 @@
 // Platform::PostToUi. Besides the build, the worker does the request's other O(n) and I/O work
 // the UI thread must not: the text's word and line counts, and reading and parsing the PDF
 // theme file, and, when asked, the document's headings for the editor's `[[` completion. It
-// watches the notes a preview embeds (EmbedWatch) and says when one changed on disk; and it builds
-// the book of a note and the notes it links to for an export with linked notes.
+// watches the notes a preview embeds (EmbedWatch) and the open document's own file
+// (WatchDocument), and says when one changed on disk; and it builds the book of a note and the
+// notes it links to for an export with linked notes.
 #pragma once
 
 #include "app/document.h"
 #include "app/notes.h"
 #include "app/sourcemap.h"
+#include "common/file_io.h"
 #include "pdf/reader.h"
 #include "rayomd/tiny_pdf.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -74,6 +77,17 @@ struct ExportFinished {
     size_t leftOut = 0;
 };
 
+// The open document's file changed on disk (BuildWorker::WatchDocument): told once per change.
+struct DocumentChange {
+    enum class Kind : uint8_t {
+        Changed,     // a regular file with another stamp: rewritten, or replaced (a rename over it)
+        Gone,        // nothing there (deleted, or renamed away)
+        NotRegular,  // a directory, FIFO, device or socket there now
+    };
+    uint64_t generation = 0;  // the WatchDocument call's
+    Kind kind = Kind::Changed;
+};
+
 // What a build error means, as the status line says it after `Export failed: `.
 const char* BuildErrorText(TinyPdf::BuildError error);
 // `<n> ms`, with one decimal below 10 ms.
@@ -85,6 +99,11 @@ public:
     using ExportCallback = std::function<void(ExportFinished)>;
     // How often the embedded notes are checked while the window has the focus.
     static constexpr int kEmbedCheckMs = 2000;
+    // How often the open document's file is checked, focused or not (an agent or another editor
+    // rewrites it while the user reads the preview, often with the focus in that other window):
+    // a change shows within a second. A check is one stat (RayoMd::File::StampOf; 4.4 µs in
+    // app.buildworker.document_watch on a container's bind mount) and one wake of the worker.
+    static constexpr int kDocumentCheckMs = 1000;
     // TinyPdf::BuildPdf's signature; tests substitute their own (which should honour
     // PdfOptions::cancel as the engine does).
     using BuildFunction =
@@ -133,11 +152,22 @@ public:
     using PrefetchFunction =
         std::function<std::vector<pdf::PdfPageKey>(const std::shared_ptr<const pdf::PdfFile>&, int generation)>;
     void SetPrefetch(PrefetchFunction prefetch);
-    // The window's focus. Gaining it checks the embedded notes at once; while it lasts they are
-    // checked every kEmbedCheckMs (a stat each), on the worker's thread.
+    // The window's focus. Gaining it checks the embedded notes and the document's file at once;
+    // while it lasts the notes are checked every kEmbedCheckMs (a stat each), on the worker's
+    // thread.
     void SetFocused(bool focused);
     // Checks the embedded notes now (on the worker's thread).
     void CheckEmbeds();
+
+    // `onChanged` runs on the UI thread when the watched document's file changed on disk; set it
+    // before the first WatchDocument.
+    void SetOnDocumentChanged(std::function<void(DocumentChange)> onChanged);
+    // Watches the file at `path` (UTF-8), whose stamp the document has now (Document::stamp): it is
+    // stat'ed on focus-in and every kDocumentCheckMs, on the worker's thread, and each stamp that
+    // differs from the last one seen is told once (DocumentChange, carrying `generation`). An
+    // empty `path` stops the watch. Replaces the watch before it: a change it saw and not yet told
+    // the UI thread carries the old generation.
+    void WatchDocument(const std::string& path, const RayoMd::File::Stamp& stamp, uint64_t generation);
 
 private:
     struct Job {
@@ -157,6 +187,13 @@ private:
         PreviewCallback onPreview;
         ExportCallback onExport;
         std::function<void()> onEmbedsChanged;
+        std::function<void(DocumentChange)> onDocumentChanged;
+    };
+    // The open document's file (WatchDocument).
+    struct WatchedDocument {
+        RayoMd::File::Path path;   // native; empty: no watch
+        RayoMd::File::Stamp stamp; // the last one seen
+        uint64_t generation = 0;
     };
     // The theme file last read (worker thread only).
     struct ThemeCache {
@@ -175,6 +212,8 @@ private:
     std::string ApplyTheme(Job& job);
     // Stats the watched notes; tells the UI thread when one changed.
     void CheckWatched();
+    // Stats the open document's file; tells the UI thread when it changed.
+    void CheckDocument();
 
     Platform& platform_;
     // The engine's own builds (no BuildFunction given): previews through a session, which lays out
@@ -197,6 +236,12 @@ private:
     std::atomic<bool> cancel_{false};
     bool focused_ = true;         // guarded by mutex_
     bool checkEmbeds_ = false;    // guarded by mutex_: CheckEmbeds asked
+    bool checkDocument_ = false;  // guarded by mutex_: focus-in asked
+    std::optional<WatchedDocument> nextDocument_;   // guarded by mutex_: WatchDocument's, not taken yet
+    bool documentWatched_ = false;  // guarded by mutex_: the last WatchDocument had a path
+    WatchedDocument document_;    // worker thread only
+    // When the next periodic check is due (worker thread only).
+    std::chrono::steady_clock::time_point embedsDue_, documentDue_;
     ThemeCache themeCache_;
     EmbedWatch embeds_;           // worker thread only: the last preview's embedded notes
     bool embedsReported_ = false; // worker thread only: their change was told

@@ -38,6 +38,14 @@
 // worker's thread) the preview is built again. An export with linked notes is the book of the note
 // and the notes it links to (the worker); the preview stays the note.
 //
+// The document's own file (an agent or another editor rewrites it): the worker stamps it when it
+// is opened, saved or reloaded (Document::stamp) and stats it on focus-in and every
+// BuildWorker::kDocumentCheckMs, focused or not. A change of an unmodified document reloads it on
+// the loader's thread and goes into the editor as one undo group (Undo brings back the text before
+// it, as an edit), the caret kept on its text, the scroll kept; the preview is built again. An
+// edited document is never replaced: the status says the file changed on disk, as it says that the
+// file is gone or no longer a regular file, once per change. The app's own save is no change.
+//
 // Source sync (the preview's SourceMap): a press in the editor shows its line in the preview,
 // marked for a moment; a double click on a page puts the editor's caret on the line it shows;
 // with `ui.syncScroll` the pane the user moved last (the leader) scrolls the other to the same
@@ -150,6 +158,8 @@ public:
     bool PreviewSettled() const { return settled_; }
     // A file is being opened.
     bool Loading() const { return loading_; }
+    // Reloads started: the document's file changed on disk while it was unmodified.
+    uint64_t Reloads() const { return reloads_; }
     // A preview build is in flight.
     bool PreviewBuilding() const { return previewInFlight_; }
     bool UnsavedPromptOpen() const { return prompt_.open; }
@@ -258,6 +268,9 @@ private:
     void MaybeStartPreview();
     // The document is about to change: the preview build in flight is no longer wanted.
     void DropPreviewBuild();
+    // Has the worker watch the document's file as it is now (doc_.stamp), under a new generation:
+    // a change told for an older one is dropped.
+    void WatchDocument();
     // Copies the editor's text into doc_.text when it changed.
     void SyncText();
     void Remember(const std::string& path);
@@ -272,6 +285,9 @@ private:
     void OnLoaded(DocumentLoaded loaded);
     void OnNotesListed(NotesListed listed);
     void OnImageCopied(ImageCopied copied);
+    void OnDocumentChanged(DocumentChange change);
+    // A reload's result (reloadId_): into the editor when the document is still unmodified.
+    void OnReloaded(DocumentLoaded loaded);
 
     // The page at the top of the preview and how far into it the view is, by the last frame.
     std::optional<Anchor> ViewAnchor() const;
@@ -329,6 +345,9 @@ private:
     bool inFrame_ = false;
     bool loading_ = false;
     uint64_t loadId_ = 0;           // the open whose result is wanted
+    uint64_t reloadId_ = 0;         // the reload whose result is wanted
+    uint64_t reloads_ = 0;
+    uint64_t watchGeneration_ = 0;  // the worker's WatchDocument generation
     int requestedGeneration_ = 0;
     int shownGeneration_ = 0;
     double shownBuildMs_ = 0;

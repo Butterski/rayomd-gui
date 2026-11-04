@@ -219,6 +219,12 @@ Every action that would lose unsaved text asks first. Files dropped on the windo
 `images` folder (save a new document first). A reversible RayoMD PDF, exported with its Markdown
 source embedded, opens as that source, checked byte for byte.
 
+The open file is followed on disk, so an agent or another editor can write it while you watch
+the preview: within a second of a change (a rewrite, or a new file renamed over it), focused or
+not, a document without unsaved edits reloads, the caret on its text and the preview built again;
+`Ctrl+Z` brings back the text before the reload. A document with unsaved edits is never replaced:
+the status line says the file changed on disk, as it says when the file is deleted.
+
 ### Export options
 
 The engine's export options, in the panel on the right (`Ctrl+,`):

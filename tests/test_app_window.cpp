@@ -1448,4 +1448,109 @@ RGUI_TEST("app.image_drop_document_changed") {
     engine.hold = false;
 }
 
+// An agent rewrites the open document. Unmodified, it reloads (also while the window is unfocused,
+// also after a replace by rename): one undo group, the caret on its text, the preview built again.
+// The app's own save is no change. An edited document is never replaced, and the status says so
+// once per change; a deleted file, or a directory in its place, is told once and reloads nothing.
+RGUI_TEST("app.document_reload") {
+    Harness h("document_reload");
+    h.Start("ui.theme=tokyo-night\n");
+    rgui::MainWindow& w = h.Window();
+    const fs::path md = h.dir / "agent.md";
+    const std::string first = "# Title\n\nFirst paragraph.\n\nLast line.\n";
+    RayoMd::File::WriteAll(md, first);
+    w.Open(md.u8string());
+    CHECK(h.WaitLoaded());
+    CHECK(h.Settle());
+    const int period = rgui::BuildWorker::kDocumentCheckMs;
+    const auto text = [&] { return std::string(w.Editor().Text()); };
+    // The way agents save: a temporary file renamed over the document.
+    const auto replace = [&](const std::string& content) {
+        const fs::path temp = h.dir / ".agent.md.tmp";
+        CHECK(RayoMd::File::WriteAll(temp, content));
+        fs::rename(temp, md);
+    };
+    // Nothing reloaded and no status about the file for a period and more (a look came after).
+    const auto quiet = [&] {
+        const uint64_t reloads = w.Reloads();
+        h.RunUntil([&] { return w.ShownStatus().find("on disk") != std::string::npos; }, period + 300);
+        return w.Reloads() == reloads && w.ShownStatus().find("on disk") == std::string::npos;
+    };
+
+    // Unfocused, the caret on "Last": the agent rewrites the first paragraph.
+    InputEvent focus;
+    focus.type = InputEvent::Type::FocusOut;
+    h.app->OnInput(focus);
+    h.Frame();
+    const size_t last = first.find("Last");
+    w.Editor().Select(last, last);
+    const int built = w.RequestedGeneration();
+    const std::string second = "# Title\n\nFirst paragraph, rewritten by an agent.\n\nLast line.\n";
+    replace(second);
+    CHECK(h.RunUntil([&] { return text() == second; }, period * 5));
+    CHECK_EQ(w.ShownStatus(), std::string("Reloaded agent.md: it changed on disk"));
+    CHECK(!w.Doc().modified);
+    CHECK_EQ(w.Editor().Caret(), last + second.size() - first.size());
+    CHECK_EQ(w.Editor().UndoGroups(), size_t(1));
+    CHECK(h.Settle());
+    CHECK(w.ShownGeneration() > built);
+    h.Frame();
+    CHECK_EQ(h.platform.title, std::string("agent.md - RayoMD"));
+
+    // Undo brings back the text before the reload, as an edit; the app's own save of it is no
+    // change on disk.
+    focus.type = InputEvent::Type::FocusIn;
+    h.app->OnInput(focus);
+    CHECK(w.Editor().Undo());
+    CHECK_EQ(text(), first);
+    CHECK(w.Doc().modified);
+    h.KeyDown(Key::S, rgui::kModCtrl);
+    CHECK_EQ(ReadFile(md), first);
+    CHECK(!w.Doc().modified);
+    CHECK(quiet());
+    CHECK_EQ(text(), first);
+
+    // Edited here: the file on disk changes, the edits stay, the status says so once per change.
+    w.Editor().Select(0, 0);
+    h.Type("x");
+    CHECK(w.Doc().modified);
+    CHECK(h.Settle());
+    RayoMd::File::WriteAll(md, "# Agent\n");
+    CHECK(h.RunUntil([&] { return w.ShownStatus().find("on disk") != std::string::npos; }, period * 5));
+    StatusKind kind = StatusKind::Info;
+    CHECK_EQ(w.ShownStatus(&kind), std::string("agent.md changed on disk; not reloaded over the unsaved edits"));
+    CHECK(kind == StatusKind::Warning);
+    CHECK_EQ(text(), "x" + first);
+    CHECK(w.Doc().modified);
+    CHECK_EQ(ReadFile(md), std::string("# Agent\n"));
+    w.SetStatus({}, StatusKind::Info);
+    CHECK(quiet());
+    replace("# Agent, twice\n");
+    CHECK(h.RunUntil([&] { return w.ShownStatus().find("on disk") != std::string::npos; }, period * 5));
+    CHECK_EQ(text(), "x" + first);
+
+    // Saved, then deleted: told once, the text kept; a directory in its place likewise.
+    h.KeyDown(Key::S, rgui::kModCtrl);
+    CHECK_EQ(ReadFile(md), "x" + first);
+    CHECK(quiet());
+    const uint64_t reloads = w.Reloads();
+    fs::remove(md);
+    CHECK(h.RunUntil([&] { return w.ShownStatus().find("on disk") != std::string::npos; }, period * 5));
+    CHECK_EQ(w.ShownStatus(), std::string("agent.md was deleted or moved on disk; the text here is kept"));
+    w.SetStatus({}, StatusKind::Info);
+    CHECK(quiet());
+    fs::create_directory(md);
+    CHECK(h.RunUntil([&] { return w.ShownStatus().find("on disk") != std::string::npos; }, period * 5));
+    CHECK_EQ(w.ShownStatus(), std::string("agent.md on disk is no longer a regular file; the text here is kept"));
+    CHECK_EQ(w.Reloads(), reloads);
+    CHECK_EQ(text(), "x" + first);
+    CHECK(!w.Doc().modified);
+
+    // The file back: it reloads.
+    fs::remove(md);
+    RayoMd::File::WriteAll(md, "# Back\n");
+    CHECK(h.RunUntil([&] { return text() == "# Back\n"; }, period * 5));
+    CHECK(!w.Doc().modified);
+}
+
 } // namespace

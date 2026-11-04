@@ -9,9 +9,11 @@
 #include "pdf/reader.h"
 #include "ui/markdownedit.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -161,6 +163,27 @@ void BuildWorker::SetOnEmbedsChanged(std::function<void()> onChanged) {
     callbacks_->onEmbedsChanged = std::move(onChanged);
 }
 
+void BuildWorker::SetOnDocumentChanged(std::function<void(DocumentChange)> onChanged) {
+    callbacks_->onDocumentChanged = std::move(onChanged);
+}
+
+void BuildWorker::WatchDocument(const std::string& path, const RayoMd::File::Stamp& stamp, uint64_t generation) {
+    WatchedDocument watched;
+    if (!path.empty()) watched.path = RayoMd::File::PathFromUtf8(path);
+    watched.stamp = stamp;
+    watched.generation = generation;
+    bool wake = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A watch already running takes the new one at its next look (within kDocumentCheckMs);
+        // only a worker asleep without one is woken, not the worker once more per open and save.
+        wake = !documentWatched_ && !path.empty();
+        documentWatched_ = !path.empty();
+        nextDocument_ = std::move(watched);
+    }
+    if (wake) wake_.notify_one();
+}
+
 void BuildWorker::SetPrefetch(PrefetchFunction prefetch) {
     prefetch_ = std::move(prefetch);
 }
@@ -171,6 +194,7 @@ void BuildWorker::SetFocused(bool focused) {
         if (focused == focused_) return;
         focused_ = focused;
         checkEmbeds_ = checkEmbeds_ || focused;
+        checkDocument_ = checkDocument_ || focused;
     }
     wake_.notify_one();
 }
@@ -191,6 +215,26 @@ void BuildWorker::CheckWatched() {
     });
 }
 
+void BuildWorker::CheckDocument() {
+    if (document_.path.empty()) return;
+    const RayoMd::File::Stamp now = RayoMd::File::StampOf(document_.path);
+    if (now == document_.stamp) return;
+    document_.stamp = now;
+    DocumentChange change;
+    change.generation = document_.generation;
+    if (now == RayoMd::File::Stamp()) {
+        change.kind = DocumentChange::Kind::Gone;
+    } else {
+        // A second stat, once per change only.
+        std::error_code error;
+        change.kind = fs::is_regular_file(fs::path(document_.path), error) ? DocumentChange::Kind::Changed
+                                                                           : DocumentChange::Kind::NotRegular;
+    }
+    platform_.PostToUi([callbacks = callbacks_, change] {
+        if (callbacks->alive && callbacks->onDocumentChanged) callbacks->onDocumentChanged(change);
+    });
+}
+
 void BuildWorker::Run() {
     for (;;) {
         Job job;
@@ -199,19 +243,41 @@ void BuildWorker::Run() {
             std::unique_lock<std::mutex> lock(mutex_);
             for (;;) {
                 if (stop_ || !exports_.empty() || preview_.has_value()) break;
+                if (nextDocument_) {
+                    // The look stays due when it was: a stamp just taken costs one stat more.
+                    document_ = std::move(*nextDocument_);
+                    nextDocument_.reset();
+                }
+                // Embedded notes to watch, unchanged so far, in a focused window: a look every
+                // kEmbedCheckMs. The open document's file: a look every kDocumentCheckMs, focused
+                // or not. Otherwise the worker sleeps until asked.
+                const bool watchEmbeds = focused_ && !embeds_.Empty() && !embedsReported_;
+                const bool watchDocument = !document_.path.empty();
+                const auto now = std::chrono::steady_clock::now();
+                if (watchEmbeds && now >= embedsDue_) checkEmbeds_ = true;
+                if (watchDocument && now >= documentDue_) checkDocument_ = true;
                 if (checkEmbeds_) {
                     checkEmbeds_ = false;
+                    embedsDue_ = now + std::chrono::milliseconds(kEmbedCheckMs);
                     lock.unlock();
                     CheckWatched();
                     lock.lock();
                     continue;
                 }
-                // Embedded notes to watch, unchanged so far, in a focused window: a look every
-                // kEmbedCheckMs. Otherwise the worker sleeps until asked.
-                if (focused_ && !embeds_.Empty() && !embedsReported_) {
-                    if (wake_.wait_for(lock, std::chrono::milliseconds(kEmbedCheckMs)) == std::cv_status::timeout) {
-                        checkEmbeds_ = true;
-                    }
+                if (checkDocument_) {
+                    checkDocument_ = false;
+                    documentDue_ = now + std::chrono::milliseconds(kDocumentCheckMs);
+                    lock.unlock();
+                    CheckDocument();
+                    lock.lock();
+                    continue;
+                }
+                if (watchEmbeds && watchDocument) {
+                    wake_.wait_until(lock, std::min(embedsDue_, documentDue_));
+                } else if (watchEmbeds) {
+                    wake_.wait_until(lock, embedsDue_);
+                } else if (watchDocument) {
+                    wake_.wait_until(lock, documentDue_);
                 } else {
                     wake_.wait(lock);
                 }
@@ -275,6 +341,8 @@ void BuildWorker::RunPreview(Job& job) {
         embeds_.Update(job.utf8, job.options);
     }
     embedsReported_ = false;
+    // Their next look comes a period after these stamps.
+    embedsDue_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(kEmbedCheckMs);
     // Into the storage of an earlier preview's PDF that is gone, when one is kept.
     std::string bytes = pdf::RecycledBytes();
     // Where each top-level block is laid out, for the source sync; fake builds leave it empty.
