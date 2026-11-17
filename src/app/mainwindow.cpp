@@ -28,6 +28,9 @@ constexpr double kFlashMs = 1200;   // how long the jump marker shows
 constexpr const char* kEmbedTooltip =
     "Embeds the complete Markdown source, including comments, front matter and anything not visible on "
     "the pages; anyone with the PDF can read it.";
+constexpr const char* kPageNumbersTooltip =
+    "The page number at the foot of every page. A PDF theme with footer-center = {page} / {pages} "
+    "shows \"3 / 12\" instead.";
 
 const ui::Rgba kWhite{255, 255, 255, 255};
 
@@ -587,7 +590,11 @@ void MainWindow::OptionsContent(ui::Context& ctx, RectF column, float& height) {
     }
     ctx.EndDisabled();
     changed |= ui::Dropdown(ctx, "##pageBreakBefore", export_.pageBreakBefore, breaks, labeled("Page breaks"));
-    check("Page numbers", export_.pageNumbers);
+    {
+        const RectF r = row();
+        changed |= ui::Checkbox(ctx, "Page numbers", export_.pageNumbers, r);
+        ui::Tooltip(ctx, ctx.MakeId("Page numbers"), r, kPageNumbersTooltip);
+    }
     check("Highlight code", export_.highlightCode);
     check("Mermaid diagrams", export_.diagrams);
 
